@@ -16,12 +16,17 @@ const {
   CUSTOMER_SESSION_COOKIE,
 } = require("../utils/customerSession");
 const { csrfProtection, createCsrfToken, CSRF_COOKIE_NAME, isValidCsrfToken } = require("../middleware/csrf");
-const { createRateLimiter } = require("../middleware/requestGuards");
+const { createRateLimiter, getClientIp } = require("../middleware/requestGuards");
 const { hashToken } = require("../utils/tokens");
 const authRoute = require("../routes/auth");
+const productController = require("../controllers/productController");
+const emailUtils = require("../utils/email");
+const dailyBatchScheduler = require("../services/dailyBatchScheduler");
 const { _private: amazonReportPrivate } = require("../controllers/adminAmazonReportController");
 const { checkAffiliateProductLink } = require("../services/affiliateLinkChecker");
 const authPrivate = authRoute._private;
+const productPrivate = productController._private;
+const emailPrivate = emailUtils._private;
 
 test("pending payment schema supports processing lifecycle and ttl cleanup", () => {
   const statusPath = PendingPayment.schema.path("status");
@@ -283,6 +288,97 @@ test("production rate limiter fails closed when Redis is not configured", async 
   else delete process.env.NODE_ENV;
   if (originalRedisUrl) process.env.REDIS_URL = originalRedisUrl;
   else delete process.env.REDIS_URL;
+});
+
+test("product all=true view stays admin-only and public-safe", async () => {
+  const publicFilterResult = await productPrivate.buildProductFilter({
+    query: { all: "true" },
+    user: null,
+  });
+  const publicFilterText = JSON.stringify(publicFilterResult.filter);
+  assert.match(publicFilterText, /"status":"active"/);
+  assert.match(publicFilterText, /affiliate_compliance_status/);
+
+  const adminFilterResult = await productPrivate.buildProductFilter({
+    query: { all: "true" },
+    user: { role: "admin" },
+  });
+  assert.deepEqual(adminFilterResult.filter, {});
+});
+
+test("public product serialization strips affiliate internals and imported Amazon observations", () => {
+  const flat = productPrivate.toFlat({
+    _id: { toString: () => "product-id" },
+    is_affiliate: true,
+    affiliate_data_source: "manual",
+    affiliate_tag: "pinkpaisa-21",
+    affiliate_payload: { raw: true },
+    cost_price: 100,
+    price: 999,
+    sale_price: 799,
+    mrp: 1299,
+    stock_quantity: 8,
+    attributes: {
+      imported_price_observed: "Rs. 999",
+      imported_sale_price_observed: "Rs. 799",
+      imported_rating_observed: "4.5 out of 5",
+      affiliate_rating_text: "4.5",
+      safe_detail: "Keep me",
+    },
+  }, { publicView: true });
+
+  assert.equal(flat.cost_price, undefined);
+  assert.equal(flat.affiliate_tag, undefined);
+  assert.equal(flat.affiliate_payload, undefined);
+  assert.equal(flat.price, 0);
+  assert.equal(flat.sale_price, null);
+  assert.equal(flat.mrp, null);
+  assert.equal(flat.stock_quantity, 0);
+  assert.deepEqual(flat.attributes, { safe_detail: "Keep me" });
+});
+
+test("client ip helper does not trust raw X-Forwarded-For headers directly", () => {
+  assert.equal(
+    getClientIp({
+      ip: "203.0.113.10",
+      headers: { "x-forwarded-for": "198.51.100.99" },
+      socket: { remoteAddress: "127.0.0.1" },
+    }),
+    "203.0.113.10",
+  );
+});
+
+test("email log metadata redacts reset and verification URLs", () => {
+  assert.deepEqual(emailPrivate.redactEmailMeta({
+    resetUrl: "https://www.pinkpaisa.in/admin/reset-password?token=secret",
+    verificationToken: "secret",
+    flow: "admin-reset",
+  }), {
+    resetUrl: "[redacted]",
+    verificationToken: "[redacted]",
+    flow: "admin-reset",
+  });
+});
+
+test("affiliate link sweep scheduler runs only at the configured IST minute", () => {
+  const originalEnabled = process.env.AFFILIATE_LINK_CHECK_DAILY_ENABLED;
+  const originalHour = process.env.AFFILIATE_LINK_CHECK_HOUR_IST;
+  const originalMinute = process.env.AFFILIATE_LINK_CHECK_MINUTE_IST;
+  process.env.AFFILIATE_LINK_CHECK_DAILY_ENABLED = "true";
+  process.env.AFFILIATE_LINK_CHECK_HOUR_IST = "03";
+  process.env.AFFILIATE_LINK_CHECK_MINUTE_IST = "10";
+
+  try {
+    assert.equal(dailyBatchScheduler.shouldRunAffiliateLinkSweep(new Date("2026-01-01T21:40:00.000Z")), true);
+    assert.equal(dailyBatchScheduler.shouldRunAffiliateLinkSweep(new Date("2026-01-01T21:41:00.000Z")), false);
+  } finally {
+    if (originalEnabled) process.env.AFFILIATE_LINK_CHECK_DAILY_ENABLED = originalEnabled;
+    else delete process.env.AFFILIATE_LINK_CHECK_DAILY_ENABLED;
+    if (originalHour) process.env.AFFILIATE_LINK_CHECK_HOUR_IST = originalHour;
+    else delete process.env.AFFILIATE_LINK_CHECK_HOUR_IST;
+    if (originalMinute) process.env.AFFILIATE_LINK_CHECK_MINUTE_IST = originalMinute;
+    else delete process.env.AFFILIATE_LINK_CHECK_MINUTE_IST;
+  }
 });
 
 test("amazon report CSV parser handles quoted rows", () => {

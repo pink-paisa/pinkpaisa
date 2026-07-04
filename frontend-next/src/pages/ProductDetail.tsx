@@ -17,7 +17,6 @@ import {
 import Footer from "@/components/Footer";
 import Navbar from "@/components/Navbar";
 import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
-import { AffiliateDisclosure } from "@/components/affiliate/AffiliateDisclosure";
 import { useCart } from "@/contexts/CartContext";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -237,9 +236,14 @@ const ProductDetail = ({
               )}
 
               <div className="absolute left-4 top-4 flex flex-col gap-2">
-                {product.bestseller ? (
+                {product.bestseller && !isAffiliate ? (
                   <span className="flex items-center gap-1 rounded-full bg-primary px-3 py-1 text-xs font-bold text-primary-foreground">
                     <Star className="h-3 w-3" /> Bestseller
+                  </span>
+                ) : null}
+                {isAffiliate && product.is_featured_affiliate ? (
+                  <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">
+                    Featured pick
                   </span>
                 ) : null}
                 {discount > 0 ? (
@@ -331,10 +335,7 @@ const ProductDetail = ({
                   availability, shipping, ratings, and reviews before buying.
                 </p>
                 <div className="mt-4">
-                  <AffiliateCta product={product} label="Check price on Amazon" size="lg" className="rounded-xl" />
-                </div>
-                <div className="mt-4 rounded-xl bg-background/70 p-3">
-                  <AffiliateDisclosure compact />
+                  <AffiliateCta product={product} size="lg" className="rounded-xl" />
                 </div>
               </div>
             ) : (

@@ -116,12 +116,15 @@ const ProductCard = ({
             </div>
           )}
           <div className="absolute left-3 top-3 flex flex-col gap-1.5">
-            {product.bestseller ? (
+            {product.bestseller && !isAffiliate ? (
               <span className="flex items-center gap-1 rounded-full bg-primary px-2.5 py-1 text-[10px] font-bold text-primary-foreground">
                 <Star className="h-3 w-3" /> Bestseller
               </span>
             ) : null}
-            {product.featured && !product.bestseller ? (
+            {isAffiliate && product.is_featured_affiliate ? (
+              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Featured pick</span>
+            ) : null}
+            {product.featured && !product.bestseller && !isAffiliate ? (
               <span className="rounded-full bg-accent px-2.5 py-1 text-[10px] font-bold text-accent-foreground">Featured</span>
             ) : null}
             {!isAffiliate && product.sale_price ? (
@@ -170,7 +173,7 @@ const ProductCard = ({
           )}
 
           {isAffiliate ? (
-            <AffiliateCta product={product} size="sm" variant="secondary" label="View on Amazon" className="rounded-xl" />
+            <AffiliateCta product={product} size="sm" variant="secondary" className="rounded-xl" />
           ) : (
             <Button
               size="sm"

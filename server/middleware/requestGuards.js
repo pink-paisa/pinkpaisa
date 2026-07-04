@@ -81,11 +81,7 @@ function securityHeaders(req, res, next) {
 }
 
 function getClientIp(req) {
-  const forwardedFor = String(req.headers["x-forwarded-for"] || "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean)[0];
-  return forwardedFor || req.ip || req.socket?.remoteAddress || "unknown";
+  return req.ip || req.socket?.remoteAddress || "unknown";
 }
 
 function createMemoryRateLimiter({ windowMs = DEFAULT_WINDOW_MS, max = 30, keyPrefix = "global", message = "Too many requests, please try again later." } = {}) {

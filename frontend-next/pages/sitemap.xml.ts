@@ -8,6 +8,10 @@ import { getSiteUrl, serverFetch } from "@/lib/server-api";
 const STATIC_PATHS = [
   "",
   "/products",
+  "/instagram",
+  "/instagram/picks",
+  "/instagram/trending",
+  "/affiliate-disclosure",
   "/blogs",
   "/workshops",
   "/pink-pages",
@@ -64,7 +68,7 @@ export const getServerSideProps: GetServerSideProps = async ({ res }) => {
     ...calculatorPaths.map((path) => ({ loc: `${siteUrl}${path}` })),
     ...((products?.items ?? []).map((product) => ({
       loc: `${siteUrl}/product/${product.slug}`,
-      lastmod: toIsoDate(product.createdAt || product.created_at),
+      lastmod: toIsoDate(product.updatedAt || product.updated_at || product.createdAt || product.created_at),
     })) as SitemapItem[]),
     ...(blogs.map((blog) => ({
       loc: `${siteUrl}/blogs/${blog.slug}`,

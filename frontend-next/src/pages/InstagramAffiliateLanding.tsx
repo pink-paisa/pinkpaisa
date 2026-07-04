@@ -73,7 +73,7 @@ export default function InstagramAffiliateLanding({
                   <p className="mt-2 line-clamp-3 text-sm leading-6 text-muted-foreground">{product.short_description}</p>
                 ) : null}
                 <div className="mt-auto pt-4">
-                  <AffiliateCta product={product} label="View on Amazon" variant="product" className="w-full rounded-xl" />
+                  <AffiliateCta product={product} variant="product" className="w-full rounded-xl" />
                 </div>
               </article>
             ))}

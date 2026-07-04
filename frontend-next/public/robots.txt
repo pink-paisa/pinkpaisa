@@ -12,5 +12,11 @@ Allow: /
 
 User-agent: *
 Allow: /
+Disallow: /admin
+Disallow: /account
+Disallow: /cart
+Disallow: /checkout
+Disallow: /vendor
+Disallow: /phonepe-return
 
 Sitemap: https://www.pinkpaisa.in/sitemap.xml

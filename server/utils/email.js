@@ -15,6 +15,10 @@ function getEmailProvider() {
   return String(process.env.EMAIL_PROVIDER || "log").trim().toLowerCase() || "log";
 }
 
+function isProduction() {
+  return process.env.NODE_ENV === "production";
+}
+
 function parseBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
@@ -44,6 +48,19 @@ function getSmtpConfig() {
   };
 }
 
+function assertEmailConfigForProduction() {
+  if (!isProduction()) return;
+  const provider = getEmailProvider();
+  if (provider !== "smtp") {
+    throw new Error("EMAIL_PROVIDER=smtp is required in production");
+  }
+
+  const config = getSmtpConfig();
+  if (!config.auth?.user || !config.auth?.pass) {
+    throw new Error("SMTP_USER and SMTP_PASSWORD are required in production");
+  }
+}
+
 function getSmtpTransporter() {
   if (smtpTransporter) return smtpTransporter;
   const nodemailer = require("nodemailer");
@@ -59,7 +76,21 @@ function getEmailReplyTo() {
   return String(process.env.EMAIL_REPLY_TO || process.env.SUPPORT_EMAIL || "").trim() || undefined;
 }
 
+function redactEmailMeta(meta = {}) {
+  return Object.fromEntries(
+    Object.entries(meta || {}).map(([key, value]) => {
+      const normalizedKey = String(key || "").toLowerCase();
+      if (normalizedKey.includes("token") || normalizedKey.includes("url")) {
+        return [key, "[redacted]"];
+      }
+      return [key, value];
+    }),
+  );
+}
+
 async function sendEmail({ to, subject, text, html, meta = {} }) {
+  const safeMeta = redactEmailMeta(meta);
+
   if (getEmailProvider() === "smtp") {
     try {
       const info = await getSmtpTransporter().sendMail({
@@ -78,7 +109,7 @@ async function sendEmail({ to, subject, text, html, meta = {} }) {
           messageId: info.messageId,
           accepted: info.accepted,
           rejected: info.rejected,
-          meta,
+          meta: safeMeta,
         },
         "Email sent via SMTP transport",
       );
@@ -90,7 +121,7 @@ async function sendEmail({ to, subject, text, html, meta = {} }) {
           to,
           subject,
           provider: "smtp",
-          meta,
+          meta: safeMeta,
         },
         "SMTP email delivery failed",
       );
@@ -103,9 +134,8 @@ async function sendEmail({ to, subject, text, html, meta = {} }) {
       to,
       subject,
       provider: getEmailProvider(),
-      meta,
-      preview_text: text,
-      preview_html: html,
+      meta: safeMeta,
+      preview_available: Boolean(text || html),
     },
     "Email queued via fallback logger transport",
   );
@@ -304,6 +334,7 @@ async function sendQuoteRequestReceivedEmails({ quoteRequest }) {
 }
 
 module.exports = {
+  assertEmailConfigForProduction,
   getPublicAppUrl,
   sendAdminPasswordResetEmail,
   sendOrderConfirmationEmail,
@@ -313,4 +344,7 @@ module.exports = {
   sendVendorPasswordResetEmail,
   sendVendorVerificationEmail,
   sendWorkshopBookingConfirmationEmail,
+  _private: {
+    redactEmailMeta,
+  },
 };

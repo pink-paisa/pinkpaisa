@@ -14,11 +14,13 @@ On the Lightsail Ubuntu instance:
 
 ```bash
 sudo apt update
-sudo apt install -y nginx unzip
+sudo apt install -y nginx unzip redis-server
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 sudo npm install -g pm2
 ```
+
+Install MongoDB and MongoDB Database Tools using the official MongoDB instructions for your Ubuntu release. The app requires MongoDB for application data and `mongodump`/`mongorestore` for the backup scripts.
 
 Verify:
 
@@ -27,6 +29,8 @@ node -v
 npm -v
 pm2 -v
 nginx -v
+redis-cli ping
+mongodump --version
 ```
 
 ## 2. Copy project to the server
@@ -67,11 +71,12 @@ That keeps frontend and backend on the same domain through Nginx.
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-npm install
+npm ci --omit=dev
 
 cd /home/ubuntu/pinkpaisa/frontend-next
-npm install
+npm ci
 npm run build
+npm prune --omit=dev
 ```
 
 ## 6. Start backend with PM2
@@ -148,3 +153,27 @@ Check public media:
 - `https://your-domain.com/uploads/generated/campaigns/...jpg`
 
 If the image opens publicly over HTTPS, Instagram publishing can fetch it.
+
+## 11. Backups
+
+At minimum, enable automatic Lightsail instance snapshots.
+
+For app-level backups, set these env values in `/home/ubuntu/pinkpaisa/server/.env`:
+
+```env
+BACKUP_DIR=/home/ubuntu/pinkpaisa-backups
+BACKUP_RETENTION_DAYS=14
+BACKUP_SCRIPT_PATH=/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh
+```
+
+Then run:
+
+```bash
+cd /home/ubuntu/pinkpaisa/server
+set -a
+. ./.env
+set +a
+bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh
+```
+
+See `deploy/lightsail/BACKUPS.md` for cron and restore commands.

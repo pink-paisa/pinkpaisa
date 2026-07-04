@@ -16,6 +16,7 @@ node_modules/
 frontend/dist/
 frontend-next/.next/
 frontend-next/out/
+frontend-next/tsconfig.tsbuildinfo
 dist/
 .turbo/
 .cache/

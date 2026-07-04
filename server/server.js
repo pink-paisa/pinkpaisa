@@ -16,6 +16,7 @@ const { startMarketingAgentWorker } = require("./services/marketingAgentOrchestr
 const { startDailyBatchScheduler } = require("./services/dailyBatchScheduler");
 const { createCorsOptions, createRateLimiter, securityHeaders } = require("./middleware/requestGuards");
 const { csrfProtection } = require("./middleware/csrf");
+const { assertEmailConfigForProduction } = require("./utils/email");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -139,6 +140,7 @@ app.use((err, req, res, _next) => {
 });
 
 async function bootstrapApplication() {
+  assertEmailConfigForProduction();
   await connectDB();
 
   if (shouldBootstrapSeedData) {

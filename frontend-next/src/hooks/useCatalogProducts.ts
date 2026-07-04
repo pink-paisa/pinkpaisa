@@ -55,6 +55,8 @@ export type CatalogProduct = {
   featured: boolean;
   bestseller: boolean;
   sort_order: number;
+  updatedAt?: string;
+  updated_at?: string;
   createdAt?: string;
   created_at?: string;
 };

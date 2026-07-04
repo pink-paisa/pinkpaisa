@@ -6,6 +6,7 @@ type SeoHeadProps = {
   canonicalPath?: string;
   image?: string | null;
   type?: "website" | "article" | "product";
+  noindex?: boolean;
 };
 
 const SITE_NAME = "Pink Paisa";
@@ -24,6 +25,7 @@ export default function SeoHead({
   canonicalPath = "/",
   image,
   type = "website",
+  noindex = false,
 }: SeoHeadProps) {
   const canonical = absoluteUrl(canonicalPath) || SITE_URL;
   const ogImage = absoluteUrl(image) || DEFAULT_OG_IMAGE;
@@ -33,6 +35,7 @@ export default function SeoHead({
     <Head>
       <title>{fullTitle}</title>
       <meta name="description" content={description} />
+      {noindex ? <meta name="robots" content="noindex,nofollow" /> : null}
       <link rel="canonical" href={canonical} />
       <meta property="og:type" content={type} />
       <meta property="og:site_name" content={SITE_NAME} />

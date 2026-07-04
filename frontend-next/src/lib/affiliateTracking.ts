@@ -11,8 +11,15 @@ export type AffiliateTrackableProduct = {
 type AffiliateEventType = "product_view" | "cta_click" | "outbound_click";
 const CTA_EXPERIMENT_NAME = "affiliate_cta_text_v1";
 const CTA_EXPERIMENT_STORAGE_KEY = "pinkpaisa_affiliate_cta_variant";
+const FIRST_TOUCH_STORAGE_KEY = "pinkpaisa_affiliate_first_touch";
 const CTA_VARIANTS = ["view_on_amazon", "check_price_on_amazon"] as const;
 export type AffiliateCtaVariant = typeof CTA_VARIANTS[number];
+type UtmParams = {
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_content?: string;
+};
 
 function getDeviceType() {
   if (typeof navigator === "undefined") return "unknown";
@@ -22,7 +29,7 @@ function getDeviceType() {
   return "desktop";
 }
 
-function getUtmParams() {
+function readCurrentUtmParams(): UtmParams {
   if (typeof window === "undefined") return {};
   const params = new URLSearchParams(window.location.search);
   return {
@@ -31,6 +38,51 @@ function getUtmParams() {
     utm_campaign: params.get("utm_campaign") || undefined,
     utm_content: params.get("utm_content") || undefined,
   };
+}
+
+function hasUtmParams(params: UtmParams) {
+  return Boolean(params.utm_source || params.utm_medium || params.utm_campaign || params.utm_content);
+}
+
+function getStoredUtmParams(): UtmParams {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.sessionStorage.getItem(FIRST_TOUCH_STORAGE_KEY) || "{}");
+    return {
+      utm_source: parsed.utm_source || undefined,
+      utm_medium: parsed.utm_medium || undefined,
+      utm_campaign: parsed.utm_campaign || undefined,
+      utm_content: parsed.utm_content || undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+export function persistAffiliateAttribution() {
+  if (typeof window === "undefined") return;
+  const current = readCurrentUtmParams();
+  if (!hasUtmParams(current)) return;
+
+  try {
+    if (hasUtmParams(getStoredUtmParams())) return;
+    window.sessionStorage.setItem(FIRST_TOUCH_STORAGE_KEY, JSON.stringify({
+      ...current,
+      landing_path: `${window.location.pathname}${window.location.search}`,
+      captured_at: new Date().toISOString(),
+    }));
+  } catch {
+    // Attribution should never break page rendering.
+  }
+}
+
+function getUtmParams() {
+  const current = readCurrentUtmParams();
+  if (hasUtmParams(current)) {
+    persistAffiliateAttribution();
+    return current;
+  }
+  return getStoredUtmParams();
 }
 
 export function getAffiliateCtaExperiment(): { experiment_name: string; experiment_variant: AffiliateCtaVariant } {

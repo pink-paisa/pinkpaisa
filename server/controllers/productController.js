@@ -170,6 +170,41 @@ const buildPublicAffiliateComplianceQuery = () => ({
   ],
 });
 
+const isAdminFullViewRequest = (req = {}) => (
+  req.query?.all === "true" && req.user?.role === "admin"
+);
+
+const sanitizePublicAttributes = (attributes) => {
+  if (!attributes || typeof attributes !== "object" || Array.isArray(attributes)) return attributes;
+
+  const blockedKeys = new Set([
+    "affiliate_rating_text",
+    "affiliate_rating_value",
+    "affiliate_discount_percent",
+    "affiliate_review_text",
+    "affiliate_availability_text",
+    "amazon_price",
+    "amazon_sale_price",
+    "amazon_rating",
+    "amazon_reviews",
+    "imported_price_observed",
+    "imported_sale_price_observed",
+    "imported_rating_observed",
+    "imported_review_observed",
+    "imported_availability_observed",
+  ]);
+
+  return Object.fromEntries(
+    Object.entries(attributes).filter(([key]) => {
+      const normalizedKey = String(key || "").trim();
+      if (!normalizedKey) return false;
+      if (blockedKeys.has(normalizedKey)) return false;
+      if (normalizedKey.startsWith("imported_")) return false;
+      return true;
+    }),
+  );
+};
+
 const canShowAffiliateProductAdvertisingContent = (doc = {}) => {
   if (!Boolean(doc.is_affiliate) || !APPROVED_AFFILIATE_DATA_SOURCES.has(String(doc.affiliate_data_source || ""))) {
     return false;
@@ -201,6 +236,16 @@ const toFlat = (doc, { publicView = false } = {}) => {
     effective_price: computeEffectivePrice(doc.price, doc.sale_price),
   };
 
+  if (publicView) {
+    delete flat.cost_price;
+    delete flat.affiliate_tag;
+    delete flat.affiliate_payload;
+    delete flat.__v;
+    if (flat.attributes && typeof flat.attributes === "object") {
+      flat.attributes = sanitizePublicAttributes(flat.attributes);
+    }
+  }
+
   if (publicView && flat.is_affiliate && !canShowAffiliateProductAdvertisingContent(flat)) {
     flat.images = [];
     flat.image_items = [];
@@ -210,10 +255,6 @@ const toFlat = (doc, { publicView = false } = {}) => {
     flat.mrp = null;
     flat.effective_price = 0;
     flat.stock_quantity = 0;
-    if (flat.attributes && typeof flat.attributes === "object") {
-      const { affiliate_rating_text, affiliate_rating_value, affiliate_discount_percent, ...rest } = flat.attributes;
-      flat.attributes = rest;
-    }
   }
 
   return flat;
@@ -221,6 +262,7 @@ const toFlat = (doc, { publicView = false } = {}) => {
 
 const buildProductFilter = async (req) => {
   const filterClauses = [];
+  const adminFullView = isAdminFullViewRequest(req);
 
   const sourceTypeFilter = buildSourceTypeQuery(String(req.query.source_type || ""));
   if (sourceTypeFilter) filterClauses.push(sourceTypeFilter);
@@ -230,9 +272,9 @@ const buildProductFilter = async (req) => {
   if (affiliateQuery) filterClauses.push(affiliateQuery);
 
   if (req.query.status) filterClauses.push({ status: req.query.status });
-  else if (req.query.all !== "true") filterClauses.push({ status: "active" });
+  else if (!adminFullView) filterClauses.push({ status: "active" });
 
-  if (req.query.all !== "true") {
+  if (!adminFullView) {
     filterClauses.push({
       is_visible: true,
       category: { $ne: "Uncategorized" },
@@ -525,7 +567,7 @@ const queueAdminCampaignIfNeeded = async (product, queuedAt = null) => {
 const getProducts = async (req, res) => {
   try {
     const { empty, filter, searchRequested } = await buildProductFilter(req);
-    const publicView = req.query.all !== "true";
+    const publicView = !isAdminFullViewRequest(req);
     if (empty) {
       return res.json(req.query.include_meta === "true" ? { items: [], total: 0, page: 1, pageSize: 0, totalPages: 0 } : []);
     }
@@ -663,7 +705,7 @@ const getProduct = async (req, res) => {
     }
     if (!product) product = await Product.findOne({ slug: req.params.slug }).lean();
     if (!product) return res.status(404).json({ message: "Product not found" });
-    const publicView = req.query.all !== "true";
+    const publicView = !isAdminFullViewRequest(req);
     if (publicView && (!product.is_visible || product.category === "Uncategorized" || product.subcategory === "Uncategorized" || product.status !== "active")) {
       return res.status(404).json({ message: "Product not found" });
     }
@@ -1166,4 +1208,10 @@ module.exports = {
   bulkUpdateProducts,
   bulkDeleteProducts,
   deleteProduct,
+  _private: {
+    buildProductFilter,
+    isAdminFullViewRequest,
+    sanitizePublicAttributes,
+    toFlat,
+  },
 };

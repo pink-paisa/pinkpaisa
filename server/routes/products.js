@@ -15,11 +15,19 @@ const {
 } = require("../controllers/productController");
 const { protect, adminOnly } = require("../middleware/auth");
 
-router.get("/", getProducts);
-router.get("/facets", getProductsFacets);
+const requireAdminForFullView = (req, res, next) => {
+  if (req.query.all !== "true") return next();
+  return protect(req, res, (authError) => {
+    if (authError) return next(authError);
+    return adminOnly(req, res, next);
+  });
+};
+
+router.get("/", requireAdminForFullView, getProducts);
+router.get("/facets", requireAdminForFullView, getProductsFacets);
 router.get("/suggest", getProductSuggestions);
 router.post("/cart-validate", validateCartProducts);
-router.get("/:slug", getProduct);
+router.get("/:slug", requireAdminForFullView, getProduct);
 router.post("/", protect, adminOnly, createProduct);
 router.post("/bulk-import", protect, adminOnly, bulkImportProducts);
 router.post("/bulk-update", protect, adminOnly, bulkUpdateProducts);
