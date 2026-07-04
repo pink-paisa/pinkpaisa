@@ -15,7 +15,7 @@ function getJwtSecret() {
 function getAdminBootstrapEmail() {
   const email = String(process.env.ADMIN_BOOTSTRAP_EMAIL || "").trim().toLowerCase();
   if (email) return email;
-  if (process.env.NODE_ENV !== "production") return "admin@pinkpaisa.in";
+  if (process.env.NODE_ENV !== "production") return "pinkpaisawellness2018@gmail.com";
   return requireEnv("ADMIN_BOOTSTRAP_EMAIL").toLowerCase();
 }
 
