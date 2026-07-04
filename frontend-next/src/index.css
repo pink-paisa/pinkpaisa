@@ -1,0 +1,142 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Serif+Display&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 30 33% 97%;
+    --foreground: 340 20% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 340 20% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 340 20% 15%;
+
+    --primary: 340 45% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 30 30% 93%;
+    --secondary-foreground: 340 20% 15%;
+
+    --muted: 30 20% 94%;
+    --muted-foreground: 340 10% 45%;
+
+    --accent: 340 35% 92%;
+    --accent-foreground: 340 45% 35%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 340 15% 90%;
+    --input: 340 15% 90%;
+    --ring: 340 45% 55%;
+
+    --radius: 0.75rem;
+
+    --rose-soft: 340 40% 95%;
+    --rose-medium: 340 45% 75%;
+    --cream: 35 40% 96%;
+    --cream-dark: 30 25% 90%;
+    --sage: 150 15% 45%;
+    --sage-light: 150 15% 92%;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply overflow-x-hidden;
+  }
+
+  body {
+    @apply overflow-x-hidden bg-background font-sans text-foreground antialiased;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    text-wrap: balance;
+    overflow-wrap: break-word;
+  }
+
+  p {
+    text-wrap: pretty;
+    overflow-wrap: break-word;
+  }
+}
+
+@layer components {
+  .container {
+    @apply px-4 sm:px-6 lg:px-8;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, hsl(var(--primary)), hsl(340 55% 65%));
+  }
+
+  .scrollbar-hidden {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hidden::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Google Translate widget styling */
+.google-translate-widget {
+  display: inline-block;
+}
+
+.google-translate-widget .goog-te-gadget {
+  font-family: inherit !important;
+  font-size: 0 !important;
+}
+
+.google-translate-widget .goog-te-gadget .goog-te-combo {
+  font-family: "DM Sans", system-ui, sans-serif !important;
+  font-size: 13px !important;
+  padding: 6px 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.google-translate-widget .goog-te-gadget .goog-te-combo:hover {
+  border-color: hsl(var(--primary));
+}
+
+.google-translate-widget .goog-te-gadget > span {
+  display: none !important;
+}
+
+/* Hide Google Translate top bar */
+.goog-te-banner-frame,
+.skiptranslate {
+  display: none !important;
+}
+
+body {
+  top: 0 !important;
+}

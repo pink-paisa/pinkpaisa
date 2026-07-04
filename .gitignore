@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.development
+*.env
+!.env.example
+!.env.*.example
+!*.env.example
+!*.env.*.example
+
+# Frontend build outputs
+frontend/dist/
+frontend-next/.next/
+frontend-next/out/
+dist/
+.turbo/
+.cache/
+coverage/
+
+# Server/runtime artifacts
+server/uploads/
+uploads/
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Reports and generated artifacts
+frontend-next/lint-report.json
+pinkpaisa-lightsail-deploy.zip
+*.zip
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+*.local.json
+
+# Legacy lockfiles we do not want in the canonical Next frontend
+frontend/bun.lock
+frontend/bun.lockb
