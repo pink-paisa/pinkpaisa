@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api";
 const CSRF_COOKIE_NAME = "pinkpaisa_csrf";
 const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 let csrfRequest: Promise<string | null> | null = null;
