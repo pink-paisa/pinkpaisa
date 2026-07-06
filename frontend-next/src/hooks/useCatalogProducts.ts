@@ -14,6 +14,8 @@ export type CatalogProduct = {
   affiliate_tag?: string | null;
   affiliate_data_source?: string | null;
   affiliate_data_last_refreshed_at?: string | null;
+  affiliate_data_expires_at?: string | null;
+  affiliate_api_error?: string | null;
   affiliate_compliance_status?: "needs_review" | "compliant" | "non_compliant" | "paused" | null;
   affiliate_compliance_flags?: string[];
   buying_intent?: string | null;

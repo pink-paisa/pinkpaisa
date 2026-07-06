@@ -8,7 +8,7 @@ export default function AffiliateDisclosurePage() {
     <>
       <SeoHead
         title="Affiliate Disclosure"
-        description="Pink Paisa affiliate disclosure for Amazon Associate links and partner product recommendations."
+        description="Pink Paisa disclosure for curated Amazon links and partner product recommendations."
         canonicalPath="/affiliate-disclosure"
       />
       <div className="min-h-screen bg-background">
@@ -19,8 +19,8 @@ export default function AffiliateDisclosurePage() {
           <div className="space-y-4 text-sm leading-7 text-muted-foreground md:text-base">
             <p className="font-medium text-foreground">{DISCLOSURE_TEXT}</p>
             <p>
-              Some product links on Pink Paisa may take you to Amazon. When you click those links and make a qualifying purchase,
-              Pink Paisa may earn a commission at no extra cost to you.
+              Pink Paisa curates products to help readers make better buying decisions. Some product links take you to Amazon;
+              if you buy through those links, Pink Paisa may receive affiliate income at no extra cost to you.
             </p>
             <p>
               Amazon does not sponsor, endorse, or approve our recommendations. We do not provide rewards, rebates, points, or

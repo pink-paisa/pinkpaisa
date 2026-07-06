@@ -24,9 +24,14 @@ const emailUtils = require("../utils/email");
 const dailyBatchScheduler = require("../services/dailyBatchScheduler");
 const { _private: amazonReportPrivate } = require("../controllers/adminAmazonReportController");
 const { checkAffiliateProductLink } = require("../services/affiliateLinkChecker");
+const { getCreatorsApiEnvStatus } = require("../utils/affiliateDataSettings");
+const creatorsApiService = require("../services/amazonCreatorsApiService");
+const affiliateProductController = require("../controllers/affiliateProductController");
 const authPrivate = authRoute._private;
 const productPrivate = productController._private;
 const emailPrivate = emailUtils._private;
+const creatorsApiPrivate = creatorsApiService._private;
+const affiliateProductPrivate = affiliateProductController._private;
 
 test("pending payment schema supports processing lifecycle and ttl cleanup", () => {
   const statusPath = PendingPayment.schema.path("status");
@@ -335,6 +340,233 @@ test("public product serialization strips affiliate internals and imported Amazo
   assert.equal(flat.mrp, null);
   assert.equal(flat.stock_quantity, 0);
   assert.deepEqual(flat.attributes, { safe_detail: "Keep me" });
+});
+
+test("public affiliate serialization keeps manual image URLs including Amazon media URLs", () => {
+  const safeManual = productPrivate.toFlat({
+    _id: { toString: () => "manual-product-id" },
+    title: "Manual image product",
+    is_affiliate: true,
+    affiliate_data_source: "manual",
+    featured_image: "https://cdn.example.com/product.jpg",
+    images: ["https://cdn.example.com/product.jpg"],
+    image_items: [{ url: "https://cdn.example.com/product.jpg", alt: "Manual image product", position: 0 }],
+    price: 999,
+    sale_price: 799,
+    mrp: 1299,
+    stock_quantity: 8,
+  }, { publicView: true });
+
+  assert.equal(safeManual.featured_image, "https://cdn.example.com/product.jpg");
+  assert.deepEqual(safeManual.images, ["https://cdn.example.com/product.jpg"]);
+  assert.equal(safeManual.price, 0);
+  assert.equal(safeManual.sale_price, null);
+
+  const amazonMediaManual = productPrivate.toFlat({
+    _id: { toString: () => "amazon-image-product-id" },
+    title: "Amazon media image product",
+    is_affiliate: true,
+    affiliate_data_source: "manual",
+    featured_image: "https://m.media-amazon.com/images/I/product.jpg",
+    images: ["https://m.media-amazon.com/images/I/product.jpg"],
+    image_items: [{ url: "https://m.media-amazon.com/images/I/product.jpg", alt: "Amazon media image product", position: 0 }],
+    price: 999,
+  }, { publicView: true });
+
+  assert.equal(amazonMediaManual.featured_image, "https://m.media-amazon.com/images/I/product.jpg");
+  assert.deepEqual(amazonMediaManual.images, ["https://m.media-amazon.com/images/I/product.jpg"]);
+  assert.equal(amazonMediaManual.price, 0);
+
+  const payloadOnlyManual = productPrivate.toFlat({
+    _id: { toString: () => "payload-image-product-id" },
+    title: "Payload image product",
+    is_affiliate: true,
+    affiliate_data_source: "manual",
+    featured_image: null,
+    images: [],
+    image_items: [],
+    affiliate_payload: { image_url: "https://m.media-amazon.com/images/I/payload-product.jpg" },
+    price: 999,
+  }, { publicView: true });
+
+  assert.equal(payloadOnlyManual.featured_image, "https://m.media-amazon.com/images/I/payload-product.jpg");
+  assert.deepEqual(payloadOnlyManual.images, ["https://m.media-amazon.com/images/I/payload-product.jpg"]);
+  assert.equal(payloadOnlyManual.affiliate_payload, undefined);
+});
+
+test("public affiliate serialization requires fresh API expiry before showing Amazon API data", () => {
+  const baseProduct = {
+    _id: { toString: () => "product-id" },
+    title: "API product",
+    is_affiliate: true,
+    affiliate_data_source: "creators_api",
+    featured_image: "https://example.com/api-image.jpg",
+    images: ["https://example.com/api-image.jpg"],
+    image_items: [{ url: "https://example.com/api-image.jpg", alt: "API product", position: 0 }],
+    price: 999,
+    sale_price: 799,
+    mrp: 1299,
+    stock_quantity: 0,
+  };
+
+  const missingExpiry = productPrivate.toFlat(baseProduct, { publicView: true });
+  assert.equal(missingExpiry.featured_image, null);
+  assert.equal(missingExpiry.price, 0);
+
+  const fresh = productPrivate.toFlat({
+    ...baseProduct,
+    affiliate_data_expires_at: new Date(Date.now() + 60 * 60 * 1000),
+  }, { publicView: true });
+  assert.equal(fresh.featured_image, "https://example.com/api-image.jpg");
+  assert.equal(fresh.price, 999);
+  assert.equal(fresh.sale_price, 799);
+
+  const expired = productPrivate.toFlat({
+    ...baseProduct,
+    affiliate_data_expires_at: new Date(Date.now() - 60 * 1000),
+  }, { publicView: true });
+  assert.equal(expired.featured_image, null);
+  assert.equal(expired.price, 0);
+});
+
+test("admin affiliate CRUD cannot promote manual submissions into API-sourced content", () => {
+  assert.equal(
+    affiliateProductPrivate.normalizeAdminAffiliateDataSource({ affiliate_data_source: "creators_api" }, null),
+    "manual"
+  );
+
+  const preserved = affiliateProductPrivate.buildPreservedApiContent({
+    affiliate_data_source: "creators_api",
+    featured_image: "https://example.com/api-image.jpg",
+    images: ["https://example.com/api-image.jpg"],
+    image_items: [{ url: "https://example.com/api-image.jpg", alt: "Image", position: 0 }],
+    price: 999,
+    sale_price: 799,
+    effective_price: 799,
+    affiliate_data_last_refreshed_at: new Date("2026-01-01T00:00:00.000Z"),
+    affiliate_data_expires_at: new Date("2026-01-02T00:00:00.000Z"),
+  }, "creators_api");
+
+  assert.equal(preserved.featured_image, "https://example.com/api-image.jpg");
+  assert.equal(preserved.effective_price, 799);
+
+  const manual = affiliateProductPrivate.buildAffiliateImageContent(
+    { image_url: "https://cdn.example.com/manual-product.jpg" },
+    null,
+    "manual",
+    "Manual product"
+  );
+  assert.equal(manual.featured_image, "https://cdn.example.com/manual-product.jpg");
+  assert.equal(manual.price, 0);
+
+  const amazonMediaManual = affiliateProductPrivate.buildAffiliateImageContent(
+    { image_url: "https://m.media-amazon.com/images/I/product.jpg" },
+    null,
+    "manual",
+    "Manual product"
+  );
+  assert.equal(amazonMediaManual.featured_image, "https://m.media-amazon.com/images/I/product.jpg");
+
+  const payloadImageManual = affiliateProductPrivate.buildAffiliateImageContent(
+    { affiliate_payload: { image_url: "https://m.media-amazon.com/images/I/payload-product.jpg" } },
+    null,
+    "manual",
+    "Manual product"
+  );
+  assert.equal(payloadImageManual.featured_image, "https://m.media-amazon.com/images/I/payload-product.jpg");
+});
+
+test("admin affiliate required fields include selling metadata", () => {
+  const errors = affiliateProductPrivate.buildRequiredAffiliateFieldErrors({
+    title: "Manual product",
+    affiliate_url: "https://www.amazon.in/dp/B0CTVGPLQX?tag=pinkpaisa07-21",
+    affiliate_marketplace: "amazon_in",
+    affiliate_asin: "B0CTVGPLQX",
+    affiliate_data_source: "manual",
+    category_id: "category-id",
+    subcategory_id: "subcategory-id",
+    category: "Beauty",
+    subcategory: "Tools",
+    featured_image: null,
+    short_description: "",
+    buying_intent: "",
+    campaign_label: "",
+    pros: [],
+    cons: [],
+    seo_title: "",
+    seo_description: "",
+  }, { title: "Manual product" });
+
+  assert.equal(errors.image_url, undefined);
+  assert.equal(errors.short_description, "Short description is required");
+  assert.equal(errors.buying_intent, "Buying intent is required");
+  assert.equal(errors.campaign_label, "Campaign label is required");
+  assert.equal(errors.pros, "At least one pro is required");
+  assert.equal(errors.cons, "At least one con is required");
+  assert.equal(errors.seo_title, "SEO title is required");
+  assert.equal(errors.seo_description, "SEO description is required");
+});
+
+test("creators api readiness is gated by env, mode, health status, and implemented adapter", () => {
+  const originalEnabled = process.env.AMAZON_CREATORS_API_ENABLED;
+  const originalAccessKey = process.env.AMAZON_CREATORS_API_ACCESS_KEY;
+  const originalSecretKey = process.env.AMAZON_CREATORS_API_SECRET_KEY;
+
+  try {
+    process.env.AMAZON_CREATORS_API_ENABLED = "true";
+    process.env.AMAZON_CREATORS_API_ACCESS_KEY = "access-key";
+    process.env.AMAZON_CREATORS_API_SECRET_KEY = "secret-key";
+
+    const notReady = creatorsApiPrivate.buildCreatorsApiReadiness({
+      settings: {
+        affiliate_data_mode: "creators_api",
+        affiliate_data_marketplaces: ["amazon_in"],
+        affiliate_creators_api_health_status: "ok",
+      },
+      envStatus: getCreatorsApiEnvStatus(),
+    });
+    assert.equal(notReady.ready, false);
+    assert.equal(notReady.adapter_implemented, false);
+
+    const manual = creatorsApiPrivate.buildCreatorsApiReadiness({
+      settings: {
+        affiliate_data_mode: "manual_only",
+        affiliate_data_marketplaces: ["amazon_in"],
+        affiliate_creators_api_health_status: "ok",
+      },
+      envStatus: getCreatorsApiEnvStatus(),
+    });
+    assert.equal(manual.ready, false);
+  } finally {
+    if (originalEnabled) process.env.AMAZON_CREATORS_API_ENABLED = originalEnabled;
+    else delete process.env.AMAZON_CREATORS_API_ENABLED;
+    if (originalAccessKey) process.env.AMAZON_CREATORS_API_ACCESS_KEY = originalAccessKey;
+    else delete process.env.AMAZON_CREATORS_API_ACCESS_KEY;
+    if (originalSecretKey) process.env.AMAZON_CREATORS_API_SECRET_KEY = originalSecretKey;
+    else delete process.env.AMAZON_CREATORS_API_SECRET_KEY;
+  }
+});
+
+test("creators api data application records source, refresh, expiry, image, and price", () => {
+  const product = {
+    title: "API product",
+    affiliate_marketplace: "amazon_in",
+    attributes: {},
+  };
+  const normalized = creatorsApiPrivate.normalizeCreatorsApiProductData({
+    image_url: "https://example.com/api-image.jpg",
+    price: 999,
+    sale_price: 799,
+  }, product, new Date("2026-01-01T00:00:00.000Z"));
+
+  creatorsApiService.applyCreatorsApiDataToProduct(product, normalized);
+  assert.equal(product.affiliate_data_source, "creators_api");
+  assert.equal(product.featured_image, "https://example.com/api-image.jpg");
+  assert.equal(product.price, 999);
+  assert.equal(product.sale_price, 799);
+  assert.equal(product.effective_price, 799);
+  assert.ok(product.affiliate_data_last_refreshed_at instanceof Date);
+  assert.ok(product.affiliate_data_expires_at instanceof Date);
 });
 
 test("client ip helper does not trust raw X-Forwarded-For headers directly", () => {

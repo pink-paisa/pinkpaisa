@@ -27,6 +27,7 @@ import {
 } from "@/hooks/useCatalogProducts";
 import { useWishlist } from "@/hooks/useWishlist";
 import { trackAffiliateEvent } from "@/lib/affiliateTracking";
+import { formatAffiliateDataRefreshTime, hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
 import { toast } from "sonner";
 
 const formatPrice = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -49,6 +50,8 @@ const ProductDetail = ({
   const [recentlyViewed, setRecentlyViewed] = useState<CatalogProduct[]>([]);
 
   const isAffiliate = Boolean(product?.is_affiliate && product?.affiliate_url);
+  const showAffiliateApiPrice = hasVisibleAffiliatePrice(product);
+  const affiliatePriceRefreshedAt = formatAffiliateDataRefreshTime(product);
   const currentCartQuantity = product ? items.find((item) => item.id === product.id)?.quantity || 0 : 0;
   const isInCart = currentCartQuantity > 0;
 
@@ -243,7 +246,7 @@ const ProductDetail = ({
                 ) : null}
                 {isAffiliate && product.is_featured_affiliate ? (
                   <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">
-                    Featured pick
+                    Editor&apos;s pick
                   </span>
                 ) : null}
                 {discount > 0 ? (
@@ -294,7 +297,7 @@ const ProductDetail = ({
             </p>
             <h1 className="mb-3 font-serif text-3xl leading-tight md:text-4xl">{product.title}</h1>
 
-            {!isAffiliate ? (
+            {!isAffiliate || showAffiliateApiPrice ? (
               <div className="mb-6 flex items-baseline gap-3">
                 <span className="font-serif text-3xl font-bold text-foreground">
                   {formatPrice(product.sale_price ?? product.price)}
@@ -308,6 +311,11 @@ const ProductDetail = ({
                   </>
                 ) : null}
               </div>
+            ) : null}
+            {isAffiliate && showAffiliateApiPrice && affiliatePriceRefreshedAt ? (
+              <p className="-mt-4 mb-6 text-xs text-muted-foreground">
+                Amazon API data last refreshed {affiliatePriceRefreshedAt}. Confirm final price and availability on Amazon.
+              </p>
             ) : null}
 
             {product.vendor_summary ? (
@@ -329,9 +337,9 @@ const ProductDetail = ({
 
             {isAffiliate ? (
               <div className="mb-8 rounded-2xl border border-primary/20 bg-primary/5 p-5">
-                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-primary">Amazon affiliate pick</p>
+                <p className="text-sm font-semibold uppercase tracking-[0.18em] text-primary">Curated Amazon find</p>
                 <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                  This item is sold on Amazon. Review the details here, then continue to Amazon to confirm current price,
+                  Selected for its fit with the Pink Paisa edit. Open Amazon to confirm the current price,
                   availability, shipping, ratings, and reviews before buying.
                 </p>
                 <div className="mt-4">
@@ -462,7 +470,14 @@ const ProductDetail = ({
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">{related.category}</p>
                     <h3 className="mt-2 line-clamp-2 font-medium">{related.title}</h3>
                     {related.is_affiliate ? (
-                      <p className="mt-3 text-xs text-muted-foreground">Check price on Amazon</p>
+                      hasVisibleAffiliatePrice(related) ? (
+                        <div className="mt-3 flex flex-col gap-1">
+                          <span className="font-semibold text-foreground">{formatPrice(related.sale_price ?? related.price)}</span>
+                          <span className="text-xs text-muted-foreground">Confirm on Amazon</span>
+                        </div>
+                      ) : (
+                        <p className="mt-3 text-xs text-muted-foreground">Check price on Amazon</p>
+                      )
                     ) : (
                       <div className="mt-3 flex items-center gap-2">
                         <span className="font-semibold text-foreground">{formatPrice(related.sale_price ?? related.price)}</span>

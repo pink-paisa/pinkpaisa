@@ -44,7 +44,7 @@ const Footer = () => {
           </div>
         </div>
         <p className="mt-8 text-center text-xs text-muted-foreground">
-          As an Amazon Associate I earn from qualifying purchases.
+          Affiliate notice: As an Amazon Associate I earn from qualifying purchases.
         </p>
         <p className="mt-2 text-center text-xs text-muted-foreground">
           Copyright {new Date().getFullYear()} Pink Paisa. All rights reserved.

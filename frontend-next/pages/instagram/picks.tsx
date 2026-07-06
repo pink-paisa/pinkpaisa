@@ -18,12 +18,12 @@ export default function InstagramPicksPage({ products }: InstagramPicksPageProps
     <>
       <SeoHead
         title="Instagram Picks"
-        description="Amazon affiliate products selected for Pink Paisa Instagram campaigns."
+        description="Curated Amazon products selected for Pink Paisa Instagram campaigns."
         canonicalPath="/instagram/picks"
       />
       <InstagramAffiliateLanding
         title="Instagram Picks"
-        description="Products selected for reels, stories, and bio traffic. Each Amazon click is disclosed and user-initiated."
+        description="Products selected for reels, stories, and bio traffic. Open each pick to review context before going to Amazon."
         products={products}
         activeTab="picks"
       />

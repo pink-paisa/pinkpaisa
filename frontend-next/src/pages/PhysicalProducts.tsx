@@ -21,6 +21,7 @@ import {
 } from "@/hooks/useCatalogProducts";
 import { useProductTaxonomy } from "@/hooks/useProductTaxonomy";
 import { useWishlist, type WishlistProductSummary } from "@/hooks/useWishlist";
+import { formatAffiliateDataRefreshTime, hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
 import { toast } from "sonner";
 
 const SORT_OPTIONS = [
@@ -78,6 +79,8 @@ const ProductCard = ({
 }) => {
   const { addItem } = useCart();
   const isAffiliate = Boolean(product.is_affiliate && product.affiliate_url);
+  const showAffiliateApiPrice = hasVisibleAffiliatePrice(product);
+  const affiliatePriceRefreshedAt = formatAffiliateDataRefreshTime(product);
   const isInCart = !isAffiliate && cartQuantity > 0;
   const outOfStock = !isAffiliate && product.stock_quantity <= 0;
   const quantityReachedCap = !isAffiliate && cartQuantity >= product.stock_quantity && product.stock_quantity > 0;
@@ -122,7 +125,7 @@ const ProductCard = ({
               </span>
             ) : null}
             {isAffiliate && product.is_featured_affiliate ? (
-              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Featured pick</span>
+              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Editor&apos;s pick</span>
             ) : null}
             {product.featured && !product.bestseller && !isAffiliate ? (
               <span className="rounded-full bg-accent px-2.5 py-1 text-[10px] font-bold text-accent-foreground">Featured</span>
@@ -131,7 +134,7 @@ const ProductCard = ({
               <span className="rounded-full bg-destructive px-2.5 py-1 text-[10px] font-bold text-destructive-foreground">Sale</span>
             ) : null}
             {isAffiliate ? (
-              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Amazon pick</span>
+              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Curated find</span>
             ) : null}
           </div>
           {outOfStock ? (
@@ -164,7 +167,19 @@ const ProductCard = ({
 
         <div className="mt-auto flex items-center justify-between gap-3">
           {isAffiliate ? (
-            <p className="max-w-[11rem] text-xs leading-5 text-muted-foreground">Amazon price and availability are checked on Amazon.</p>
+            showAffiliateApiPrice ? (
+              <div className="max-w-[12rem]">
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
+                  {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
+                </div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  {affiliatePriceRefreshedAt ? `Updated ${affiliatePriceRefreshedAt}. ` : ""}Confirm on Amazon.
+                </p>
+              </div>
+            ) : (
+              <p className="max-w-[11rem] text-xs leading-5 text-muted-foreground">Confirm price and availability on Amazon.</p>
+            )
           ) : (
             <div className="flex items-baseline gap-2">
               <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>

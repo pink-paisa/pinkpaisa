@@ -4,6 +4,17 @@ const AdminSettings = require("../models/AdminSettings");
 const { protect, adminOnly } = require("../middleware/auth");
 const { CAMPAIGN_SETTINGS_KEY, normaliseCampaignSettings } = require("../utils/campaignSettings");
 const { buildImageProviderRegistryResponse } = require("../services/imageProviders");
+const {
+  AFFILIATE_DATA_SETTINGS_KEY,
+  buildAffiliateDataSettingsResponse,
+  getAffiliateDataSettings,
+  getCreatorsApiEnvStatus,
+  normalizeAffiliateDataSettings,
+} = require("../utils/affiliateDataSettings");
+const {
+  isCreatorsApiAdapterImplemented,
+  runCreatorsApiHealthCheck,
+} = require("../services/amazonCreatorsApiService");
 
 const WAREHOUSE_KEY = "warehouse";
 
@@ -102,6 +113,68 @@ router.put("/settings/campaigns", protect, adminOnly, async (req, res) => {
     });
   } catch (err) {
     res.status(400).json({ message: err.message });
+  }
+});
+
+// GET /api/admin/settings/affiliate-data
+router.get("/settings/affiliate-data", protect, adminOnly, async (_req, res) => {
+  try {
+    res.json(await getAffiliateDataSettings());
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PUT /api/admin/settings/affiliate-data
+router.put("/settings/affiliate-data", protect, adminOnly, async (req, res) => {
+  try {
+    const current = await getAffiliateDataSettings();
+    const updates = normalizeAffiliateDataSettings({
+      ...current,
+      ...(req.body || {}),
+    });
+
+    if (updates.affiliate_data_mode === "creators_api") {
+      if (!isCreatorsApiAdapterImplemented()) {
+        return res.status(400).json({
+          message: "Creators API product refresh is not implemented yet. Keep affiliate data mode on manual only.",
+        });
+      }
+      const envStatus = getCreatorsApiEnvStatus();
+      if (!envStatus.configured) {
+        return res.status(400).json({
+          message: `Creators API mode requires configuration: ${envStatus.missing.join(", ")}`,
+        });
+      }
+      if (current.affiliate_creators_api_health_status !== "ok") {
+        return res.status(400).json({
+          message: "Run a successful Creators API health check before enabling Creators API mode.",
+        });
+      }
+    }
+
+    const settings = await AdminSettings.findOneAndUpdate(
+      { key: AFFILIATE_DATA_SETTINGS_KEY },
+      { $set: updates },
+      { new: true, upsert: true, lean: true }
+    );
+
+    res.json({
+      message: "Affiliate data settings updated",
+      ...buildAffiliateDataSettingsResponse(settings),
+    });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+});
+
+// POST /api/admin/settings/affiliate-data/health-check
+router.post("/settings/affiliate-data/health-check", protect, adminOnly, async (_req, res) => {
+  try {
+    const result = await runCreatorsApiHealthCheck();
+    res.status(result.ok ? 200 : 400).json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
   }
 });
 

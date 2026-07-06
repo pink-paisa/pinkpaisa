@@ -16,6 +16,8 @@ const {
   sortAffiliateProduct,
   validateAffiliateProduct,
   checkAffiliateProductLinkForAdmin,
+  refreshAffiliateProductApiData,
+  refreshAffiliateProductsApiData,
   backfillAffiliateCompliance,
 } = require("../controllers/affiliateProductController");
 
@@ -47,6 +49,7 @@ router.post("/", protect, adminOnly, createAffiliateProduct);
 router.post("/upload-excel", protect, adminOnly, uploadAffiliateExcel, uploadAffiliateProducts);
 router.patch("/assign-category", protect, adminOnly, assignAffiliateCategory);
 router.post("/backfill-compliance", protect, adminOnly, backfillAffiliateCompliance);
+router.post("/refresh-api-data", protect, adminOnly, refreshAffiliateProductsApiData);
 router.put("/:id", protect, adminOnly, updateAffiliateProduct);
 router.delete("/:id", protect, adminOnly, deleteAffiliateProduct);
 router.post("/:id/publish", protect, adminOnly, publishAffiliateProduct);
@@ -56,5 +59,6 @@ router.patch("/:id/feature", protect, adminOnly, featureAffiliateProduct);
 router.patch("/:id/sort", protect, adminOnly, sortAffiliateProduct);
 router.post("/:id/validate-compliance", protect, adminOnly, validateAffiliateProduct);
 router.post("/:id/check-link", protect, adminOnly, checkAffiliateProductLinkForAdmin);
+router.post("/:id/refresh-api-data", protect, adminOnly, refreshAffiliateProductApiData);
 
 module.exports = router;

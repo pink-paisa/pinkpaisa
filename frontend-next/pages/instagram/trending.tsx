@@ -18,7 +18,7 @@ export default function InstagramTrendingPage({ products }: InstagramTrendingPag
     <>
       <SeoHead
         title="Trending Amazon Finds"
-        description="Featured Amazon affiliate finds curated by Pink Paisa."
+        description="Featured Amazon finds curated by Pink Paisa."
         canonicalPath="/instagram/trending"
       />
       <InstagramAffiliateLanding

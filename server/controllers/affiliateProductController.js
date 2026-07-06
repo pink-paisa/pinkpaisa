@@ -8,10 +8,19 @@ const {
   checkAffiliateProductLink,
   persistAffiliateLinkCheck,
 } = require("../services/affiliateLinkChecker");
+const {
+  refreshAffiliateProductFromCreatorsApi,
+  refreshAffiliateProductsFromCreatorsApi,
+} = require("../services/amazonCreatorsApiService");
+const {
+  buildImagePayload,
+  normalizeManualAffiliateImageUrl,
+} = require("../services/affiliateImagePolicy");
 const { getUncategorizedRefs, resolveTaxonomySelection } = require("../utils/taxonomy");
 const { ensureUniqueProductSlug } = require("../utils/productSlug");
 
 const APPROVED_AFFILIATE_DATA_SOURCES = new Set(["creators_api", "pa_api"]);
+const ADMIN_MUTABLE_AFFILIATE_DATA_SOURCES = new Set(["manual", "excel-upload", "unknown"]);
 const AFFILIATE_STATUSES = new Set(["draft", "active", "inactive"]);
 
 const toFlat = (doc) => ({
@@ -74,6 +83,108 @@ function isUncategorized(product = {}) {
 
 function canUseAffiliateImage(source) {
   return APPROVED_AFFILIATE_DATA_SOURCES.has(String(source || ""));
+}
+
+function normalizeAdminAffiliateDataSource(source = {}, existing = null) {
+  const requested = normalizeString(source.affiliate_data_source || source.source_platform);
+  if (ADMIN_MUTABLE_AFFILIATE_DATA_SOURCES.has(String(requested || ""))) return requested;
+  if (existing && APPROVED_AFFILIATE_DATA_SOURCES.has(String(existing.affiliate_data_source || ""))) {
+    return existing.affiliate_data_source;
+  }
+  return "manual";
+}
+
+function buildPreservedApiContent(existing = null, dataSource = "manual") {
+  if (!existing || !APPROVED_AFFILIATE_DATA_SOURCES.has(String(dataSource || ""))) {
+    return {
+      images: [],
+      image_items: [],
+      featured_image: null,
+      price: 0,
+      sale_price: null,
+      effective_price: 0,
+      mrp: null,
+      stock_quantity: 0,
+      affiliate_data_last_refreshed_at: null,
+      affiliate_data_expires_at: null,
+      affiliate_api_error: null,
+    };
+  }
+
+  return {
+    images: Array.isArray(existing.images) ? existing.images : [],
+    image_items: Array.isArray(existing.image_items) ? existing.image_items : [],
+    featured_image: normalizeString(existing.featured_image),
+    price: normalizeNumber(existing.price, 0),
+    sale_price: existing.sale_price == null ? null : normalizeNumber(existing.sale_price, null),
+    effective_price: normalizeNumber(existing.effective_price, normalizeNumber(existing.sale_price ?? existing.price, 0)),
+    mrp: existing.mrp == null ? null : normalizeNumber(existing.mrp, null),
+    stock_quantity: normalizeNumber(existing.stock_quantity, 0),
+    affiliate_data_last_refreshed_at: existing.affiliate_data_last_refreshed_at || null,
+    affiliate_data_expires_at: existing.affiliate_data_expires_at || null,
+    affiliate_api_error: existing.affiliate_api_error || null,
+  };
+}
+
+function buildAffiliateImageContent(source = {}, existing = null, dataSource = "manual", title = "Affiliate product") {
+  if (APPROVED_AFFILIATE_DATA_SOURCES.has(String(dataSource || ""))) {
+    return buildPreservedApiContent(existing, dataSource);
+  }
+
+  try {
+    const payloadImageUrl = source.affiliate_payload && typeof source.affiliate_payload === "object"
+      ? source.affiliate_payload.image_url
+        || source.affiliate_payload.manual_image_url
+        || source.affiliate_payload.featured_image
+        || source.affiliate_payload.raw?.image_url
+      : null;
+    const manualImageUrl = normalizeManualAffiliateImageUrl(
+      source.image_url || source.manual_image_url || source.featured_image || payloadImageUrl
+    );
+    return {
+      ...buildImagePayload(manualImageUrl, title),
+      price: 0,
+      sale_price: null,
+      effective_price: 0,
+      mrp: null,
+      stock_quantity: 0,
+      affiliate_data_last_refreshed_at: null,
+      affiliate_data_expires_at: null,
+      affiliate_api_error: null,
+    };
+  } catch (error) {
+    throw fieldError(error.message, { image_url: error.message });
+  }
+}
+
+function buildRequiredAffiliateFieldErrors(payload = {}, raw = {}) {
+  const fieldErrors = {};
+  const dataSource = String(payload.affiliate_data_source || "manual");
+  const manualDataSource = !APPROVED_AFFILIATE_DATA_SOURCES.has(dataSource);
+
+  if (!normalizeString(raw.title || payload.title)) fieldErrors.title = "Title is required";
+  if (!normalizeString(payload.affiliate_url)) fieldErrors.affiliate_url = "Affiliate URL with tag is required";
+  if (!normalizeString(payload.affiliate_marketplace)) fieldErrors.affiliate_marketplace = "Marketplace is required";
+  if (!normalizeString(payload.affiliate_asin)) fieldErrors.affiliate_asin = "ASIN is required";
+  if (!payload.category_id || String(payload.category || "").toLowerCase() === "uncategorized") {
+    fieldErrors.category_id = "Category is required";
+  }
+  if (!payload.subcategory_id || String(payload.subcategory || "").toLowerCase() === "uncategorized") {
+    fieldErrors.subcategory_id = "Subcategory is required";
+  }
+  if (!normalizeString(raw.short_description || raw.description || payload.short_description)) {
+    fieldErrors.short_description = "Short description is required";
+  }
+  if (!normalizeString(payload.buying_intent)) fieldErrors.buying_intent = "Buying intent is required";
+  if (!normalizeString(payload.campaign_label)) fieldErrors.campaign_label = "Campaign label is required";
+  if (!Array.isArray(payload.pros) || !payload.pros.length) fieldErrors.pros = "At least one pro is required";
+  if (!Array.isArray(payload.cons) || !payload.cons.length) fieldErrors.cons = "At least one con is required";
+  if (!normalizeString(payload.seo_title || payload.seo_meta_title)) fieldErrors.seo_title = "SEO title is required";
+  if (!normalizeString(payload.seo_description || payload.seo_meta_description)) {
+    fieldErrors.seo_description = "SEO description is required";
+  }
+
+  return fieldErrors;
 }
 
 async function validateAffiliateUniqueness(source = {}, existingProductId = null) {
@@ -166,7 +277,9 @@ async function buildAffiliatePayload(item, existing = null) {
     ...(existing ? existing.toObject() : {}),
     ...item,
   };
-  const title = normalizeString(source.title || source.short_title) || "Affiliate Product";
+  const rawTitle = normalizeString(source.title || source.short_title);
+  const rawShortDescription = normalizeString(source.short_description || source.description);
+  const title = rawTitle || "Affiliate Product";
   const requestedSlug = normalizeString(source.slug || title || source.external_id || "affiliate-product");
   const slug = await ensureUniqueProductSlug(requestedSlug, existing?._id || null);
   const affiliateUrl = normalizeString(source.affiliate_url || source.source_url);
@@ -174,9 +287,8 @@ async function buildAffiliatePayload(item, existing = null) {
     marketplace: normalizeMarketplace(source.affiliate_marketplace || source.marketplace),
     requireConfiguredTag: true,
   });
-  const dataSource = normalizeString(source.affiliate_data_source || source.source_platform) || "manual";
-  const image = canUseAffiliateImage(dataSource) ? normalizeString(source.image_url || source.featured_image) : null;
-  const imageItems = image ? [{ url: image, alt: title, position: 0 }] : [];
+  const dataSource = normalizeAdminAffiliateDataSource(source, existing);
+  const apiContent = buildAffiliateImageContent(source, existing, dataSource, title);
   const taxonomy = await resolveAffiliateTaxonomy(source, existing);
   const requestedStatus = AFFILIATE_STATUSES.has(String(source.status || "")) ? String(source.status) : existing?.status || "draft";
   const complianceStatus = existing?.affiliate_compliance_status === "paused"
@@ -187,28 +299,28 @@ async function buildAffiliatePayload(item, existing = null) {
     && !taxonomy.isUncategorized
     && parseBoolean(source.is_visible, Boolean(existing?.is_visible));
 
-  return {
+  const payload = {
     title,
     slug,
-    short_description: normalizeString(source.short_description || source.short_title || source.description),
+    short_description: rawShortDescription || normalizeString(source.short_title),
     full_description: normalizeString(source.full_description || source.description),
     category_id: taxonomy.categoryDoc._id,
     subcategory_id: taxonomy.subcategoryDoc._id,
     category: taxonomy.categoryDoc.name,
     subcategory: taxonomy.subcategoryDoc.name,
-    images: image ? [image] : [],
-    image_items: imageItems,
-    featured_image: image,
-    price: 0,
-    sale_price: null,
-    effective_price: 0,
-    mrp: null,
+    images: apiContent.images,
+    image_items: apiContent.image_items,
+    featured_image: apiContent.featured_image,
+    price: apiContent.price,
+    sale_price: apiContent.sale_price,
+    effective_price: apiContent.effective_price,
+    mrp: apiContent.mrp,
     cost_price: 0,
     gst_rate_percent: 0,
     brand_name: normalizeString(source.brand_name || source.brand),
     country_of_origin: normalizeString(source.country_of_origin) || (validation.marketplace === "amazon_us" ? "United States" : "India"),
     sku: normalizeString(source.sku) || (validation.asin ? `AMZ-${validation.asin}` : null),
-    stock_quantity: 0,
+    stock_quantity: apiContent.stock_quantity,
     tags: normalizeStringList(source.tags).length ? normalizeStringList(source.tags) : ["Affiliate"],
     weight: null,
     dimensions: normalizeString(source.dimensions),
@@ -242,7 +354,9 @@ async function buildAffiliatePayload(item, existing = null) {
     affiliate_marketplace: validation.marketplace,
     affiliate_tag: validation.affiliateTag,
     affiliate_data_source: dataSource,
-    affiliate_data_last_refreshed_at: APPROVED_AFFILIATE_DATA_SOURCES.has(dataSource) ? new Date() : null,
+    affiliate_data_last_refreshed_at: apiContent.affiliate_data_last_refreshed_at,
+    affiliate_data_expires_at: apiContent.affiliate_data_expires_at,
+    affiliate_api_error: apiContent.affiliate_api_error,
     affiliate_compliance_status: complianceStatus,
     affiliate_compliance_flags: validation.flags,
     buying_intent: normalizeString(source.buying_intent),
@@ -255,6 +369,15 @@ async function buildAffiliatePayload(item, existing = null) {
     affiliate_sort_order: normalizeNumber(source.affiliate_sort_order, existing?.affiliate_sort_order ?? 0),
     affiliate_is_instagram_pick: parseBoolean(source.affiliate_is_instagram_pick, Boolean(existing?.affiliate_is_instagram_pick)),
   };
+  const requiredErrors = buildRequiredAffiliateFieldErrors(payload, {
+    title: rawTitle,
+    short_description: rawShortDescription,
+    description: normalizeString(source.description),
+  });
+  if (Object.keys(requiredErrors).length) {
+    throw fieldError("Missing required affiliate product fields", requiredErrors);
+  }
+  return payload;
 }
 
 async function assertPublishable(product) {
@@ -266,6 +389,10 @@ async function assertPublishable(product) {
   const fieldErrors = {};
   if (!validation.isValid) fieldErrors.affiliate_url = `Fix compliance flags: ${validation.flags.join(", ")}`;
   if (isUncategorized(product)) fieldErrors.category_id = "Assign a category and subcategory before publishing";
+  Object.assign(fieldErrors, buildRequiredAffiliateFieldErrors(product, {
+    title: product.title,
+    short_description: product.short_description,
+  }));
   const uniquenessErrors = await validateAffiliateUniqueness({
     asin: validation.asin,
     marketplace: validation.marketplace,
@@ -557,6 +684,43 @@ const checkAffiliateProductLinkForAdmin = async (req, res) => {
   }
 };
 
+function serializeRefreshResult(result) {
+  const product = result.product?.toObject ? result.product.toObject() : result.product;
+  return {
+    ok: Boolean(result.ok),
+    status: result.status || (result.ok ? "refreshed" : "failed"),
+    message: result.message || null,
+    product: product ? toFlat(product) : null,
+  };
+}
+
+const refreshAffiliateProductApiData = async (req, res) => {
+  try {
+    const result = await refreshAffiliateProductFromCreatorsApi(req.params.id);
+    const serialized = serializeRefreshResult(result);
+    res.status(result.ok ? 200 : 400).json(serialized);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+const refreshAffiliateProductsApiData = async (req, res) => {
+  try {
+    const productIds = Array.isArray(req.body?.product_ids) ? req.body.product_ids.filter(Boolean) : [];
+    const limit = Number.isFinite(Number(req.body?.limit)) ? Number(req.body.limit) : undefined;
+    const summary = await refreshAffiliateProductsFromCreatorsApi({ productIds, limit });
+    res.status(summary.failed > 0 && summary.refreshed === 0 ? 400 : 200).json({
+      message: `Creators API refresh complete. Refreshed ${summary.refreshed}, failed ${summary.failed}.`,
+      requested: summary.requested,
+      refreshed: summary.refreshed,
+      failed: summary.failed,
+      results: summary.results.map(serializeRefreshResult),
+    });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
 const backfillAffiliateCompliance = async (_req, res) => {
   try {
     const products = await Product.find({ is_affiliate: true, source_type: "admin" });
@@ -600,7 +764,15 @@ module.exports = {
   sortAffiliateProduct,
   validateAffiliateProduct,
   checkAffiliateProductLinkForAdmin,
+  refreshAffiliateProductApiData,
+  refreshAffiliateProductsApiData,
   backfillAffiliateCompliance,
   buildAffiliatePayload,
   findExistingAffiliateProduct,
+  _private: {
+    buildPreservedApiContent,
+    buildAffiliateImageContent,
+    buildRequiredAffiliateFieldErrors,
+    normalizeAdminAffiliateDataSource,
+  },
 };

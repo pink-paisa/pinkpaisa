@@ -9,6 +9,7 @@ const { ensureUniqueProductSlug } = require("../utils/productSlug");
 const logger = require("../utils/logger");
 const { enqueueAdminProductCampaign } = require("../services/marketingAgentOrchestrator");
 const { ingestVendorImage, validateRemoteImageUrl } = require("../utils/vendorMedia");
+const { filterSafeManualAffiliateImages } = require("../services/affiliateImagePolicy");
 
 const SORT_PRESETS = {
   popular: { is_affiliate: 1, sort_order: 1, createdAt: -1 },
@@ -123,10 +124,23 @@ const buildLegacyImages = (imageItems = [], featuredImage = null) => {
   return orderedUrls;
 };
 
+const getAffiliatePayloadImage = (doc = {}) => {
+  if (!doc.is_affiliate || !doc.affiliate_payload || typeof doc.affiliate_payload !== "object") return null;
+  return normalizeString(
+    doc.affiliate_payload.image_url
+    || doc.affiliate_payload.manual_image_url
+    || doc.affiliate_payload.featured_image
+    || doc.affiliate_payload.raw?.image_url
+  );
+};
+
 const normalizeStoredImageItems = (doc = {}) => normalizeImageItems({
   imageItems: Array.isArray(doc.image_items) ? doc.image_items : [],
-  imageUrls: Array.isArray(doc.images) ? doc.images : [],
-  featuredImage: doc.featured_image,
+  imageUrls: [
+    ...(Array.isArray(doc.images) ? doc.images : []),
+    getAffiliatePayloadImage(doc),
+  ].filter(Boolean),
+  featuredImage: doc.featured_image || getAffiliatePayloadImage(doc),
 });
 
 const computeEffectivePrice = (price, salePrice) => {
@@ -209,7 +223,7 @@ const canShowAffiliateProductAdvertisingContent = (doc = {}) => {
   if (!Boolean(doc.is_affiliate) || !APPROVED_AFFILIATE_DATA_SOURCES.has(String(doc.affiliate_data_source || ""))) {
     return false;
   }
-  if (!doc.affiliate_data_expires_at) return true;
+  if (!doc.affiliate_data_expires_at) return false;
   const expiresAt = new Date(doc.affiliate_data_expires_at).getTime();
   return Number.isFinite(expiresAt) && expiresAt > Date.now();
 };
@@ -247,9 +261,16 @@ const toFlat = (doc, { publicView = false } = {}) => {
   }
 
   if (publicView && flat.is_affiliate && !canShowAffiliateProductAdvertisingContent(flat)) {
-    flat.images = [];
-    flat.image_items = [];
-    flat.featured_image = null;
+    if (APPROVED_AFFILIATE_DATA_SOURCES.has(String(flat.affiliate_data_source || ""))) {
+      flat.images = [];
+      flat.image_items = [];
+      flat.featured_image = null;
+    } else {
+      const safeManualImages = filterSafeManualAffiliateImages(flat);
+      flat.images = safeManualImages.images;
+      flat.image_items = safeManualImages.image_items;
+      flat.featured_image = safeManualImages.featured_image;
+    }
     flat.price = 0;
     flat.sale_price = null;
     flat.mrp = null;

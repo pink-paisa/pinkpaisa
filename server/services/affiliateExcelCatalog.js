@@ -1,40 +1,44 @@
 const ExcelJS = require("exceljs");
-
 const AMAZON_BASE_URL = "https://www.amazon.in";
 
 const TEMPLATE_COLUMNS = [
   "product_title",
   "affiliate_url",
   "image_url",
-  "price",
-  "sale_price",
-  "rating",
-  "sku",
-  "external_id",
   "marketplace",
-  "brand",
-  "description",
-  "tags",
+  "asin",
+  "category",
+  "subcategory",
+  "short_description",
   "buying_intent",
-  "campaign_label",
   "pros",
   "cons",
   "seo_title",
   "seo_description",
+  "campaign_label",
+  "sku",
+  "brand",
+  "tags",
+  "full_description",
+  "external_id",
 ];
 
 const HEADER_ALIASES = {
   title: ["product title", "product_title", "a-size-base-plus", "title", "name"],
   affiliateUrl: ["affiliate url", "affiliate_url", "product url", "product_url", "source url", "source_url", "a-link-normal href", "a-link-normal href 2", "href"],
   imageUrl: ["image url", "image_url", "product image", "product_image", "s-image src", "image"],
+  asin: ["asin", "affiliate asin", "affiliate_asin"],
+  category: ["category", "category name", "category_name"],
+  subcategory: ["subcategory", "sub category", "subcategory name", "subcategory_name"],
+  shortDescription: ["short description", "short_description", "summary"],
   price: ["price", "mrp", "list price", "list_price"],
   salePrice: ["sale price", "sale_price", "selling price", "selling_price"],
   rating: ["rating", "a-size-small", "stars"],
   sku: ["sku"],
-  externalId: ["external id", "external_id", "asin", "product id", "product_id"],
+  externalId: ["external id", "external_id", "product id", "product_id"],
   marketplace: ["marketplace", "affiliate marketplace", "affiliate_marketplace", "amazon marketplace"],
   brand: ["brand", "brand name", "brand_name"],
-  description: ["description", "product description", "product_description"],
+  fullDescription: ["full description", "full_description", "description", "product description", "product_description"],
   tags: ["tags", "tag list", "tag_list"],
   buyingIntent: ["buying intent", "buying_intent", "intent"],
   campaignLabel: ["campaign label", "campaign_label", "campaign"],
@@ -92,11 +96,20 @@ function slugify(text) {
     .replace(/^-|-$/g, "");
 }
 
-function normalizeUrl(value) {
+function normalizeAffiliateUrl(value) {
   const raw = normalizeText(value);
   if (!raw) return null;
   if (raw.startsWith("//")) return `https:${raw}`;
   if (raw.startsWith("/")) return `${AMAZON_BASE_URL}${raw}`;
+  if (!/^https?:\/\//i.test(raw)) return `https://${raw}`;
+  return raw;
+}
+
+function normalizeImageUrl(value) {
+  const raw = normalizeText(value);
+  if (!raw) return null;
+  if (raw.startsWith("/uploads/")) return raw;
+  if (raw.startsWith("//")) return `https:${raw}`;
   if (!/^https?:\/\//i.test(raw)) return `https://${raw}`;
   return raw;
 }
@@ -134,18 +147,21 @@ function normalizeWorkbookRow(row) {
 
 function buildCatalogItem(row, index) {
   const rowNumber = index + 2;
-  const sourceUrl = normalizeUrl(pickValue(row, HEADER_ALIASES.affiliateUrl));
-  const imageUrl = normalizeUrl(pickValue(row, HEADER_ALIASES.imageUrl));
+  const sourceUrl = normalizeAffiliateUrl(pickValue(row, HEADER_ALIASES.affiliateUrl));
+  const imageUrl = normalizeImageUrl(pickValue(row, HEADER_ALIASES.imageUrl));
   const title = normalizeText(pickValue(row, HEADER_ALIASES.title));
   const ratingText = normalizeText(pickValue(row, HEADER_ALIASES.rating)) || null;
   const salePrice = toNumber(pickValue(row, HEADER_ALIASES.salePrice));
   const listPrice = toNumber(pickValue(row, HEADER_ALIASES.price));
-  const asin = extractAsin(sourceUrl);
+  const asin = normalizeText(pickValue(row, HEADER_ALIASES.asin)) || extractAsin(sourceUrl);
   const externalId = normalizeText(pickValue(row, HEADER_ALIASES.externalId)) || asin;
   const marketplace = normalizeText(pickValue(row, HEADER_ALIASES.marketplace)) || null;
+  const category = normalizeText(pickValue(row, HEADER_ALIASES.category)) || null;
+  const subcategory = normalizeText(pickValue(row, HEADER_ALIASES.subcategory)) || null;
   const sku = normalizeText(pickValue(row, HEADER_ALIASES.sku)) || (asin ? `AMZ-${asin}` : `AFF-${String(index + 1).padStart(5, "0")}`);
   const brand = normalizeText(pickValue(row, HEADER_ALIASES.brand)) || null;
-  const description = normalizeText(pickValue(row, HEADER_ALIASES.description)) || null;
+  const shortDescription = normalizeText(pickValue(row, HEADER_ALIASES.shortDescription)) || null;
+  const fullDescription = normalizeText(pickValue(row, HEADER_ALIASES.fullDescription)) || null;
   const tags = normalizeText(pickValue(row, HEADER_ALIASES.tags)) || null;
   const buyingIntent = normalizeText(pickValue(row, HEADER_ALIASES.buyingIntent)) || null;
   const campaignLabel = normalizeText(pickValue(row, HEADER_ALIASES.campaignLabel)) || null;
@@ -160,7 +176,23 @@ function buildCatalogItem(row, index) {
   }
 
   if (!title && !sourceUrl) errors.push("Product title or affiliate URL is required");
-  if (!sourceUrl) errors.push("Affiliate URL is required");
+  [
+    ["Product title", title],
+    ["Affiliate URL with tag", sourceUrl],
+    ["Marketplace", marketplace],
+    ["ASIN", asin],
+    ["Category", category],
+    ["Subcategory", subcategory],
+    ["Short description", shortDescription],
+    ["Buying intent", buyingIntent],
+    ["Pros", pros],
+    ["Cons", cons],
+    ["SEO title", seoTitle],
+    ["SEO description", seoDescription],
+    ["Campaign label", campaignLabel],
+  ].forEach(([label, value]) => {
+    if (!normalizeText(value)) errors.push(`${label} is required`);
+  });
 
   if (errors.length) {
     return {
@@ -182,10 +214,15 @@ function buildCatalogItem(row, index) {
       slug: slugify(title || sku || externalId || `affiliate-product-${index + 1}`),
       title: title || `Affiliate Product ${index + 1}`,
       short_title: title ? title.slice(0, 80) : `Affiliate Product ${index + 1}`,
-      description,
+      short_description: shortDescription,
+      full_description: fullDescription,
+      description: fullDescription,
       brand,
+      category,
+      subcategory,
       marketplace,
       affiliate_marketplace: marketplace,
+      affiliate_asin: asin,
       tags,
       buying_intent: buyingIntent,
       campaign_label: campaignLabel,
@@ -292,5 +329,7 @@ module.exports = {
   buildCatalogItem,
   extractAsin,
   normalizeHeader,
-  normalizeUrl,
+  normalizeAffiliateUrl,
+  normalizeImageUrl,
+  normalizeUrl: normalizeAffiliateUrl,
 };

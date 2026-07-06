@@ -22,12 +22,12 @@ export default function InstagramCampaignPage({ slug, products }: CampaignPagePr
     <>
       <SeoHead
         title={`${title} Amazon Picks`}
-        description={`Amazon affiliate picks for the ${title} campaign from Pink Paisa.`}
+        description={`Curated Amazon picks for the ${title} campaign from Pink Paisa.`}
         canonicalPath={`/instagram/campaign/${slug}`}
       />
       <InstagramAffiliateLanding
         title={title}
-        description="Campaign picks curated for Instagram traffic. Amazon is the current source for price, availability, shipping, ratings, and reviews."
+        description="Campaign picks curated for Instagram traffic. Confirm price, availability, shipping, ratings, and reviews on Amazon before buying."
         products={products}
         activeTab="campaign"
       />

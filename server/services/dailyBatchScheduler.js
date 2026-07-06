@@ -6,15 +6,21 @@ const {
 const { sweepVendorPayoutReadiness } = require("./payoutReadiness");
 const Product = require("../models/Product");
 const { checkAffiliateProductLink, persistAffiliateLinkCheck } = require("./affiliateLinkChecker");
+const { runDueCreatorsApiRefresh } = require("./amazonCreatorsApiService");
 const logger = require("../utils/logger");
 
 const CHECK_INTERVAL_MS = Math.max(parseInt(process.env.MARKETING_SCHEDULER_POLL_MS || "30000", 10), 10000);
 const PAYOUT_READINESS_SWEEP_INTERVAL_MS = Math.max(parseInt(process.env.PAYOUT_READINESS_SWEEP_MS || `${30 * 60 * 1000}`, 10), 5 * 60 * 1000);
 const AFFILIATE_LINK_CHECK_DAILY_LIMIT = Math.max(parseInt(process.env.AFFILIATE_LINK_CHECK_DAILY_LIMIT || "50", 10), 1);
+const CREATORS_API_REFRESH_INTERVAL_MS = Math.max(
+  parseInt(process.env.AMAZON_CREATORS_API_REFRESH_INTERVAL_HOURS || "12", 10),
+  1
+) * 60 * 60 * 1000;
 let schedulerStarted = false;
 let lastTriggeredBatchKey = null;
 let lastPayoutSweepBucket = null;
 let lastAffiliateLinkSweepKey = null;
+let lastCreatorsApiRefreshBucket = null;
 
 function getIstParts(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -118,6 +124,14 @@ async function tickScheduler() {
     lastAffiliateLinkSweepKey = affiliateLinkSweepKey;
     await runAffiliateLinkSweep({ now }).catch((error) => {
       logger.error({ err: error }, "affiliate link sweep failed");
+    });
+  }
+
+  const creatorsApiRefreshBucket = Math.floor(now.getTime() / CREATORS_API_REFRESH_INTERVAL_MS);
+  if (creatorsApiRefreshBucket !== lastCreatorsApiRefreshBucket) {
+    lastCreatorsApiRefreshBucket = creatorsApiRefreshBucket;
+    await runDueCreatorsApiRefresh().catch((error) => {
+      logger.error({ err: error }, "creators api affiliate refresh failed");
     });
   }
 }

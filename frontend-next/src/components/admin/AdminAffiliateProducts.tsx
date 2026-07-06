@@ -1,13 +1,16 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
   CheckCircle2,
+  Database,
   Download,
   Edit,
   ExternalLink,
   FileSpreadsheet,
   Instagram,
   PauseCircle,
+  RefreshCw,
   Search,
   Star,
   Tags,
@@ -28,58 +31,64 @@ import { toast } from "sonner";
 const TEMPLATE_COLUMNS = [
   "product_title",
   "affiliate_url",
+  "image_url",
   "marketplace",
   "asin",
-  "sku",
-  "brand",
   "category",
   "subcategory",
-  "tags",
+  "short_description",
   "buying_intent",
-  "campaign_label",
-  "description",
   "pros",
   "cons",
   "seo_title",
   "seo_description",
+  "campaign_label",
+  "sku",
+  "brand",
+  "tags",
+  "full_description",
 ];
 
 const SAMPLE_ROWS = [
   {
     product_title: "Rose Quartz Face Roller",
     affiliate_url: "https://www.amazon.in/dp/B0CTVGPLQX?tag=YOUR-IN-TAG",
+    image_url: "https://your-cdn.example.com/rose-quartz-face-roller.jpg",
     marketplace: "amazon_in",
     asin: "B0CTVGPLQX",
-    sku: "AMZ-B0CTVGPLQX",
-    brand: "Example Brand",
     category: "",
     subcategory: "",
-    tags: "beauty, skincare",
+    short_description: "Short benefit-focused description written by Pink Paisa.",
     buying_intent: "Quick beauty routine upgrade",
-    campaign_label: "instagram-beauty-finds",
-    description: "Short benefit-focused description written by Pink Paisa.",
     pros: "Easy to use | Giftable",
     cons: "Check seller details on Amazon",
     seo_title: "Rose Quartz Face Roller",
     seo_description: "Curated Amazon skincare find from Pink Paisa.",
+    campaign_label: "instagram-beauty-finds",
+    sku: "AMZ-B0CTVGPLQX",
+    brand: "Example Brand",
+    tags: "beauty, skincare",
+    full_description: "",
   },
   {
     product_title: "Wellness Planner Journal",
     affiliate_url: "https://www.amazon.com/dp/B0D1234567?tag=YOUR-US-TAG",
+    image_url: "https://your-cdn.example.com/wellness-planner-journal.jpg",
     marketplace: "amazon_us",
     asin: "B0D1234567",
-    sku: "AMZ-B0D1234567",
-    brand: "Example Brand",
     category: "",
     subcategory: "",
-    tags: "wellness, planner",
+    short_description: "Daily planning journal for wellness routines.",
     buying_intent: "Daily planning and habit tracking",
-    campaign_label: "instagram-wellness-finds",
-    description: "Daily planning journal for wellness routines.",
     pros: "Simple layout | Strong gift angle",
     cons: "Confirm page count on Amazon",
     seo_title: "Wellness Planner Journal",
     seo_description: "Curated Amazon wellness planner pick from Pink Paisa.",
+    campaign_label: "instagram-wellness-finds",
+    sku: "AMZ-B0D1234567",
+    brand: "Example Brand",
+    tags: "wellness, planner",
+    full_description: "",
   },
 ];
 
@@ -88,6 +97,7 @@ type AffiliateForm = {
   title: string;
   slug: string;
   affiliate_url: string;
+  image_url: string;
   affiliate_marketplace: "amazon_in" | "amazon_us";
   affiliate_asin: string;
   sku: string;
@@ -116,10 +126,37 @@ type AffiliateUploadResponse = {
   errors?: Array<{ row?: number | null; title?: string | null; sku?: string | null; errors: string[] }>;
 };
 
+type AffiliateDataMode = "manual_only" | "creators_api";
+
+type AffiliateDataSettings = {
+  affiliate_data_mode: AffiliateDataMode;
+  affiliate_data_marketplaces: Array<"amazon_in" | "amazon_us">;
+  affiliate_creators_api_last_health_check_at?: string | null;
+  affiliate_creators_api_health_status: "unchecked" | "ok" | "failed";
+  affiliate_creators_api_last_error?: string | null;
+  creators_api_ready: boolean;
+  creators_api_env: {
+    enabled: boolean;
+    configured: boolean;
+    missing: string[];
+    marketplaces: string[];
+  };
+};
+
+type AffiliateRefreshResponse = {
+  ok?: boolean;
+  status?: string;
+  message?: string | null;
+  requested?: number;
+  refreshed?: number;
+  failed?: number;
+};
+
 const blankForm: AffiliateForm = {
   title: "",
   slug: "",
   affiliate_url: "",
+  image_url: "",
   affiliate_marketplace: "amazon_in",
   affiliate_asin: "",
   sku: "",
@@ -148,6 +185,24 @@ const MAX_AFFILIATE_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 
 const splitPipeList = (value?: string[] | null) => Array.isArray(value) ? value.join(" | ") : "";
 
+const formatDateTime = (value?: string | null) => {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+};
+
+const getAffiliateDataBadge = (product: PhysicalProduct) => {
+  if (product.affiliate_data_source === "creators_api") {
+    if (product.affiliate_api_error) return { label: "API error", className: "bg-rose-100 text-rose-800" };
+    if (!product.affiliate_data_expires_at) return { label: "API missing expiry", className: "bg-amber-100 text-amber-800" };
+    const expiresAt = new Date(product.affiliate_data_expires_at).getTime();
+    if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) return { label: "API expired", className: "bg-amber-100 text-amber-800" };
+    return { label: "Creators API", className: "bg-emerald-100 text-emerald-800" };
+  }
+  return { label: product.affiliate_data_source === "excel-upload" ? "Excel review" : "Manual", className: "bg-slate-100 text-slate-700" };
+};
+
 const downloadTemplate = async () => {
   const rows = [TEMPLATE_COLUMNS, ...SAMPLE_ROWS.map((row) => TEMPLATE_COLUMNS.map((column) => row[column as keyof typeof row] ?? ""))];
   await downloadWorkbook("pinkpaisa_affiliate_upload_template.xlsx", [
@@ -160,9 +215,11 @@ const downloadTemplate = async () => {
       name: "Compliance Notes",
       rows: [
         ["Rule", "Details"],
-        ["Disclosure", "Pink Paisa displays: As an Amazon Associate I earn from qualifying purchases."],
+        ["Disclosure", "Buyer CTAs use a short affiliate notice. The required Amazon Associate disclosure remains on the disclosure page and footer."],
         ["Affiliate URL", "Use Amazon.in or Amazon.com product URLs with your Associate tag parameter."],
-        ["Do not import", "Do not rely on Amazon prices, star ratings, review text, or Amazon image URLs unless API-approved."],
+        ["Manual image", "Optional. Use image_url for a direct image URL or /uploads/ path."],
+        ["Category", "Fill category and subcategory with active Pink Paisa taxonomy names before upload."],
+        ["Do not import", "Do not rely on Amazon prices, star ratings, review text, or availability unless API-approved."],
         ["Publish", "Imported rows stay draft/review until admin validates and publishes."],
       ],
       widths: [24, 96],
@@ -180,12 +237,20 @@ export default function AdminAffiliateProducts() {
   const [uploading, setUploading] = useState(false);
   const [assigning, setAssigning] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [healthChecking, setHealthChecking] = useState(false);
+  const [apiRefreshing, setApiRefreshing] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<AffiliateForm>(blankForm);
 
   const { data: affiliateProducts, isLoading } = useQuery({
     queryKey: ["affiliate_products"],
     queryFn: async () => apiFetch<PhysicalProduct[]>("/affiliate-products"),
+  });
+
+  const { data: affiliateDataSettings, isLoading: settingsLoading } = useQuery({
+    queryKey: ["affiliate_data_settings"],
+    queryFn: async () => apiFetch<AffiliateDataSettings>("/admin/settings/affiliate-data"),
   });
 
   const { data: taxonomy } = useProductTaxonomy({ includeInactive: true, includeUncategorized: false });
@@ -219,6 +284,7 @@ export default function AdminAffiliateProducts() {
 
   const refreshQueries = () => {
     queryClient.invalidateQueries({ queryKey: ["affiliate_products"] });
+    queryClient.invalidateQueries({ queryKey: ["affiliate_data_settings"] });
     queryClient.invalidateQueries({ queryKey: ["physical_products"] });
     queryClient.invalidateQueries({ queryKey: ["catalog_products"] });
     queryClient.invalidateQueries({ queryKey: ["catalog_facets"] });
@@ -237,6 +303,7 @@ export default function AdminAffiliateProducts() {
       title: product.title || "",
       slug: product.slug || "",
       affiliate_url: product.affiliate_url || "",
+      image_url: product.affiliate_data_source === "creators_api" || product.affiliate_data_source === "pa_api" ? "" : product.featured_image || "",
       affiliate_marketplace: product.affiliate_marketplace || "amazon_in",
       affiliate_asin: product.affiliate_asin || "",
       sku: product.sku || "",
@@ -269,6 +336,43 @@ export default function AdminAffiliateProducts() {
       return;
     }
     setSelectedIds((current) => Array.from(new Set([...current, ...filtered.map((item) => item.id)])));
+  };
+
+  const saveAffiliateDataMode = async (mode: AffiliateDataMode) => {
+    try {
+      setSettingsSaving(true);
+      const response = await apiFetch<AffiliateDataSettings & { message?: string }>("/admin/settings/affiliate-data", {
+        method: "PUT",
+        body: JSON.stringify({
+          affiliate_data_mode: mode,
+          affiliate_data_marketplaces: affiliateDataSettings?.affiliate_data_marketplaces?.length
+            ? affiliateDataSettings.affiliate_data_marketplaces
+            : ["amazon_in"],
+        }),
+      });
+      toast.success(response.message || "Affiliate data settings updated");
+      refreshQueries();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save affiliate data mode");
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
+  const runCreatorsHealthCheck = async () => {
+    try {
+      setHealthChecking(true);
+      const response = await apiFetch<{ ok: boolean; message?: string; settings?: AffiliateDataSettings }>("/admin/settings/affiliate-data/health-check", {
+        method: "POST",
+      });
+      toast.success(response.message || "Creators API health check completed");
+      refreshQueries();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Creators API health check failed");
+      refreshQueries();
+    } finally {
+      setHealthChecking(false);
+    }
   };
 
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -337,12 +441,44 @@ export default function AdminAffiliateProducts() {
     }
   };
 
+  const refreshApiData = async (productIds: string[] = []) => {
+    try {
+      setApiRefreshing(true);
+      const response = await apiFetch<AffiliateRefreshResponse>("/affiliate-products/refresh-api-data", {
+        method: "POST",
+        body: JSON.stringify({ product_ids: productIds }),
+      });
+      toast.success(`Creators refresh complete. Refreshed ${response.refreshed ?? 0}, failed ${response.failed ?? 0}.`);
+      refreshQueries();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Creators API refresh failed");
+      refreshQueries();
+    } finally {
+      setApiRefreshing(false);
+    }
+  };
+
   const handleSave = async () => {
-    if (!form.title.trim() || !form.affiliate_url.trim()) {
-      toast.error("Title and Amazon affiliate URL are required");
+    const requiredFields = [
+      { key: "title", label: "Title", value: form.title },
+      { key: "affiliate_url", label: "Affiliate URL with tag", value: form.affiliate_url },
+      { key: "affiliate_marketplace", label: "Marketplace", value: form.affiliate_marketplace },
+      { key: "affiliate_asin", label: "ASIN", value: form.affiliate_asin },
+      { key: "category_id", label: "Category", value: form.category_id },
+      { key: "subcategory_id", label: "Subcategory", value: form.subcategory_id },
+      { key: "short_description", label: "Short description", value: form.short_description },
+      { key: "buying_intent", label: "Buying intent", value: form.buying_intent },
+      { key: "pros", label: "Pros", value: form.pros },
+      { key: "cons", label: "Cons", value: form.cons },
+      { key: "seo_title", label: "SEO title", value: form.seo_title },
+      { key: "seo_description", label: "SEO description", value: form.seo_description },
+      { key: "campaign_label", label: "Campaign label", value: form.campaign_label },
+    ];
+    const missing = requiredFields.filter((field) => !String(field.value || "").trim());
+    if (missing.length) {
+      toast.error(`Required: ${missing.slice(0, 4).map((field) => field.label).join(", ")}${missing.length > 4 ? "..." : ""}`);
       return;
     }
-
     const payload = {
       ...form,
       pros: form.pros.split("|").map((item) => item.trim()).filter(Boolean),
@@ -350,7 +486,6 @@ export default function AdminAffiliateProducts() {
       tags: form.tags.split(",").map((item) => item.trim()).filter(Boolean),
       seo_meta_title: form.seo_title,
       seo_meta_description: form.seo_description,
-      affiliate_data_source: "manual",
     };
 
     try {
@@ -394,7 +529,7 @@ export default function AdminAffiliateProducts() {
             Manage Amazon.in and Amazon.com picks. Imported rows stay draft/review until validation and publish.
           </p>
           <p className="mt-2 text-xs text-muted-foreground">
-            Disclosure shown to buyers: As an Amazon Associate I earn from qualifying purchases.
+            Buyer CTAs use a short affiliate notice. The full Amazon Associate disclosure remains available site-wide.
           </p>
         </div>
         <Button type="button" onClick={openCreate} className="rounded-xl">
@@ -410,19 +545,80 @@ export default function AdminAffiliateProducts() {
         <StatCard label="Selected" value={selectedIds.length} />
       </div>
 
+      <div className="rounded-2xl border border-border bg-card p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="max-w-3xl">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <Database className="h-4 w-4 text-primary" />
+              <h3 className="font-serif text-lg">Amazon Data Source</h3>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${affiliateDataSettings?.affiliate_data_mode === "creators_api" ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700"}`}>
+                {affiliateDataSettings?.affiliate_data_mode === "creators_api" ? "Creators API mode" : "Manual only"}
+              </span>
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${affiliateDataSettings?.creators_api_env?.configured ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+                {affiliateDataSettings?.creators_api_env?.configured ? "API env configured" : "API env missing"}
+              </span>
+            </div>
+            <p className="text-sm leading-6 text-muted-foreground">
+              Manual mode is fastest for now: use tagged Amazon links, your own copy, and an optional direct image URL.
+              Creators API mode can refresh Amazon image and price data later, but buyer pages only show it while the API data is fresh.
+            </p>
+            <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+              <p>Health: {settingsLoading ? "Loading..." : affiliateDataSettings?.affiliate_creators_api_health_status || "unchecked"}</p>
+              <p>Last check: {formatDateTime(affiliateDataSettings?.affiliate_creators_api_last_health_check_at)}</p>
+              {affiliateDataSettings?.creators_api_env?.missing?.length ? (
+                <p className="sm:col-span-2 text-amber-700">
+                  Missing: {affiliateDataSettings.creators_api_env.missing.join(", ")}
+                </p>
+              ) : null}
+              {affiliateDataSettings?.affiliate_creators_api_last_error ? (
+                <p className="sm:col-span-2 text-rose-700">Last error: {affiliateDataSettings.affiliate_creators_api_last_error}</p>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2 lg:justify-end">
+            <Button type="button" variant="outline" onClick={() => void runCreatorsHealthCheck()} disabled={healthChecking || settingsLoading} className="rounded-xl">
+              <RefreshCw className={`h-4 w-4 ${healthChecking ? "animate-spin" : ""}`} />
+              {healthChecking ? "Checking..." : "Test API"}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => void saveAffiliateDataMode("manual_only")} disabled={settingsSaving || affiliateDataSettings?.affiliate_data_mode === "manual_only"} className="rounded-xl">
+              Manual Only
+            </Button>
+            <Button type="button" onClick={() => void saveAffiliateDataMode("creators_api")} disabled={settingsSaving || !affiliateDataSettings?.creators_api_env?.configured || affiliateDataSettings?.affiliate_creators_api_health_status !== "ok"} className="rounded-xl">
+              Enable Creators API
+            </Button>
+            <Button type="button" variant="outline" onClick={() => void refreshApiData(selectedIds)} disabled={apiRefreshing || affiliateDataSettings?.affiliate_data_mode !== "creators_api" || selectedIds.length === 0} className="rounded-xl">
+              <RefreshCw className={`h-4 w-4 ${apiRefreshing ? "animate-spin" : ""}`} />
+              Refresh Selected
+            </Button>
+          </div>
+        </div>
+        <div className="mt-4 flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+          <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+          <p>Do not paste Amazon prices, ratings, reviews, or availability in manual mode. Use Check price on Amazon until approved API data is available.</p>
+        </div>
+      </div>
+
       {formOpen ? (
         <FormCard title={form.id ? "Edit Affiliate Product" : "Create Affiliate Product"} onClose={() => setFormOpen(false)}>
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+            Manual entries must use your own product copy. Images are optional and can use a direct image URL or upload path.
+            Do not add Amazon prices, ratings, review text, or availability manually.
+          </div>
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Title">
+            <Field label="Title *">
               <Input value={form.title} onChange={(event) => updateForm({ title: event.target.value })} />
             </Field>
             <Field label="Slug">
               <Input value={form.slug} onChange={(event) => updateForm({ slug: event.target.value })} placeholder="Auto-generated if blank" />
             </Field>
-            <Field label="Amazon Affiliate URL">
+            <Field label="Amazon Affiliate URL with tag *">
               <Input value={form.affiliate_url} onChange={(event) => updateForm({ affiliate_url: event.target.value })} placeholder="https://www.amazon.in/dp/ASIN?tag=..." />
             </Field>
-            <Field label="Marketplace">
+            <Field label="Manual Image URL">
+              <Input value={form.image_url} onChange={(event) => updateForm({ image_url: event.target.value })} placeholder="https://your-cdn.example.com/product.jpg or /uploads/image.webp" />
+              <p className="mt-1 text-xs text-muted-foreground">Optional. Supports direct image URLs, including media-hosted URLs, or /uploads/ paths.</p>
+            </Field>
+            <Field label="Marketplace *">
               <Select value={form.affiliate_marketplace} onValueChange={(value: "amazon_in" | "amazon_us") => updateForm({ affiliate_marketplace: value })}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -431,13 +627,13 @@ export default function AdminAffiliateProducts() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="ASIN">
+            <Field label="ASIN *">
               <Input value={form.affiliate_asin} onChange={(event) => updateForm({ affiliate_asin: event.target.value.toUpperCase() })} />
             </Field>
             <Field label="SKU">
               <Input value={form.sku} onChange={(event) => updateForm({ sku: event.target.value })} />
             </Field>
-            <Field label="Category">
+            <Field label="Category *">
               <Select value={form.category_id} onValueChange={(value) => updateForm({ category_id: value, subcategory_id: "" })}>
                 <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
                 <SelectContent>
@@ -445,7 +641,7 @@ export default function AdminAffiliateProducts() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="Subcategory">
+            <Field label="Subcategory *">
               <Select value={form.subcategory_id} onValueChange={(value) => updateForm({ subcategory_id: value })} disabled={!form.category_id}>
                 <SelectTrigger><SelectValue placeholder="Select subcategory" /></SelectTrigger>
                 <SelectContent>
@@ -459,10 +655,10 @@ export default function AdminAffiliateProducts() {
             <Field label="Tags">
               <Input value={form.tags} onChange={(event) => updateForm({ tags: event.target.value })} placeholder="beauty, wellness" />
             </Field>
-            <Field label="Buying Intent">
+            <Field label="Buying Intent *">
               <Input value={form.buying_intent} onChange={(event) => updateForm({ buying_intent: event.target.value })} />
             </Field>
-            <Field label="Campaign Label">
+            <Field label="Campaign Label *">
               <Input value={form.campaign_label} onChange={(event) => updateForm({ campaign_label: event.target.value })} />
             </Field>
             <Field label="Sort Order">
@@ -473,23 +669,23 @@ export default function AdminAffiliateProducts() {
               <CheckboxField label="Instagram campaign pick" checked={form.affiliate_is_instagram_pick} onChange={(value) => updateForm({ affiliate_is_instagram_pick: value })} />
             </div>
           </div>
-          <Field label="Short Description">
+          <Field label="Short Description *">
             <textarea value={form.short_description} onChange={(event) => updateForm({ short_description: event.target.value })} className="min-h-20 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm" />
           </Field>
           <Field label="Full Description">
             <textarea value={form.full_description} onChange={(event) => updateForm({ full_description: event.target.value })} className="min-h-28 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm" />
           </Field>
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label="Pros">
+            <Field label="Pros *">
               <Input value={form.pros} onChange={(event) => updateForm({ pros: event.target.value })} placeholder="Separate items with |" />
             </Field>
-            <Field label="Cons">
+            <Field label="Cons *">
               <Input value={form.cons} onChange={(event) => updateForm({ cons: event.target.value })} placeholder="Separate items with |" />
             </Field>
-            <Field label="SEO Title">
+            <Field label="SEO Title *">
               <Input value={form.seo_title} onChange={(event) => updateForm({ seo_title: event.target.value })} />
             </Field>
-            <Field label="SEO Description">
+            <Field label="SEO Description *">
               <Input value={form.seo_description} onChange={(event) => updateForm({ seo_description: event.target.value })} />
             </Field>
           </div>
@@ -567,6 +763,7 @@ export default function AdminAffiliateProducts() {
               const uncategorized = isUncategorizedProduct(product);
               const flags = product.affiliate_compliance_flags ?? [];
               const published = product.status === "active" && product.is_visible;
+              const dataBadge = getAffiliateDataBadge(product);
               return (
                 <div key={product.id} className="grid gap-4 px-4 py-4 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center">
                   <div className="flex items-center gap-3">
@@ -582,6 +779,7 @@ export default function AdminAffiliateProducts() {
                       <StatusBadge status={product.affiliate_compliance_status || "needs_review"} />
                       {published ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">Published</span> : null}
                       {uncategorized ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">Uncategorized</span> : null}
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${dataBadge.className}`}>{dataBadge.label}</span>
                       {product.is_featured_affiliate ? <Star className="h-4 w-4 fill-amber-400 text-amber-400" /> : null}
                       {product.affiliate_is_instagram_pick ? <Instagram className="h-4 w-4 text-pink-600" /> : null}
                     </div>
@@ -594,6 +792,10 @@ export default function AdminAffiliateProducts() {
                     ) : (
                       <p className="mt-1 text-xs text-emerald-700">No current compliance flags. Ready to publish after category review.</p>
                     )}
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      API refresh: {formatDateTime(product.affiliate_data_last_refreshed_at)} - Expires: {formatDateTime(product.affiliate_data_expires_at)}
+                      {product.affiliate_api_error ? ` - Error: ${product.affiliate_api_error}` : ""}
+                    </p>
                   </div>
                   <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
                     <Button type="button" variant="outline" size="sm" onClick={() => openEdit(product)}>
@@ -604,6 +806,9 @@ export default function AdminAffiliateProducts() {
                     </Button>
                     <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/check-link`, "Amazon link checked", { method: "POST" })}>
                       <ExternalLink className="h-4 w-4" /> Check Link
+                    </Button>
+                    <Button type="button" variant="outline" size="sm" disabled={affiliateDataSettings?.affiliate_data_mode !== "creators_api"} onClick={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
+                      <RefreshCw className="h-4 w-4" /> Refresh API
                     </Button>
                     {published ? (
                       <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/unpublish`, "Affiliate product unpublished", { method: "POST" })}>

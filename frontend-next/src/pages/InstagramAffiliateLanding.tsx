@@ -3,7 +3,6 @@ import { Sparkles } from "lucide-react";
 import Footer from "@/components/Footer";
 import Navbar from "@/components/Navbar";
 import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
-import { AffiliateDisclosure } from "@/components/affiliate/AffiliateDisclosure";
 import type { CatalogProduct } from "@/hooks/useCatalogProducts";
 
 type InstagramAffiliateLandingProps = {
@@ -33,9 +32,6 @@ export default function InstagramAffiliateLanding({
           <p className="mb-2 text-sm font-semibold uppercase tracking-[0.18em] text-primary">Pink Paisa Finds</p>
           <h1 className="max-w-3xl font-serif text-3xl leading-tight md:text-5xl">{title}</h1>
           <p className="mt-3 max-w-2xl text-base leading-7 text-muted-foreground md:text-lg">{description}</p>
-          <div className="mt-4 max-w-2xl rounded-xl border border-primary/20 bg-primary/5 p-3">
-            <AffiliateDisclosure compact />
-          </div>
         </section>
 
         <div className="mb-8 flex flex-wrap gap-2">

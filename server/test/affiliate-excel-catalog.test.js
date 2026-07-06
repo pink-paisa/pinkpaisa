@@ -26,13 +26,21 @@ test("affiliate excel parser supports clean Pink Paisa template columns", async 
       product_title: "Rose Quartz Face Roller",
       affiliate_url: "www.amazon.in/dp/B0CTVGPLQX",
       image_url: "https://cdn.example.com/roller.jpg",
-      price: "999",
-      sale_price: "699",
-      rating: "4.4 out of 5 stars",
+      marketplace: "amazon_in",
+      asin: "B0CTVGPLQX",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "A calming skincare tool.",
+      buying_intent: "Quick routine upgrade",
+      pros: "Easy to use | Giftable",
+      cons: "Check seller details on Amazon",
+      seo_title: "Rose Quartz Face Roller",
+      seo_description: "Curated skincare pick from Pink Paisa.",
+      campaign_label: "instagram-beauty-finds",
       sku: "AMZ-B0CTVGPLQX",
       external_id: "B0CTVGPLQX",
       brand: "Example Brand",
-      description: "A calming skincare tool.",
+      full_description: "A calming skincare tool.",
     },
   ]);
 
@@ -43,13 +51,16 @@ test("affiliate excel parser supports clean Pink Paisa template columns", async 
   assert.equal(result.items[0].title, "Rose Quartz Face Roller");
   assert.equal(result.items[0].source_url, "https://www.amazon.in/dp/B0CTVGPLQX");
   assert.equal(result.items[0].image_url, "https://cdn.example.com/roller.jpg");
-  assert.equal(result.items[0].list_price, 999);
-  assert.equal(result.items[0].sale_price, 699);
+  assert.equal(result.items[0].affiliate_marketplace, "amazon_in");
+  assert.equal(result.items[0].affiliate_asin, "B0CTVGPLQX");
+  assert.equal(result.items[0].category, "Beauty");
+  assert.equal(result.items[0].subcategory, "Skincare");
+  assert.equal(result.items[0].short_description, "A calming skincare tool.");
   assert.equal(result.items[0].external_id, "B0CTVGPLQX");
   assert.equal(result.items[0].brand, "Example Brand");
 });
 
-test("affiliate excel parser supports Amazon-style export headers", async () => {
+test("affiliate excel parser rejects Amazon-style export rows missing manual fields", async () => {
   const buffer = await workbookBuffer([
     {
       "a-link-normal href": "/Some-Product/dp/B0D1234567/ref=sxin",
@@ -63,14 +74,11 @@ test("affiliate excel parser supports Amazon-style export headers", async () => 
 
   const result = await parseAffiliateExcelBuffer(buffer, { fileName: "amazon.xlsx" });
 
-  assert.equal(result.errors.length, 0);
-  assert.equal(result.items.length, 1);
-  assert.equal(result.items[0].title, "Amazon Export Product");
-  assert.equal(result.items[0].source_url, "https://www.amazon.in/Some-Product/dp/B0D1234567/ref=sxin");
-  assert.equal(result.items[0].sku, "AMZ-B0D1234567");
-  assert.equal(result.items[0].external_id, "B0D1234567");
-  assert.equal(result.items[0].list_price, 799);
-  assert.equal(result.items[0].sale_price, 499);
+  assert.equal(result.items.length, 0);
+  assert.equal(result.errors.length, 1);
+  assert.ok(result.errors[0].errors.includes("Marketplace is required"));
+  assert.ok(result.errors[0].errors.includes("Category is required"));
+  assert.ok(result.errors[0].errors.includes("Short description is required"));
 });
 
 test("affiliate excel parser returns row errors for missing affiliate URLs", async () => {
@@ -87,7 +95,7 @@ test("affiliate excel parser returns row errors for missing affiliate URLs", asy
   assert.equal(result.items.length, 0);
   assert.equal(result.errors.length, 1);
   assert.equal(result.errors[0].row, 2);
-  assert.deepEqual(result.errors[0].errors, ["Affiliate URL is required"]);
+  assert.ok(result.errors[0].errors.includes("Affiliate URL with tag is required"));
 });
 
 test("affiliate excel URL and ASIN helpers normalize common Amazon inputs", () => {

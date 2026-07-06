@@ -18,6 +18,15 @@ const AdminSettingsSchema = new mongoose.Schema(
     campaign_ai_model: { type: String, default: null },
     campaign_ai_image_quality: { type: String, enum: ["low", "medium", "high"], default: "medium" },
     campaign_ai_prompt_template: { type: String, default: null },
+    affiliate_data_mode: { type: String, enum: ["manual_only", "creators_api"], default: "manual_only" },
+    affiliate_data_marketplaces: { type: [String], default: ["amazon_in"] },
+    affiliate_creators_api_last_health_check_at: { type: Date, default: null },
+    affiliate_creators_api_health_status: {
+      type: String,
+      enum: ["unchecked", "ok", "failed"],
+      default: "unchecked",
+    },
+    affiliate_creators_api_last_error: { type: String, default: null },
   },
   { timestamps: true }
 );

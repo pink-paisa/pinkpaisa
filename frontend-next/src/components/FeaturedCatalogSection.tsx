@@ -1,21 +1,26 @@
 import Link from "next/link";
 import { Check, ShoppingCart, Sparkles } from "lucide-react";
+import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
 import { Button } from "@/components/ui/button";
 import { useCart } from "@/contexts/CartContext";
 import type { CatalogProduct, CatalogProductsResponse } from "@/hooks/useCatalogProducts";
+import { formatAffiliateDataRefreshTime, hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
 import { toast } from "sonner";
 
 const formatPrice = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
 const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
   const { addItem, items } = useCart();
+  const isAffiliate = Boolean(product.is_affiliate && product.affiliate_url);
+  const showAffiliateApiPrice = hasVisibleAffiliatePrice(product);
+  const affiliatePriceRefreshedAt = formatAffiliateDataRefreshTime(product);
   const cartQuantity = items.filter((item) => item.id === product.id).reduce((sum, item) => sum + item.quantity, 0);
-  const outOfStock = product.stock_quantity <= 0;
-  const quantityReachedCap = cartQuantity >= product.stock_quantity && product.stock_quantity > 0;
-  const isInCart = cartQuantity > 0;
+  const outOfStock = !isAffiliate && product.stock_quantity <= 0;
+  const quantityReachedCap = !isAffiliate && cartQuantity >= product.stock_quantity && product.stock_quantity > 0;
+  const isInCart = !isAffiliate && cartQuantity > 0;
 
   const handleAdd = () => {
-    if (outOfStock || quantityReachedCap) return;
+    if (isAffiliate || outOfStock || quantityReachedCap) return;
     addItem(
       {
         id: product.id,
@@ -42,8 +47,11 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
             <Sparkles className="h-12 w-12 text-muted-foreground/30" />
           </div>
         )}
-        {product.sale_price ? (
+        {product.sale_price && !isAffiliate ? (
           <span className="absolute left-3 top-3 rounded-full bg-destructive px-2.5 py-1 text-[10px] font-bold text-destructive-foreground">Sale</span>
+        ) : null}
+        {isAffiliate ? (
+          <span className="absolute left-3 top-3 rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Curated find</span>
         ) : null}
         {outOfStock ? (
           <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
@@ -63,21 +71,41 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
         {product.short_description ? <p className="mb-4 line-clamp-2 text-sm text-muted-foreground">{product.short_description}</p> : null}
 
         <div className="mt-auto flex items-center justify-between gap-3">
-          <div className="flex items-baseline gap-2">
-            <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
-            {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
-          </div>
-          <Button size="sm" className="rounded-xl" variant={isInCart ? "secondary" : "default"} onClick={handleAdd} disabled={outOfStock || quantityReachedCap}>
-            {isInCart ? (
-              <>
-                <Check className="h-3.5 w-3.5" /> {quantityReachedCap ? "Maxed" : "Added"}
-              </>
+          {isAffiliate ? (
+            showAffiliateApiPrice ? (
+              <div>
+                <div className="flex flex-wrap items-baseline gap-2">
+                  <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
+                  {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {affiliatePriceRefreshedAt ? `Updated ${affiliatePriceRefreshedAt}. ` : ""}Confirm on Amazon.
+                </p>
+              </div>
             ) : (
-              <>
-                <ShoppingCart className="h-3.5 w-3.5" /> Add
-              </>
-            )}
-          </Button>
+              <p className="max-w-[11rem] text-xs leading-5 text-muted-foreground">Confirm price on Amazon.</p>
+            )
+          ) : (
+            <div className="flex items-baseline gap-2">
+              <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
+              {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
+            </div>
+          )}
+          {isAffiliate ? (
+            <AffiliateCta product={product} size="sm" variant="secondary" className="rounded-xl" />
+          ) : (
+            <Button size="sm" className="rounded-xl" variant={isInCart ? "secondary" : "default"} onClick={handleAdd} disabled={outOfStock || quantityReachedCap}>
+              {isInCart ? (
+                <>
+                  <Check className="h-3.5 w-3.5" /> {quantityReachedCap ? "Maxed" : "Added"}
+                </>
+              ) : (
+                <>
+                  <ShoppingCart className="h-3.5 w-3.5" /> Add
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </div>
     </div>
