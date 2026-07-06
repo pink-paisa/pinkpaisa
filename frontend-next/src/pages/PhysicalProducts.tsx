@@ -108,7 +108,7 @@ const ProductCard = ({
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5 }}
-      className="group relative flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition-shadow hover:shadow-xl hover:shadow-primary/8"
+      className="group relative flex min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm transition-shadow hover:shadow-lg hover:shadow-primary/8"
     >
       <Link href={`/product/${product.slug}`} className="relative aspect-square overflow-hidden bg-accent/30">
           {product.featured_image ? (
@@ -118,23 +118,23 @@ const ProductCard = ({
               <Sparkles className="h-12 w-12 text-muted-foreground/30" />
             </div>
           )}
-          <div className="absolute left-3 top-3 flex flex-col gap-1.5">
+          <div className="absolute left-2 top-2 flex flex-col gap-1.5 sm:left-3 sm:top-3">
             {product.bestseller && !isAffiliate ? (
-              <span className="flex items-center gap-1 rounded-full bg-primary px-2.5 py-1 text-[10px] font-bold text-primary-foreground">
+              <span className="flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[9px] font-bold text-primary-foreground sm:px-2.5 sm:py-1 sm:text-[10px]">
                 <Star className="h-3 w-3" /> Bestseller
               </span>
             ) : null}
             {isAffiliate && product.is_featured_affiliate ? (
-              <span className="rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-bold text-primary shadow-sm">Editor&apos;s pick</span>
+              <span className="rounded-full bg-background/95 px-2 py-0.5 text-[9px] font-bold text-primary shadow-sm sm:px-2.5 sm:py-1 sm:text-[10px]">Editor&apos;s pick</span>
             ) : null}
             {product.featured && !product.bestseller && !isAffiliate ? (
-              <span className="rounded-full bg-accent px-2.5 py-1 text-[10px] font-bold text-accent-foreground">Featured</span>
+              <span className="rounded-full bg-background/95 px-2 py-0.5 text-[9px] font-bold text-primary shadow-sm sm:px-2.5 sm:py-1 sm:text-[10px]">Featured</span>
             ) : null}
             {!isAffiliate && product.sale_price ? (
-              <span className="rounded-full bg-destructive px-2.5 py-1 text-[10px] font-bold text-destructive-foreground">Sale</span>
+              <span className="rounded-full bg-destructive px-2 py-0.5 text-[9px] font-bold text-destructive-foreground sm:px-2.5 sm:py-1 sm:text-[10px]">Sale</span>
             ) : null}
             {isAffiliate ? (
-              <span className="rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-bold text-primary shadow-sm">Curated find</span>
+              <span className="rounded-full bg-background/95 px-2 py-0.5 text-[9px] font-bold text-primary shadow-sm sm:px-2.5 sm:py-1 sm:text-[10px]">Curated find</span>
             ) : null}
           </div>
           {outOfStock ? (
@@ -147,32 +147,32 @@ const ProductCard = ({
       <button
         onClick={() => onToggleWishlist(product)}
         aria-label={wished ? "Remove from wishlist" : "Add to wishlist"}
-        className={`absolute right-3 top-3 rounded-full border p-2.5 backdrop-blur-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        className={`absolute right-2 top-2 rounded-full border p-2 backdrop-blur-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-3 sm:top-3 sm:p-2.5 ${
           wished ? "border-rose-200 bg-white text-rose-500" : "border-white/70 bg-white/85 text-muted-foreground hover:text-rose-500"
         }`}
       >
-        <Heart className={`h-4 w-4 ${wished ? "fill-current" : ""}`} />
+        <Heart className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${wished ? "fill-current" : ""}`} />
       </button>
 
-      <div className="flex flex-1 flex-col p-4 md:p-5">
-        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-primary">
+      <div className="flex min-w-0 flex-1 flex-col p-3 sm:p-4">
+        <p className="mb-1 line-clamp-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-primary sm:text-[10px]">
           {product.category}
           {product.subcategory ? ` · ${product.subcategory}` : ""}
         </p>
 
         <Link href={`/product/${product.slug}`}>
-          <h3 className="mb-2 line-clamp-2 min-h-[3rem] font-serif text-lg leading-tight transition-colors hover:text-primary">{product.title}</h3>
+          <h3 className="mb-1.5 line-clamp-2 min-h-[2.35rem] font-serif text-base leading-tight transition-colors hover:text-primary sm:min-h-[2.5rem] sm:text-lg">{product.title}</h3>
         </Link>
 
-        {product.short_description ? <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">{product.short_description}</p> : null}
+        {product.short_description ? <p className="mb-3 hidden line-clamp-2 text-sm text-muted-foreground sm:block">{product.short_description}</p> : null}
 
-        <div className={isAffiliate ? "mt-auto space-y-3" : "mt-auto flex items-center justify-between gap-3"}>
+        <div className={isAffiliate ? "mt-auto space-y-2 sm:space-y-3" : "mt-auto space-y-2 sm:flex sm:items-center sm:justify-between sm:gap-3 sm:space-y-0"}>
           {isAffiliate ? (
             showAffiliateApiPrice ? (
               <div className="w-full">
                 <div className="flex flex-wrap items-baseline gap-2">
-                  <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
-                  {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
+                  <span className="font-serif text-base font-bold text-foreground sm:text-xl">{formatPrice(product.sale_price ?? product.price)}</span>
+                  {product.sale_price ? <span className="text-xs text-muted-foreground line-through sm:text-sm">{formatPrice(product.price)}</span> : null}
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
                   {affiliatePriceRefreshedAt ? `Updated ${affiliatePriceRefreshedAt}. ` : ""}Confirm on Amazon.
@@ -182,19 +182,21 @@ const ProductCard = ({
               <p className="text-xs leading-5 text-muted-foreground">Confirm price and availability on Amazon.</p>
             )
           ) : (
-            <div className="flex items-baseline gap-2">
-              <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
-              {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-baseline gap-x-1.5">
+                <span className="font-serif text-base font-bold text-foreground sm:text-xl">{formatPrice(product.sale_price ?? product.price)}</span>
+                {product.sale_price ? <span className="text-xs text-muted-foreground line-through sm:text-sm">{formatPrice(product.price)}</span> : null}
+              </div>
             </div>
           )}
 
           {isAffiliate ? (
-            <AffiliateCta product={product} size="sm" variant="secondary" className="w-full rounded-xl" />
+            <AffiliateCta product={product} label="View on Amazon" size="sm" variant="secondary" className="w-full rounded-full px-2 text-[11px] sm:px-3 sm:text-xs" />
           ) : (
             <Button
               size="sm"
               variant={isInCart ? "secondary" : "default"}
-              className="rounded-xl"
+              className="h-8 w-full rounded-full px-2.5 text-xs sm:h-9 sm:w-auto sm:px-3"
               onClick={handleAdd}
               disabled={outOfStock || quantityReachedCap}
             >
@@ -361,17 +363,17 @@ const PhysicalProducts = ({
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen overflow-x-hidden bg-background">
       <Navbar />
-      <div className="container mx-auto py-10 md:py-16">
-        <div className="mb-10 max-w-3xl">
-          <p className="mb-2 text-sm font-semibold uppercase tracking-widest text-primary">Wellness Products</p>
-          <h1 className="mb-3 font-serif text-3xl leading-tight md:text-4xl">Curated Products for Your Journey</h1>
-          <p className="text-lg text-muted-foreground">Wellness, self-growth & financial empowerment - handpicked for you.</p>
+      <div className="container mx-auto max-w-full py-6 md:py-10">
+        <div className="mb-6 max-w-3xl">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-primary md:text-sm">Wellness Products</p>
+          <h1 className="mb-2 max-w-full font-serif text-2xl leading-tight md:text-4xl">Curated Products for Your Journey</h1>
+          <p className="max-w-2xl text-base leading-7 text-muted-foreground md:text-lg">Wellness, self-growth & financial empowerment - handpicked for you.</p>
         </div>
 
-        <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="relative max-w-md flex-1">
+        <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(18rem,28rem)_auto] lg:items-center lg:justify-between">
+          <div className="relative min-w-0">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder="Search products..."
@@ -380,13 +382,13 @@ const PhysicalProducts = ({
               className="pl-9"
             />
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" className="rounded-xl lg:hidden" onClick={() => setFiltersOpen(true)}>
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 lg:flex">
+            <Button variant="outline" className="h-10 rounded-full px-4 lg:hidden" onClick={() => setFiltersOpen(true)}>
               <SlidersHorizontal className="mr-2 h-4 w-4" />
               Filters
             </Button>
             <Select value={sort} onValueChange={(value) => updateParams({ sort: value === "popular" ? null : value, page: null })}>
-              <SelectTrigger className="w-52">
+              <SelectTrigger className="w-full rounded-full lg:w-52">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -400,63 +402,67 @@ const PhysicalProducts = ({
           </div>
         </div>
 
-        <div className="mb-6 flex flex-wrap gap-2">
-          <button
-            onClick={() => updateParams({ category: null, subcategory: null, page: null })}
-            aria-pressed={categorySlug === "all"}
-            className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-              categorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
-            }`}
-          >
-            All
-          </button>
-          {categories.map((category) => (
+        <div className="-mx-4 mb-4 overflow-x-auto px-4 pb-1 scrollbar-hidden sm:-mx-6 sm:px-6 lg:mx-0 lg:px-0">
+          <div className="flex w-max gap-2 lg:w-auto lg:flex-wrap">
             <button
-              key={category.id}
-              onClick={() => updateParams({ category: category.slug, subcategory: null, page: null })}
-              aria-pressed={categorySlug === category.slug}
-              className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                categorySlug === category.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
+              onClick={() => updateParams({ category: null, subcategory: null, page: null })}
+              aria-pressed={categorySlug === "all"}
+              className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                categorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
               }`}
             >
-              {category.name}
+              All
             </button>
-          ))}
+            {categories.map((category) => (
+              <button
+                key={category.id}
+                onClick={() => updateParams({ category: category.slug, subcategory: null, page: null })}
+                aria-pressed={categorySlug === category.slug}
+                className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  categorySlug === category.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
+                }`}
+              >
+                {category.name}
+              </button>
+            ))}
+          </div>
         </div>
 
         {activeCategory && visibleSubcategories.length > 0 ? (
-          <div className="mb-8 rounded-2xl border border-border bg-card p-4">
+          <div className="mb-5 rounded-lg border border-border bg-card p-3">
             <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
               Subcategories in {activeCategory.name}
             </p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => updateParams({ subcategory: null, page: null })}
-                aria-pressed={subcategorySlug === "all"}
-                className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                  subcategorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
-                }`}
-              >
-                All {activeCategory.name}
-              </button>
-              {visibleSubcategories.map((subcategory) => (
+            <div className="-mx-3 overflow-x-auto px-3 pb-1 scrollbar-hidden">
+              <div className="flex w-max gap-2 lg:w-auto lg:flex-wrap">
                 <button
-                  key={subcategory.id}
-                  onClick={() => updateParams({ subcategory: subcategory.slug, page: null })}
-                  aria-pressed={subcategorySlug === subcategory.slug}
-                  className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                    subcategorySlug === subcategory.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
+                  onClick={() => updateParams({ subcategory: null, page: null })}
+                  aria-pressed={subcategorySlug === "all"}
+                  className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    subcategorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
                   }`}
                 >
-                  {subcategory.name}
+                  All {activeCategory.name}
                 </button>
-              ))}
+                {visibleSubcategories.map((subcategory) => (
+                  <button
+                    key={subcategory.id}
+                    onClick={() => updateParams({ subcategory: subcategory.slug, page: null })}
+                    aria-pressed={subcategorySlug === subcategory.slug}
+                    className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                      subcategorySlug === subcategory.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
+                    }`}
+                  >
+                    {subcategory.name}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         ) : null}
 
-        <div className="grid gap-8 lg:grid-cols-[280px,minmax(0,1fr)]">
-          <aside className="hidden rounded-3xl border border-border bg-card p-5 lg:block">
+        <div className="grid min-w-0 gap-6 lg:grid-cols-[240px,minmax(0,1fr)]">
+          <aside className="hidden self-start rounded-lg border border-border bg-card p-4 lg:sticky lg:top-20 lg:block">
             <ProductFilters
               facets={facets}
               minPrice={minPrice}
@@ -474,8 +480,8 @@ const PhysicalProducts = ({
             />
           </aside>
 
-          <div>
-            <div className="mb-5 flex items-center justify-between">
+          <div className="min-w-0">
+            <div className="mb-4 flex items-center justify-between">
               <p className="text-sm text-muted-foreground">
                 {isLoading ? "Loading products..." : `${totalResults} products found`}
               </p>
@@ -487,9 +493,9 @@ const PhysicalProducts = ({
             </div>
 
             {isLoading ? (
-              <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
+              <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
                 {[1, 2, 3, 4, 5, 6].map((item) => (
-                  <Skeleton key={item} className="h-96 rounded-2xl" />
+                  <Skeleton key={item} className="h-72 rounded-lg sm:h-80" />
                 ))}
               </div>
             ) : products.length === 0 ? (
@@ -504,7 +510,7 @@ const PhysicalProducts = ({
               </div>
             ) : (
               <>
-                <div className="grid gap-6 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
                   {products.map((product) => (
                     <ProductCard
                       key={product.id}

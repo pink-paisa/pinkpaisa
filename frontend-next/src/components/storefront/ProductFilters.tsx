@@ -63,11 +63,11 @@ const ProductFilters = ({
   }, [minPrice, maxPrice, sliderMax]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div className="flex items-center justify-between">
         <div>
           <h3 className="font-semibold">Filters</h3>
-          <p className="text-sm text-muted-foreground">Narrow the catalog to what fits you best.</p>
+          <p className="text-xs leading-5 text-muted-foreground">Narrow the catalog to what fits you best.</p>
         </div>
         {hasActiveFilters ? (
           <Button variant="ghost" size="sm" className="rounded-full" onClick={onClear}>
@@ -76,10 +76,10 @@ const ProductFilters = ({
         ) : null}
       </div>
 
-      <section className="space-y-3">
+      <section className="space-y-2.5">
         <div>
-          <p className="font-medium">Price range</p>
-          <p className="text-sm text-muted-foreground">Choose the budget you want to browse.</p>
+          <p className="text-sm font-medium">Price range</p>
+          <p className="text-xs leading-5 text-muted-foreground">Choose the budget you want to browse.</p>
         </div>
         <Slider
           value={sliderValue}
@@ -103,7 +103,7 @@ const ProductFilters = ({
           <span>{formatPrice(sliderValue[0])}</span>
           <span>{formatPrice(sliderValue[1])}</span>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-2 gap-2.5">
           <div className="space-y-2">
             <label htmlFor="product-filter-min-price" className="text-xs font-medium text-muted-foreground">Min</label>
             <Input
@@ -112,6 +112,7 @@ const ProductFilters = ({
               inputMode="numeric"
               min={0}
               value={minPrice ?? ""}
+              className="h-9"
               onChange={(event) => onMinPriceChange(parseInputNumber(event.target.value))}
             />
           </div>
@@ -123,20 +124,21 @@ const ProductFilters = ({
               inputMode="numeric"
               min={0}
               value={maxPrice ?? ""}
+              className="h-9"
               onChange={(event) => onMaxPriceChange(parseInputNumber(event.target.value))}
             />
           </div>
         </div>
       </section>
 
-      <section className="space-y-3">
-        <p className="font-medium">Availability</p>
-        <div className="space-y-3">
-          <label className="flex min-h-10 items-center gap-3 text-sm">
+      <section className="space-y-2.5">
+        <p className="text-sm font-medium">Availability</p>
+        <div className="space-y-2">
+          <label className="flex min-h-8 items-center gap-3 text-sm">
             <Checkbox checked={inStock} onCheckedChange={(value) => onInStockChange(value === true)} />
             In stock only
           </label>
-          <label className="flex min-h-10 items-center gap-3 text-sm">
+          <label className="flex min-h-8 items-center gap-3 text-sm">
             <Checkbox checked={onSale} onCheckedChange={(value) => onOnSaleChange(value === true)} />
             On sale only
           </label>
@@ -144,16 +146,16 @@ const ProductFilters = ({
       </section>
 
       {facets?.brands?.length ? (
-        <section className="space-y-3">
+        <section className="space-y-2.5">
           <div>
-            <p className="font-medium">Brand</p>
-            <p className="text-sm text-muted-foreground">Filter by the labels currently in this result set.</p>
+            <p className="text-sm font-medium">Brand</p>
+            <p className="text-xs leading-5 text-muted-foreground">Filter by the labels currently in this result set.</p>
           </div>
-          <div className="space-y-3">
+          <div className="space-y-2">
             {facets.brands.map((brand) => {
               const selected = selectedBrands.includes(brand.name);
               return (
-                <label key={brand.name} className="flex min-h-10 items-center justify-between gap-3 text-sm">
+                <label key={brand.name} className="flex min-h-8 items-center justify-between gap-3 text-sm">
                   <span className="flex items-center gap-3">
                     <Checkbox checked={selected} onCheckedChange={() => onToggleBrand(brand.name)} />
                     {brand.name}
