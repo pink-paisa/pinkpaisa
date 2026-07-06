@@ -320,6 +320,143 @@ async function findExistingAffiliateProduct(item) {
   return null;
 }
 
+function normalizeImportError(error) {
+  if (error?.field_errors && typeof error.field_errors === "object") {
+    return Object.values(error.field_errors).filter(Boolean);
+  }
+  return [error?.message || "Could not import this row"];
+}
+
+function buildInvalidImportPreviewRow(errorRow = {}) {
+  return {
+    row: errorRow.row || null,
+    title: errorRow.title || null,
+    sku: errorRow.sku || null,
+    asin: errorRow.asin || errorRow.affiliate_asin || null,
+    marketplace: errorRow.marketplace || errorRow.affiliate_marketplace || null,
+    category: errorRow.category || null,
+    subcategory: errorRow.subcategory || null,
+    image_url: errorRow.image_url || null,
+    action: null,
+    status: "invalid",
+    errors: Array.isArray(errorRow.errors) ? errorRow.errors : [String(errorRow.errors || "Invalid row")],
+  };
+}
+
+function buildValidImportPreviewRow({ item, payload, action }) {
+  return {
+    row: item.row_number || null,
+    title: payload.title || item.title || null,
+    sku: payload.sku || item.sku || null,
+    asin: payload.affiliate_asin || item.affiliate_asin || null,
+    marketplace: payload.affiliate_marketplace || item.affiliate_marketplace || null,
+    category: payload.category || item.category || null,
+    subcategory: payload.subcategory || item.subcategory || null,
+    image_url: payload.featured_image || item.image_url || null,
+    action,
+    status: "valid",
+    errors: [],
+  };
+}
+
+async function assertImportTaxonomyIsValid(item) {
+  try {
+    const taxonomy = await resolveTaxonomySelection({
+      category_id: item.category_id,
+      subcategory_id: item.subcategory_id,
+      category: item.category,
+      subcategory: item.subcategory,
+      allowUncategorized: false,
+    });
+    if (taxonomy.isUncategorized) {
+      throw fieldError("Invalid taxonomy", {
+        category_id: "Category is required",
+        subcategory_id: "Subcategory is required",
+      });
+    }
+  } catch (error) {
+    if (error.field_errors) throw error;
+    const message = error.message || "Valid category and subcategory are required";
+    if (message.toLowerCase().includes("subcategory")) {
+      throw fieldError("Invalid taxonomy", { subcategory_id: message });
+    }
+    throw fieldError("Invalid taxonomy", { category_id: message });
+  }
+}
+
+function summarizeImportPreview(previewRows, validRows, parsed) {
+  const createCount = validRows.filter((row) => row.action === "create").length;
+  const updateCount = validRows.filter((row) => row.action === "update").length;
+  const invalidRows = previewRows.filter((row) => row.status === "invalid").length;
+
+  return {
+    total_rows: parsed.meta?.total_rows ?? previewRows.length,
+    valid_rows: validRows.length,
+    invalid_rows: invalidRows,
+    create_count: createCount,
+    update_count: updateCount,
+  };
+}
+
+async function analyzeAffiliateExcelImportBuffer(buffer, { fileName = null } = {}) {
+  const parsed = await parseAffiliateExcelBuffer(buffer, { fileName });
+  const previewRows = parsed.errors.map(buildInvalidImportPreviewRow);
+  const validRows = [];
+  const seenAsins = new Set();
+
+  for (const item of parsed.items) {
+    try {
+      const marketplace = normalizeMarketplace(item.affiliate_marketplace || item.marketplace);
+      const asin = normalizeString(item.affiliate_asin || item.asin);
+      const asinKey = asin && marketplace ? `${marketplace}:${asin}` : null;
+
+      if (asinKey) {
+        if (seenAsins.has(asinKey)) {
+          throw fieldError("Duplicate ASIN in workbook", {
+            affiliate_asin: `Duplicate ASIN ${asin} for ${marketplace} appears more than once in this file`,
+          });
+        }
+        seenAsins.add(asinKey);
+      }
+
+      await assertImportTaxonomyIsValid(item);
+      const existing = await findExistingAffiliateProduct(item);
+      const nextPayload = await buildAffiliatePayload({ ...item, status: "draft", is_visible: false }, existing);
+      if (Array.isArray(nextPayload.affiliate_compliance_flags) && nextPayload.affiliate_compliance_flags.length) {
+        throw fieldError("Affiliate URL is not compliant", {
+          affiliate_url: `Fix compliance flags: ${nextPayload.affiliate_compliance_flags.join(", ")}`,
+        });
+      }
+      const uniquenessErrors = await validateAffiliateUniqueness(nextPayload, existing?._id || null);
+      if (Object.keys(uniquenessErrors).length) throw fieldError("Validation failed", uniquenessErrors);
+
+      const action = existing ? "update" : "create";
+      validRows.push({ item, payload: nextPayload, existing, action });
+      previewRows.push(buildValidImportPreviewRow({ item, payload: nextPayload, action }));
+    } catch (error) {
+      previewRows.push(buildInvalidImportPreviewRow({
+        row: item.row_number || null,
+        title: item.title || null,
+        sku: item.sku || null,
+        asin: item.affiliate_asin || null,
+        marketplace: item.affiliate_marketplace || item.marketplace || null,
+        category: item.category || null,
+        subcategory: item.subcategory || null,
+        image_url: item.image_url || null,
+        errors: normalizeImportError(error),
+      }));
+    }
+  }
+
+  return {
+    parsed,
+    validRows,
+    previewRows,
+    summary: summarizeImportPreview(previewRows, validRows, parsed),
+    meta: parsed.meta,
+  };
+}
+
 async function buildAffiliatePayload(item, existing = null) {
   const source = {
     ...(existing ? existing.toObject() : {}),
@@ -509,44 +646,48 @@ const uploadAffiliateProducts = async (req, res) => {
       return res.status(400).json({ message: "Upload an Excel file using multipart/form-data field name: file" });
     }
 
-    const parsed = await parseAffiliateExcelBuffer(req.file.buffer, { fileName: req.file.originalname });
-    if (!parsed.items.length) {
+    const analysis = await analyzeAffiliateExcelImportBuffer(req.file.buffer, { fileName: req.file.originalname });
+    if (!analysis.validRows.length) {
       return res.status(400).json({
         message: "No valid affiliate products found in the uploaded Excel file",
         created: 0,
         updated: 0,
-        skipped: parsed.errors.length,
+        skipped: analysis.summary.invalid_rows,
         total: await Product.countDocuments({ is_affiliate: true, source_type: "admin" }),
         items: [],
-        errors: parsed.errors,
-        meta: parsed.meta,
+        errors: analysis.previewRows.filter((row) => row.status === "invalid"),
+        meta: analysis.meta,
+        summary: analysis.summary,
       });
     }
 
     let createdCount = 0;
     let updatedCount = 0;
-    const importErrors = [...parsed.errors];
+    const importErrors = analysis.previewRows.filter((row) => row.status === "invalid");
 
-    for (const item of parsed.items) {
+    for (const row of analysis.validRows) {
       try {
-        const existing = await findExistingAffiliateProduct(item);
-        const nextPayload = await buildAffiliatePayload({ ...item, status: "draft", is_visible: false }, existing);
-        const uniquenessErrors = await validateAffiliateUniqueness(nextPayload, existing?._id || null);
-        if (Object.keys(uniquenessErrors).length) throw fieldError("Validation failed", uniquenessErrors);
-        if (existing) {
-          Object.assign(existing, nextPayload, { status: "draft", is_visible: false });
-          await existing.save();
+        if (row.existing) {
+          Object.assign(row.existing, row.payload, { status: "draft", is_visible: false });
+          await row.existing.save();
           updatedCount += 1;
         } else {
-          await Product.create({ ...nextPayload, status: "draft", is_visible: false });
+          await Product.create({ ...row.payload, status: "draft", is_visible: false });
           createdCount += 1;
         }
       } catch (error) {
         importErrors.push({
-          row: item.row_number || null,
-          title: item.title || null,
-          sku: item.sku || null,
-          errors: error.field_errors ? Object.values(error.field_errors) : [error.message || "Could not import this row"],
+          row: row.item.row_number || null,
+          title: row.item.title || null,
+          sku: row.item.sku || null,
+          asin: row.item.affiliate_asin || null,
+          marketplace: row.item.affiliate_marketplace || row.item.marketplace || null,
+          category: row.item.category || null,
+          subcategory: row.item.subcategory || null,
+          image_url: row.item.image_url || null,
+          action: row.action,
+          status: "invalid",
+          errors: normalizeImportError(error),
         });
       }
     }
@@ -560,7 +701,33 @@ const uploadAffiliateProducts = async (req, res) => {
       total: products.length,
       items: products.map(toFlat),
       errors: importErrors,
-      meta: parsed.meta,
+      meta: analysis.meta,
+      summary: {
+        ...analysis.summary,
+        valid_rows: createdCount + updatedCount,
+        invalid_rows: importErrors.length,
+        create_count: createdCount,
+        update_count: updatedCount,
+      },
+    });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+const previewAffiliateProducts = async (req, res) => {
+  try {
+    if (!req.file?.buffer) {
+      return res.status(400).json({ message: "Upload an Excel file using multipart/form-data field name: file" });
+    }
+
+    const analysis = await analyzeAffiliateExcelImportBuffer(req.file.buffer, { fileName: req.file.originalname });
+    res.json({
+      message: "Affiliate product upload preview ready",
+      summary: analysis.summary,
+      preview_rows: analysis.previewRows,
+      has_valid_rows: analysis.validRows.length > 0,
+      meta: analysis.meta,
     });
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -602,20 +769,236 @@ const assignAffiliateCategory = async (req, res) => {
   }
 };
 
+const AFFILIATE_BULK_ACTIONS = new Set([
+  "validate_compliance",
+  "check_link",
+  "publish",
+  "unpublish",
+  "pause",
+  "feature",
+  "unfeature",
+  "instagram_pick",
+  "instagram_unpick",
+  "refresh_api",
+  "assign_category",
+  "delete",
+]);
+
+function normalizeBulkProductIds(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map((item) => normalizeString(item)).filter(Boolean)));
+}
+
+function serializeBulkResult({ id, action, ok, message, product = null, extra = {} }) {
+  const flattened = product ? toFlat(product.toObject ? product.toObject() : product) : null;
+  return {
+    id: id ? String(id) : (flattened?.id || null),
+    action,
+    ok: Boolean(ok),
+    message: message || null,
+    product: flattened,
+    ...extra,
+  };
+}
+
+async function validateAffiliateProductDocument(product) {
+  const validation = validateAmazonAffiliateUrl(product.affiliate_url, {
+    marketplace: product.affiliate_marketplace,
+    requireConfiguredTag: true,
+  });
+  product.affiliate_asin = validation.asin;
+  product.affiliate_marketplace = validation.marketplace;
+  product.affiliate_tag = validation.affiliateTag;
+  product.affiliate_compliance_flags = validation.flags;
+  product.affiliate_compliance_status = validation.isValid ? "compliant" : "needs_review";
+  if (!validation.isValid) {
+    product.status = "draft";
+    product.is_visible = false;
+  }
+  await product.save();
+  return { product, validation };
+}
+
+async function publishAffiliateProductDocument(product) {
+  const validation = await assertPublishable(product);
+  Object.assign(product, {
+    status: "active",
+    is_visible: true,
+    affiliate_asin: validation.asin,
+    affiliate_marketplace: validation.marketplace,
+    affiliate_tag: validation.affiliateTag,
+    affiliate_compliance_status: "compliant",
+    affiliate_compliance_flags: [],
+  });
+  await product.save();
+  return { product, validation };
+}
+
+async function applyAffiliateBulkAction(product, action, payload = {}) {
+  if (!product) return serializeBulkResult({ action, ok: false, message: "Affiliate product not found" });
+
+  if (action === "validate_compliance") {
+    const result = await validateAffiliateProductDocument(product);
+    return serializeBulkResult({
+      id: product._id,
+      action,
+      ok: result.validation.isValid,
+      message: result.validation.isValid ? "Compliance valid" : `Needs review: ${result.validation.flags.join(", ")}`,
+      product,
+      extra: { validation: result.validation },
+    });
+  }
+
+  if (action === "check_link") {
+    const result = await checkAffiliateProductLink(product);
+    await persistAffiliateLinkCheck(product, result);
+    return serializeBulkResult({
+      id: product._id,
+      action,
+      ok: Boolean(result.ok),
+      message: result.message || (result.ok ? "Amazon link reachable" : "Amazon link check failed"),
+      product,
+      extra: { link_check: result },
+    });
+  }
+
+  if (action === "publish") {
+    await publishAffiliateProductDocument(product);
+    return serializeBulkResult({ id: product._id, action, ok: true, message: "Published", product });
+  }
+
+  if (action === "unpublish") {
+    product.status = "draft";
+    product.is_visible = false;
+    await product.save();
+    return serializeBulkResult({ id: product._id, action, ok: true, message: "Unpublished", product });
+  }
+
+  if (action === "pause") {
+    product.status = "inactive";
+    product.is_visible = false;
+    product.affiliate_compliance_status = "paused";
+    product.affiliate_compliance_flags = ["admin_paused"];
+    await product.save();
+    return serializeBulkResult({ id: product._id, action, ok: true, message: "Paused", product });
+  }
+
+  if (action === "feature" || action === "unfeature") {
+    const featured = action === "feature";
+    product.is_featured_affiliate = featured;
+    product.featured = featured;
+    await product.save();
+    return serializeBulkResult({ id: product._id, action, ok: true, message: featured ? "Featured" : "Unfeatured", product });
+  }
+
+  if (action === "instagram_pick" || action === "instagram_unpick") {
+    const picked = action === "instagram_pick";
+    product.affiliate_is_instagram_pick = picked;
+    await product.save();
+    return serializeBulkResult({ id: product._id, action, ok: true, message: picked ? "Added to Instagram picks" : "Removed from Instagram picks", product });
+  }
+
+  if (action === "refresh_api") {
+    const result = await refreshAffiliateProductFromCreatorsApi(product);
+    const serialized = serializeRefreshResult(result);
+    return {
+      id: String(product._id),
+      action,
+      ok: Boolean(serialized.ok),
+      message: serialized.message || (serialized.ok ? "Creators API refreshed" : "Creators API refresh failed"),
+      product: serialized.product || toFlat(product.toObject ? product.toObject() : product),
+      refresh: serialized,
+    };
+  }
+
+  if (action === "assign_category") {
+    const taxonomy = payload.taxonomy;
+    if (!taxonomy) throw fieldError("Select category and subcategory");
+    product.category_id = taxonomy.categoryDoc._id;
+    product.subcategory_id = taxonomy.subcategoryDoc._id;
+    product.category = taxonomy.categoryDoc.name;
+    product.subcategory = taxonomy.subcategoryDoc.name;
+    await product.save();
+    return serializeBulkResult({ id: product._id, action, ok: true, message: "Category assigned", product });
+  }
+
+  if (action === "delete") {
+    if (product.status === "active" || product.is_visible) {
+      return serializeBulkResult({ id: product._id, action, ok: false, message: "Unpublish before deleting", product });
+    }
+    await Product.deleteOne({ _id: product._id, is_affiliate: true, source_type: "admin" });
+    return serializeBulkResult({ id: product._id, action, ok: true, message: "Deleted" });
+  }
+
+  return serializeBulkResult({ id: product._id, action, ok: false, message: "Unsupported bulk action", product });
+}
+
+async function performAffiliateBulkAction({ productIds, action, payload = {} }) {
+  const ids = normalizeBulkProductIds(productIds);
+  if (!ids.length) throw fieldError("Select at least one affiliate product");
+  if (!AFFILIATE_BULK_ACTIONS.has(action)) throw fieldError("Unsupported bulk action");
+  if (ids.length > 100) throw fieldError("Select 100 or fewer affiliate products at a time");
+
+  const actionPayload = { ...payload };
+  if (action === "assign_category") {
+    actionPayload.taxonomy = await resolveTaxonomySelection({
+      category_id: payload.category_id,
+      subcategory_id: payload.subcategory_id,
+      category: payload.category,
+      subcategory: payload.subcategory,
+      allowUncategorized: false,
+    });
+  }
+
+  const results = [];
+  for (const id of ids) {
+    try {
+      const product = await Product.findOne({ _id: id, is_affiliate: true, source_type: "admin" });
+      if (!product) {
+        results.push(serializeBulkResult({ id, action, ok: false, message: "Affiliate product not found" }));
+        continue;
+      }
+      results.push(await applyAffiliateBulkAction(product, action, actionPayload));
+    } catch (err) {
+      results.push(serializeBulkResult({
+        id,
+        action,
+        ok: false,
+        message: err.message || "Bulk action failed",
+        extra: { field_errors: err.field_errors },
+      }));
+    }
+  }
+
+  const succeeded = results.filter((result) => result.ok).length;
+  return {
+    requested: ids.length,
+    succeeded,
+    failed: ids.length - succeeded,
+    results,
+  };
+}
+
+const bulkAffiliateProductAction = async (req, res) => {
+  try {
+    const summary = await performAffiliateBulkAction({
+      productIds: req.body?.product_ids,
+      action: req.body?.action,
+      payload: req.body?.payload || {},
+    });
+    res.json({
+      message: `Bulk action complete. ${summary.succeeded} succeeded, ${summary.failed} failed.`,
+      ...summary,
+    });
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ message: err.message, field_errors: err.field_errors });
+  }
+};
+
 const publishAffiliateProduct = async (req, res) => {
   try {
     const product = await Product.findOne({ _id: req.params.id, is_affiliate: true, source_type: "admin" });
-    const validation = await assertPublishable(product);
-    Object.assign(product, {
-      status: "active",
-      is_visible: true,
-      affiliate_asin: validation.asin,
-      affiliate_marketplace: validation.marketplace,
-      affiliate_tag: validation.affiliateTag,
-      affiliate_compliance_status: "compliant",
-      affiliate_compliance_flags: [],
-    });
-    await product.save();
+    await publishAffiliateProductDocument(product);
     res.json(toFlat(product.toObject()));
   } catch (err) {
     res.status(err.statusCode || 400).json({ message: err.message, field_errors: err.field_errors });
@@ -700,20 +1083,7 @@ const validateAffiliateProduct = async (req, res) => {
   try {
     const product = await Product.findOne({ _id: req.params.id, is_affiliate: true, source_type: "admin" });
     if (!product) return res.status(404).json({ message: "Affiliate product not found" });
-    const validation = validateAmazonAffiliateUrl(product.affiliate_url, {
-      marketplace: product.affiliate_marketplace,
-      requireConfiguredTag: true,
-    });
-    product.affiliate_asin = validation.asin;
-    product.affiliate_marketplace = validation.marketplace;
-    product.affiliate_tag = validation.affiliateTag;
-    product.affiliate_compliance_flags = validation.flags;
-    product.affiliate_compliance_status = validation.isValid ? "compliant" : "needs_review";
-    if (!validation.isValid) {
-      product.status = "draft";
-      product.is_visible = false;
-    }
-    await product.save();
+    const { validation } = await validateAffiliateProductDocument(product);
     res.json({ product: toFlat(product.toObject()), validation });
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -870,8 +1240,10 @@ module.exports = {
   createAffiliateProduct,
   updateAffiliateProduct,
   deleteAffiliateProduct,
+  previewAffiliateProducts,
   uploadAffiliateProducts,
   assignAffiliateCategory,
+  bulkAffiliateProductAction,
   publishAffiliateProduct,
   unpublishAffiliateProduct,
   pauseAffiliateProduct,
@@ -886,11 +1258,13 @@ module.exports = {
   buildAffiliatePayload,
   findExistingAffiliateProduct,
   _private: {
+    analyzeAffiliateExcelImportBuffer,
     buildPreservedApiContent,
     buildAffiliateImageContent,
     buildAffiliatePayloadSnapshot,
     buildRequiredAffiliateFieldErrors,
     normalizeAdminAffiliateDataSource,
+    performAffiliateBulkAction,
     resolveManualAffiliateImageUrl,
   },
 };

@@ -7,8 +7,10 @@ const {
   createAffiliateProduct,
   updateAffiliateProduct,
   deleteAffiliateProduct,
+  previewAffiliateProducts,
   uploadAffiliateProducts,
   assignAffiliateCategory,
+  bulkAffiliateProductAction,
   publishAffiliateProduct,
   unpublishAffiliateProduct,
   pauseAffiliateProduct,
@@ -47,8 +49,10 @@ const uploadAffiliateExcel = (req, res, next) => {
 
 router.get("/", protect, adminOnly, listAffiliateProducts);
 router.post("/", protect, adminOnly, createAffiliateProduct);
+router.post("/preview-excel", protect, adminOnly, uploadAffiliateExcel, previewAffiliateProducts);
 router.post("/upload-excel", protect, adminOnly, uploadAffiliateExcel, uploadAffiliateProducts);
 router.patch("/assign-category", protect, adminOnly, assignAffiliateCategory);
+router.post("/bulk-action", protect, adminOnly, bulkAffiliateProductAction);
 router.post("/backfill-compliance", protect, adminOnly, backfillAffiliateCompliance);
 router.post("/backfill-images", protect, adminOnly, backfillAffiliateImages);
 router.post("/refresh-api-data", protect, adminOnly, refreshAffiliateProductsApiData);

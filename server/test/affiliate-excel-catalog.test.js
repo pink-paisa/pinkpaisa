@@ -8,6 +8,239 @@ const {
   normalizeUrl,
 } = require("../services/affiliateExcelCatalog");
 const Product = require("../models/Product");
+const ProductCategory = require("../models/ProductCategory");
+const ProductSubcategory = require("../models/ProductSubcategory");
+const AdminSettings = require("../models/AdminSettings");
+const affiliateProductController = require("../controllers/affiliateProductController");
+const affiliateProductPrivate = affiliateProductController._private;
+
+function queryResult(value) {
+  return {
+    select() { return this; },
+    sort() { return this; },
+    lean() { return Promise.resolve(value); },
+    then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
+    catch(reject) { return Promise.resolve(value).catch(reject); },
+  };
+}
+
+async function withAffiliateImportMocks(callback) {
+  const originalEnv = {
+    AMAZON_ASSOCIATE_TAG_IN: process.env.AMAZON_ASSOCIATE_TAG_IN,
+    AMAZON_ASSOCIATE_TAG_US: process.env.AMAZON_ASSOCIATE_TAG_US,
+  };
+  const originals = {
+    productFindOne: Product.findOne,
+    productFind: Product.find,
+    productCreate: Product.create,
+    productCountDocuments: Product.countDocuments,
+    categoryFindOne: ProductCategory.findOne,
+    categoryFindById: ProductCategory.findById,
+    subcategoryFindOne: ProductSubcategory.findOne,
+    subcategoryFindById: ProductSubcategory.findById,
+  };
+
+  const category = { _id: "category-id", name: "Beauty", slug: "beauty" };
+  const subcategory = { _id: "subcategory-id", category_id: "category-id", name: "Skincare", slug: "skincare" };
+  const existingProduct = {
+    _id: "existing-product-id",
+    title: "Existing Affiliate Product",
+    is_affiliate: true,
+    source_type: "admin",
+    affiliate_marketplace: "amazon_in",
+    affiliate_asin: "B0D1234567",
+    affiliate_url: "https://www.amazon.in/dp/B0D1234567?tag=pinkpaisa-21",
+    attributes: {},
+    toObject() {
+      return { ...this };
+    },
+    async save() {
+      this.__saved = true;
+    },
+  };
+  const createdDocs = [];
+
+  try {
+    process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa-21";
+    process.env.AMAZON_ASSOCIATE_TAG_US = "";
+
+    Product.findOne = (query = {}) => {
+      if (
+        query.is_affiliate
+        && query.source_type === "admin"
+        && query.affiliate_marketplace === "amazon_in"
+        && query.affiliate_asin === "B0D1234567"
+        && !query._id
+      ) {
+        return queryResult(existingProduct);
+      }
+      return queryResult(null);
+    };
+    Product.find = () => queryResult([...createdDocs, existingProduct].map((doc) => ({ ...doc, id: doc._id })));
+    Product.countDocuments = async () => createdDocs.length + 1;
+    Product.create = async (doc) => {
+      const created = { ...doc, _id: `created-${createdDocs.length + 1}` };
+      createdDocs.push(created);
+      return created;
+    };
+    ProductCategory.findOne = (query = {}) => {
+      const name = String(query.name || "");
+      return queryResult(name.includes("Beauty") ? category : null);
+    };
+    ProductCategory.findById = (id) => queryResult(String(id) === "category-id" ? category : null);
+    ProductSubcategory.findOne = (query = {}) => {
+      const name = String(query.name || "");
+      const categoryMatches = String(query.category_id) === "category-id";
+      return queryResult(categoryMatches && name.includes("Skincare") ? subcategory : null);
+    };
+    ProductSubcategory.findById = (id) => queryResult(String(id) === "subcategory-id" ? subcategory : null);
+
+    return await callback({ existingProduct, createdDocs });
+  } finally {
+    process.env.AMAZON_ASSOCIATE_TAG_IN = originalEnv.AMAZON_ASSOCIATE_TAG_IN;
+    process.env.AMAZON_ASSOCIATE_TAG_US = originalEnv.AMAZON_ASSOCIATE_TAG_US;
+    Product.findOne = originals.productFindOne;
+    Product.find = originals.productFind;
+    Product.create = originals.productCreate;
+    Product.countDocuments = originals.productCountDocuments;
+    ProductCategory.findOne = originals.categoryFindOne;
+    ProductCategory.findById = originals.categoryFindById;
+    ProductSubcategory.findOne = originals.subcategoryFindOne;
+    ProductSubcategory.findById = originals.subcategoryFindById;
+  }
+}
+
+async function withAffiliateBulkMocks(callback) {
+  const originalEnv = {
+    AMAZON_ASSOCIATE_TAG_IN: process.env.AMAZON_ASSOCIATE_TAG_IN,
+    AMAZON_ASSOCIATE_TAG_US: process.env.AMAZON_ASSOCIATE_TAG_US,
+  };
+  const originals = {
+    productFindOne: Product.findOne,
+    productDeleteOne: Product.deleteOne,
+    categoryFindById: ProductCategory.findById,
+    subcategoryFindById: ProductSubcategory.findById,
+    adminSettingsFindOne: AdminSettings.findOne,
+    adminSettingsCreate: AdminSettings.create,
+  };
+
+  const objectIdLike = (value) => ({ toString: () => value });
+  const makeProduct = (id, overrides = {}) => ({
+    _id: id,
+    id,
+    title: `Affiliate ${id}`,
+    slug: `affiliate-${id}`,
+    is_affiliate: true,
+    source_type: "admin",
+    affiliate_url: `https://www.amazon.in/dp/${overrides.affiliate_asin || "B0BULK0001"}?tag=pinkpaisa-21`,
+    affiliate_asin: overrides.affiliate_asin || "B0BULK0001",
+    affiliate_marketplace: "amazon_in",
+    affiliate_data_source: "manual",
+    category_id: "category-id",
+    subcategory_id: "subcategory-id",
+    category: "Beauty",
+    subcategory: "Skincare",
+    short_description: "Curated affiliate product.",
+    pros: ["Useful"],
+    cons: ["Check seller details"],
+    seo_title: `Affiliate ${id}`,
+    seo_description: `Curated affiliate product ${id}.`,
+    status: "draft",
+    is_visible: false,
+    featured: false,
+    is_featured_affiliate: false,
+    affiliate_is_instagram_pick: false,
+    attributes: {},
+    ...overrides,
+    toObject() {
+      return { ...this };
+    },
+    async save() {
+      this.__saved = true;
+      return this;
+    },
+  });
+
+  const docs = new Map([
+    ["valid", makeProduct("valid", { affiliate_asin: "B0BULK0001" })],
+    ["invalid", makeProduct("invalid", {
+      affiliate_asin: "B0BULK0002",
+      affiliate_url: "https://www.amazon.in/dp/B0BULK0002?tag=wrongtag-21",
+    })],
+    ["active", makeProduct("active", {
+      affiliate_asin: "B0BULK0003",
+      status: "active",
+      is_visible: true,
+    })],
+    ["draft", makeProduct("draft", { affiliate_asin: "B0BULK0004" })],
+    ["objectid", makeProduct("objectid", {
+      _id: objectIdLike("objectid"),
+      affiliate_asin: "B0BULK0005",
+    })],
+  ]);
+  const deletedIds = [];
+
+  try {
+    process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa-21";
+    process.env.AMAZON_ASSOCIATE_TAG_US = "";
+
+    Product.findOne = (query = {}) => {
+      if (query._id && query.is_affiliate && query.source_type === "admin") {
+        return queryResult(docs.get(String(query._id)) || null);
+      }
+      return queryResult(null);
+    };
+    Product.deleteOne = async (query = {}) => {
+      deletedIds.push(String(query._id));
+      docs.delete(String(query._id));
+      return { deletedCount: 1 };
+    };
+    ProductCategory.findById = (id) => queryResult(String(id) === "category-id-2" ? { _id: "category-id-2", name: "Fitness", slug: "fitness" } : null);
+    ProductSubcategory.findById = (id) => queryResult(String(id) === "subcategory-id-2" ? { _id: "subcategory-id-2", category_id: "category-id-2", name: "Equipment", slug: "equipment" } : null);
+    AdminSettings.findOne = () => queryResult({
+      key: "affiliate-data",
+      affiliate_data_mode: "creators_api",
+      affiliate_data_marketplaces: ["amazon_in"],
+      affiliate_creators_api_health_status: "ok",
+    });
+    AdminSettings.create = async () => ({
+      toObject() {
+        return {
+          key: "affiliate-data",
+          affiliate_data_mode: "manual_only",
+          affiliate_data_marketplaces: ["amazon_in"],
+          affiliate_creators_api_health_status: "unchecked",
+        };
+      },
+    });
+
+    return await callback({ docs, deletedIds });
+  } finally {
+    process.env.AMAZON_ASSOCIATE_TAG_IN = originalEnv.AMAZON_ASSOCIATE_TAG_IN;
+    process.env.AMAZON_ASSOCIATE_TAG_US = originalEnv.AMAZON_ASSOCIATE_TAG_US;
+    Product.findOne = originals.productFindOne;
+    Product.deleteOne = originals.productDeleteOne;
+    ProductCategory.findById = originals.categoryFindById;
+    ProductSubcategory.findById = originals.subcategoryFindById;
+    AdminSettings.findOne = originals.adminSettingsFindOne;
+    AdminSettings.create = originals.adminSettingsCreate;
+  }
+}
+
+function mockResponse() {
+  return {
+    statusCode: 200,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
 
 async function workbookBuffer(rows) {
   const workbook = new ExcelJS.Workbook();
@@ -112,5 +345,218 @@ test("vendor product uniqueness ignores admin and affiliate products without ven
   assert.equal(vendorProductIndex[1].unique, true);
   assert.deepEqual(vendorProductIndex[1].partialFilterExpression, {
     vendor_product_id: { $type: "objectId" },
+  });
+});
+
+test("affiliate excel preview classifies create update and duplicate rows without writing products", async () => {
+  const buffer = await workbookBuffer([
+    {
+      product_title: "New Affiliate Product",
+      affiliate_url: "https://www.amazon.in/dp/B0CTVGPLQX?tag=pinkpaisa-21",
+      image_url: "https://cdn.example.com/new.jpg",
+      marketplace: "amazon_in",
+      asin: "B0CTVGPLQX",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "A new curated pick.",
+      pros: "Useful | Giftable",
+      cons: "Check seller details",
+      seo_title: "New Affiliate Product",
+      seo_description: "Curated affiliate pick.",
+    },
+    {
+      product_title: "Existing Affiliate Product",
+      affiliate_url: "https://www.amazon.in/dp/B0D1234567?tag=pinkpaisa-21",
+      image_url: "https://cdn.example.com/existing.jpg",
+      marketplace: "amazon_in",
+      asin: "B0D1234567",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "Existing curated pick.",
+      pros: "Known fit | Easy to explain",
+      cons: "Check seller details",
+      seo_title: "Existing Affiliate Product",
+      seo_description: "Existing affiliate pick.",
+    },
+    {
+      product_title: "Duplicate Affiliate Product",
+      affiliate_url: "https://www.amazon.in/dp/B0CTVGPLQX?tag=pinkpaisa-21",
+      image_url: "https://cdn.example.com/duplicate.jpg",
+      marketplace: "amazon_in",
+      asin: "B0CTVGPLQX",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "Duplicate curated pick.",
+      pros: "Useful",
+      cons: "Duplicate",
+      seo_title: "Duplicate Affiliate Product",
+      seo_description: "Duplicate affiliate pick.",
+    },
+    {
+      product_title: "Wrong Tag Affiliate Product",
+      affiliate_url: "https://www.amazon.in/dp/B0BADTAG99?tag=wrongtag-21",
+      image_url: "https://cdn.example.com/wrong-tag.jpg",
+      marketplace: "amazon_in",
+      asin: "B0BADTAG99",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "Wrong tag curated pick.",
+      pros: "Useful",
+      cons: "Wrong affiliate tag",
+      seo_title: "Wrong Tag Affiliate Product",
+      seo_description: "Wrong tag affiliate pick.",
+    },
+  ]);
+
+  await withAffiliateImportMocks(async ({ existingProduct, createdDocs }) => {
+    const originalCreate = Product.create;
+    Product.create = async () => {
+      throw new Error("Preview must not create products");
+    };
+
+    const analysis = await affiliateProductPrivate.analyzeAffiliateExcelImportBuffer(buffer, { fileName: "preview.xlsx" });
+
+    Product.create = originalCreate;
+    assert.equal(analysis.summary.total_rows, 4);
+    assert.equal(analysis.summary.valid_rows, 2);
+    assert.equal(analysis.summary.invalid_rows, 2);
+    assert.equal(analysis.summary.create_count, 1);
+    assert.equal(analysis.summary.update_count, 1);
+    assert.equal(analysis.previewRows.find((row) => row.asin === "B0CTVGPLQX" && row.status === "valid").action, "create");
+    assert.equal(analysis.previewRows.find((row) => row.asin === "B0D1234567").action, "update");
+    assert.ok(analysis.previewRows.find((row) => row.status === "invalid").errors.join(" ").includes("Duplicate ASIN"));
+    assert.ok(analysis.previewRows.find((row) => row.asin === "B0BADTAG99").errors.join(" ").includes("amazon_affiliate_tag_mismatch"));
+    assert.equal(createdDocs.length, 0);
+    assert.equal(existingProduct.__saved, undefined);
+  });
+});
+
+test("affiliate excel confirm import creates and updates draft review products only", async () => {
+  const buffer = await workbookBuffer([
+    {
+      product_title: "New Affiliate Product",
+      affiliate_url: "https://www.amazon.in/dp/B0CTVGPLQX?tag=pinkpaisa-21",
+      image_url: "https://cdn.example.com/new.jpg",
+      marketplace: "amazon_in",
+      asin: "B0CTVGPLQX",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "A new curated pick.",
+      pros: "Useful | Giftable",
+      cons: "Check seller details",
+      seo_title: "New Affiliate Product",
+      seo_description: "Curated affiliate pick.",
+    },
+    {
+      product_title: "Existing Affiliate Product",
+      affiliate_url: "https://www.amazon.in/dp/B0D1234567?tag=pinkpaisa-21",
+      image_url: "https://cdn.example.com/existing.jpg",
+      marketplace: "amazon_in",
+      asin: "B0D1234567",
+      category: "Beauty",
+      subcategory: "Skincare",
+      short_description: "Existing curated pick.",
+      pros: "Known fit | Easy to explain",
+      cons: "Check seller details",
+      seo_title: "Existing Affiliate Product",
+      seo_description: "Existing affiliate pick.",
+    },
+  ]);
+
+  await withAffiliateImportMocks(async ({ existingProduct, createdDocs }) => {
+    const res = mockResponse();
+    await affiliateProductController.uploadAffiliateProducts({
+      file: { buffer, originalname: "import.xlsx" },
+    }, res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.created, 1);
+    assert.equal(res.body.updated, 1);
+    assert.equal(res.body.skipped, 0);
+    assert.equal(createdDocs.length, 1);
+    assert.equal(createdDocs[0].status, "draft");
+    assert.equal(createdDocs[0].is_visible, false);
+    assert.equal(existingProduct.__saved, true);
+    assert.equal(existingProduct.status, "draft");
+    assert.equal(existingProduct.is_visible, false);
+  });
+});
+
+test("affiliate bulk action rejects empty selections and unknown actions", async () => {
+  await withAffiliateBulkMocks(async () => {
+    await assert.rejects(
+      () => affiliateProductPrivate.performAffiliateBulkAction({ productIds: [], action: "publish" }),
+      /Select at least one affiliate product/
+    );
+    await assert.rejects(
+      () => affiliateProductPrivate.performAffiliateBulkAction({ productIds: ["valid"], action: "bad_action" }),
+      /Unsupported bulk action/
+    );
+  });
+});
+
+test("affiliate bulk publish returns row-level success and compliance failures", async () => {
+  await withAffiliateBulkMocks(async ({ docs }) => {
+    const summary = await affiliateProductPrivate.performAffiliateBulkAction({
+      productIds: ["valid", "invalid"],
+      action: "publish",
+    });
+
+    assert.equal(summary.requested, 2);
+    assert.equal(summary.succeeded, 1);
+    assert.equal(summary.failed, 1);
+    assert.equal(docs.get("valid").status, "active");
+    assert.equal(docs.get("valid").is_visible, true);
+    assert.equal(summary.results.find((result) => result.id === "invalid").ok, false);
+    assert.match(summary.results.find((result) => result.id === "invalid").message, /not publishable|amazon_affiliate_tag_mismatch/);
+  });
+});
+
+test("affiliate bulk delete blocks published products and deletes safe drafts", async () => {
+  await withAffiliateBulkMocks(async ({ deletedIds }) => {
+    const summary = await affiliateProductPrivate.performAffiliateBulkAction({
+      productIds: ["active", "draft"],
+      action: "delete",
+    });
+
+    assert.equal(summary.succeeded, 1);
+    assert.equal(summary.failed, 1);
+    assert.deepEqual(deletedIds, ["draft"]);
+    assert.equal(summary.results.find((result) => result.id === "active").message, "Unpublish before deleting");
+  });
+});
+
+test("affiliate bulk assign category validates taxonomy and updates selected products", async () => {
+  await withAffiliateBulkMocks(async ({ docs }) => {
+    const summary = await affiliateProductPrivate.performAffiliateBulkAction({
+      productIds: ["valid", "draft"],
+      action: "assign_category",
+      payload: {
+        category_id: "category-id-2",
+        subcategory_id: "subcategory-id-2",
+      },
+    });
+
+    assert.equal(summary.succeeded, 2);
+    assert.equal(summary.failed, 0);
+    assert.equal(docs.get("valid").category, "Fitness");
+    assert.equal(docs.get("valid").subcategory, "Equipment");
+    assert.equal(docs.get("draft").category_id, "category-id-2");
+  });
+});
+
+test("affiliate bulk refresh passes the loaded product document to the creators service", async () => {
+  await withAffiliateBulkMocks(async ({ docs }) => {
+    const summary = await affiliateProductPrivate.performAffiliateBulkAction({
+      productIds: ["objectid"],
+      action: "refresh_api",
+    });
+
+    assert.equal(summary.requested, 1);
+    assert.equal(summary.succeeded, 0);
+    assert.equal(summary.failed, 1);
+    assert.equal(summary.results[0].id, "objectid");
+    assert.match(summary.results[0].message, /Creators API product refresh is not implemented/);
+    assert.equal(docs.get("objectid").__saved, true);
   });
 });

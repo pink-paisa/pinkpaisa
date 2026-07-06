@@ -28,6 +28,10 @@ export type PhysicalProduct = {
   is_featured_affiliate?: boolean;
   affiliate_sort_order?: number;
   affiliate_is_instagram_pick?: boolean;
+  affiliate_link_last_checked_at?: string | null;
+  affiliate_link_check_status?: "unchecked" | "ok" | "failed" | "invalid" | string | null;
+  affiliate_link_failure_count?: number;
+  affiliate_link_failure_reason?: string | null;
   short_description: string | null;
   full_description: string | null;
   category_id?: string | null;

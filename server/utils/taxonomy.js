@@ -50,10 +50,14 @@ async function getUncategorizedRefs() {
 }
 
 async function resolveTaxonomySelection({ category_id, subcategory_id, category, subcategory, allowUncategorized = false }) {
-  const uncategorized = await getUncategorizedRefs();
-
   let resolvedCategory = null;
   let resolvedSubcategory = null;
+  let uncategorized = null;
+
+  const getUncategorizedFallback = async () => {
+    uncategorized = uncategorized || await getUncategorizedRefs();
+    return { categoryDoc: uncategorized.category, subcategoryDoc: uncategorized.subcategory, isUncategorized: true };
+  };
 
   if (category_id) {
     resolvedCategory = await ProductCategory.findById(category_id);
@@ -70,7 +74,7 @@ async function resolveTaxonomySelection({ category_id, subcategory_id, category,
   }
 
   if (!resolvedCategory && allowUncategorized) {
-    return { categoryDoc: uncategorized.category, subcategoryDoc: uncategorized.subcategory, isUncategorized: true };
+    return getUncategorizedFallback();
   }
 
   if (!resolvedSubcategory && subcategory) {
@@ -82,12 +86,14 @@ async function resolveTaxonomySelection({ category_id, subcategory_id, category,
 
   if (!resolvedSubcategory || String(resolvedSubcategory.category_id) !== String(resolvedCategory._id)) {
     if (allowUncategorized) {
-      return { categoryDoc: uncategorized.category, subcategoryDoc: uncategorized.subcategory, isUncategorized: true };
+      return getUncategorizedFallback();
     }
     throw new Error("Valid subcategory is required for the selected category");
   }
 
-  const isUncategorized = String(resolvedCategory._id) === String(uncategorized.category._id) || String(resolvedSubcategory._id) === String(uncategorized.subcategory._id);
+  const isUncategorized =
+    String(resolvedCategory.slug || resolvedCategory.name || "").toLowerCase() === "uncategorized"
+    || String(resolvedSubcategory.slug || resolvedSubcategory.name || "").toLowerCase() === "uncategorized";
   return { categoryDoc: resolvedCategory, subcategoryDoc: resolvedSubcategory, isUncategorized };
 }
 

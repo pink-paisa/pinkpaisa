@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ChevronDown,
   CheckCircle2,
   Database,
   Download,
@@ -10,6 +11,7 @@ import {
   FileSpreadsheet,
   ImageIcon,
   Instagram,
+  MoreHorizontal,
   PauseCircle,
   RefreshCw,
   Search,
@@ -17,9 +19,19 @@ import {
   Tags,
   Trash2,
   Upload,
+  X,
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api";
@@ -127,7 +139,70 @@ type AffiliateUploadResponse = {
   errors?: Array<{ row?: number | null; title?: string | null; sku?: string | null; errors: string[] }>;
 };
 
+type AffiliatePreviewRow = {
+  row?: number | null;
+  title?: string | null;
+  sku?: string | null;
+  asin?: string | null;
+  marketplace?: string | null;
+  category?: string | null;
+  subcategory?: string | null;
+  image_url?: string | null;
+  action?: "create" | "update" | null;
+  status: "valid" | "invalid";
+  errors: string[];
+};
+
+type AffiliatePreviewResponse = {
+  message?: string;
+  summary: {
+    total_rows: number;
+    valid_rows: number;
+    invalid_rows: number;
+    create_count: number;
+    update_count: number;
+  };
+  preview_rows: AffiliatePreviewRow[];
+  has_valid_rows: boolean;
+  meta?: {
+    file_name?: string | null;
+    sheet_name?: string | null;
+  };
+};
+
 type AffiliateDataMode = "manual_only" | "creators_api";
+
+type AffiliateQuickFilter = "all" | "needs_review" | "published" | "draft" | "paused" | "uncategorized" | "missing_image" | "link_issue";
+
+type AffiliateBulkAction =
+  | "validate_compliance"
+  | "check_link"
+  | "publish"
+  | "unpublish"
+  | "pause"
+  | "feature"
+  | "unfeature"
+  | "instagram_pick"
+  | "instagram_unpick"
+  | "refresh_api"
+  | "assign_category"
+  | "delete";
+
+type AffiliateBulkResult = {
+  id: string | null;
+  action: AffiliateBulkAction;
+  ok: boolean;
+  message?: string | null;
+  product?: PhysicalProduct | null;
+};
+
+type AffiliateBulkResponse = {
+  message?: string;
+  requested: number;
+  succeeded: number;
+  failed: number;
+  results: AffiliateBulkResult[];
+};
 
 type AffiliateDataSettings = {
   affiliate_data_mode: AffiliateDataMode;
@@ -217,9 +292,85 @@ const getAffiliateDataBadge = (product: PhysicalProduct) => {
 
 const readinessPillClass = (ready: boolean) => ready ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800";
 
+const quickFilterLabels: Record<AffiliateQuickFilter, string> = {
+  all: "All",
+  needs_review: "Needs review",
+  published: "Published",
+  draft: "Draft",
+  paused: "Paused",
+  uncategorized: "Uncategorized",
+  missing_image: "Missing image",
+  link_issue: "Link issue",
+};
+
+const bulkActionLabels: Record<AffiliateBulkAction, string> = {
+  validate_compliance: "Validate",
+  check_link: "Check links",
+  publish: "Publish",
+  unpublish: "Unpublish",
+  pause: "Pause",
+  feature: "Feature",
+  unfeature: "Unfeature",
+  instagram_pick: "Instagram pick",
+  instagram_unpick: "Remove Instagram pick",
+  refresh_api: "Refresh API",
+  assign_category: "Assign category",
+  delete: "Delete",
+};
+
+const isPublishedAffiliateProduct = (product: PhysicalProduct) => product.status === "active" && Boolean(product.is_visible);
+
+const hasAffiliateLinkIssue = (product: PhysicalProduct) => {
+  const status = String(product.affiliate_link_check_status || "unchecked").toLowerCase();
+  return status === "unchecked" || status === "failed" || status === "invalid";
+};
+
+const filterMatchesAffiliateQuickFilter = (product: PhysicalProduct, filter: AffiliateQuickFilter) => {
+  if (filter === "all") return true;
+  if (filter === "needs_review") return product.affiliate_compliance_status !== "compliant";
+  if (filter === "published") return isPublishedAffiliateProduct(product);
+  if (filter === "draft") return product.status === "draft";
+  if (filter === "paused") return product.status === "inactive" || product.affiliate_compliance_status === "paused";
+  if (filter === "uncategorized") return isUncategorizedProduct(product);
+  if (filter === "missing_image") return !product.featured_image;
+  if (filter === "link_issue") return hasAffiliateLinkIssue(product);
+  return true;
+};
+
 const isHttpOrUploadImage = (value?: string | null) => {
   const normalized = String(value || "").trim();
   return normalized.startsWith("/uploads/") || /^https?:\/\//i.test(normalized);
+};
+
+const escapeCsvCell = (value: unknown) => {
+  const text = String(value ?? "");
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
+};
+
+const downloadAffiliatePreviewErrorsCsv = (rows: AffiliatePreviewRow[]) => {
+  const csvRows = [
+    ["row", "title", "sku", "asin", "marketplace", "category", "subcategory", "errors"],
+    ...rows.map((row) => [
+      row.row ?? "",
+      row.title ?? "",
+      row.sku ?? "",
+      row.asin ?? "",
+      row.marketplace ?? "",
+      row.category ?? "",
+      row.subcategory ?? "",
+      row.errors.join(" | "),
+    ]),
+  ];
+  const csv = csvRows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "affiliate-upload-preview-errors.csv";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };
 
 const downloadTemplate = async () => {
@@ -251,18 +402,24 @@ export default function AdminAffiliateProducts() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState("");
+  const [quickFilter, setQuickFilter] = useState<AffiliateQuickFilter>("all");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [categoryId, setCategoryId] = useState("");
   const [subcategoryId, setSubcategoryId] = useState("");
   const [uploading, setUploading] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [bulkActionLoading, setBulkActionLoading] = useState<AffiliateBulkAction | null>(null);
   const [saving, setSaving] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [healthChecking, setHealthChecking] = useState(false);
   const [apiRefreshing, setApiRefreshing] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
   const [form, setForm] = useState<AffiliateForm>(blankForm);
   const [imagePreviewFailed, setImagePreviewFailed] = useState(false);
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
+  const [uploadPreview, setUploadPreview] = useState<AffiliatePreviewResponse | null>(null);
+  const [confirmingUpload, setConfirmingUpload] = useState(false);
 
   const { data: affiliateProducts, isLoading } = useQuery({
     queryKey: ["affiliate_products"],
@@ -284,6 +441,7 @@ export default function AdminAffiliateProducts() {
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
     return (affiliateProducts ?? []).filter((product) => {
+      if (!filterMatchesAffiliateQuickFilter(product, quickFilter)) return false;
       if (!term) return true;
       return [
         product.title,
@@ -296,9 +454,21 @@ export default function AdminAffiliateProducts() {
         product.campaign_label ?? "",
       ].some((value) => value.toLowerCase().includes(term));
     });
-  }, [affiliateProducts, search]);
+  }, [affiliateProducts, quickFilter, search]);
 
   const allVisibleSelected = filtered.length > 0 && filtered.every((item) => selectedIds.includes(item.id));
+  const selectedProducts = useMemo(() => {
+    const selected = new Set(selectedIds);
+    return (affiliateProducts ?? []).filter((product) => selected.has(product.id));
+  }, [affiliateProducts, selectedIds]);
+  const quickFilterItems = useMemo(() => {
+    const products = affiliateProducts ?? [];
+    return (Object.keys(quickFilterLabels) as AffiliateQuickFilter[]).map((value) => ({
+      value,
+      label: quickFilterLabels[value],
+      count: products.filter((product) => filterMatchesAffiliateQuickFilter(product, value)).length,
+    }));
+  }, [affiliateProducts]);
   const uncategorizedCount = useMemo(() => (affiliateProducts ?? []).filter(isUncategorizedProduct).length, [affiliateProducts]);
   const publishedCount = useMemo(() => (affiliateProducts ?? []).filter((item) => item.status === "active" && item.is_visible).length, [affiliateProducts]);
   const reviewCount = useMemo(() => (affiliateProducts ?? []).filter((item) => item.affiliate_compliance_status !== "compliant").length, [affiliateProducts]);
@@ -328,6 +498,8 @@ export default function AdminAffiliateProducts() {
     { label: "Pros and cons", ready: Boolean(form.pros.trim() && form.cons.trim()) },
     { label: "SEO", ready: Boolean(form.seo_title.trim() && form.seo_description.trim()) },
   ];
+  const uploadPreviewRows = uploadPreview?.preview_rows ?? [];
+  const invalidPreviewRows = uploadPreviewRows.filter((row) => row.status === "invalid");
 
   const refreshQueries = () => {
     queryClient.invalidateQueries({ queryKey: ["affiliate_products"] });
@@ -444,6 +616,33 @@ export default function AdminAffiliateProducts() {
       setUploading(true);
       const formData = new FormData();
       formData.append("file", file);
+      const response = await apiFetch<AffiliatePreviewResponse>("/affiliate-products/preview-excel", {
+        method: "POST",
+        body: formData,
+      });
+      setPendingUploadFile(file);
+      setUploadPreview(response);
+      toast.success(`Preview ready. ${response.summary.valid_rows} valid, ${response.summary.invalid_rows} issue(s).`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to preview affiliate Excel");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const resetUploadPreview = () => {
+    setPendingUploadFile(null);
+    setUploadPreview(null);
+  };
+
+  const confirmUploadPreview = async () => {
+    if (!pendingUploadFile || !uploadPreview?.has_valid_rows) return;
+
+    try {
+      setConfirmingUpload(true);
+      const formData = new FormData();
+      formData.append("file", pendingUploadFile);
       const response = await apiFetch<AffiliateUploadResponse>("/affiliate-products/upload-excel", {
         method: "POST",
         body: formData,
@@ -451,12 +650,52 @@ export default function AdminAffiliateProducts() {
       const skippedText = response.skipped > 0 ? ` ${response.skipped} row issue(s).` : "";
       toast.success(`Imported for review. Created ${response.created}, updated ${response.updated}.${skippedText}`);
       if (response.errors?.length) console.warn("Affiliate upload row issues", response.errors);
+      resetUploadPreview();
       refreshQueries();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to upload affiliate Excel");
+      toast.error(error instanceof Error ? error.message : "Failed to import affiliate Excel");
     } finally {
-      setUploading(false);
-      event.target.value = "";
+      setConfirmingUpload(false);
+    }
+  };
+
+  const runBulkAction = async (action: AffiliateBulkAction, options: { payload?: Record<string, unknown>; confirmMessage?: string } = {}) => {
+    if (selectedIds.length === 0) {
+      toast.error("Select at least one affiliate product");
+      return false;
+    }
+    if (action === "refresh_api" && !affiliateDataSettings?.creators_can_refresh) {
+      toast.error("Creators API refresh is not ready");
+      return false;
+    }
+    if (options.confirmMessage && !window.confirm(options.confirmMessage)) return false;
+
+    const actedIds = new Set(selectedIds);
+    try {
+      setBulkActionLoading(action);
+      const response = await apiFetch<AffiliateBulkResponse>("/affiliate-products/bulk-action", {
+        method: "POST",
+        body: JSON.stringify({
+          product_ids: selectedIds,
+          action,
+          payload: options.payload || {},
+        }),
+      });
+      const failedIds = new Set(response.results.filter((result) => !result.ok && result.id).map((result) => String(result.id)));
+      if (response.failed > 0) {
+        const sampleFailure = response.results.find((result) => !result.ok)?.message;
+        toast.warning(`${bulkActionLabels[action]} complete: ${response.succeeded} succeeded, ${response.failed} failed.${sampleFailure ? ` ${sampleFailure}` : ""}`);
+      } else {
+        toast.success(`${bulkActionLabels[action]} complete for ${response.succeeded} product(s).`);
+      }
+      setSelectedIds((current) => current.filter((id) => !actedIds.has(id) || failedIds.has(id)));
+      refreshQueries();
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Bulk action failed");
+      return false;
+    } finally {
+      setBulkActionLoading(null);
     }
   };
 
@@ -472,17 +711,13 @@ export default function AdminAffiliateProducts() {
 
     try {
       setAssigning(true);
-      await apiFetch("/affiliate-products/assign-category", {
-        method: "PATCH",
-        body: JSON.stringify({
-          product_ids: selectedIds,
+      const ok = await runBulkAction("assign_category", {
+        payload: {
           category_id: categoryId,
           subcategory_id: subcategoryId,
-        }),
+        },
       });
-      toast.success("Affiliate products assigned. Validate and publish separately.");
-      setSelectedIds([]);
-      refreshQueries();
+      if (ok) setCategoryDialogOpen(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to assign category");
     } finally {
@@ -570,6 +805,80 @@ export default function AdminAffiliateProducts() {
     if (!window.confirm(`Delete ${product.title}?`)) return;
     await runAction(`/affiliate-products/${product.id}`, "Affiliate product deleted", { method: "DELETE" });
   };
+
+  const renderBulkActionsMenu = (triggerLabel = "More", includePrimaryActions = false) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button type="button" variant="outline" size="sm" className="rounded-xl">
+          {triggerLabel}
+          <ChevronDown className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>{selectedIds.length} selected</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {includePrimaryActions ? (
+          <>
+            <DropdownMenuItem onSelect={() => void runBulkAction("publish")} disabled={bulkActionLoading !== null}>
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+              Publish selected
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void runBulkAction("unpublish")} disabled={bulkActionLoading !== null}>
+              <XCircle className="mr-2 h-4 w-4" />
+              Unpublish selected
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void runBulkAction("pause", { confirmMessage: `Pause ${selectedIds.length} selected affiliate product(s)?` })} disabled={bulkActionLoading !== null}>
+              <PauseCircle className="mr-2 h-4 w-4" />
+              Pause selected
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void runBulkAction("feature")} disabled={bulkActionLoading !== null}>
+              <Star className="mr-2 h-4 w-4" />
+              Feature selected
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setCategoryDialogOpen(true)} disabled={bulkActionLoading !== null}>
+              <Tags className="mr-2 h-4 w-4" />
+              Assign category
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
+        <DropdownMenuItem onSelect={() => void runBulkAction("validate_compliance")} disabled={bulkActionLoading !== null}>
+          <CheckCircle2 className="mr-2 h-4 w-4" />
+          Validate compliance
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void runBulkAction("check_link")} disabled={bulkActionLoading !== null}>
+          <ExternalLink className="mr-2 h-4 w-4" />
+          Check Amazon links
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void runBulkAction("refresh_api")} disabled={bulkActionLoading !== null || !affiliateDataSettings?.creators_can_refresh}>
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Refresh Creators API
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => void runBulkAction("instagram_pick")} disabled={bulkActionLoading !== null}>
+          <Instagram className="mr-2 h-4 w-4" />
+          Mark Instagram pick
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void runBulkAction("instagram_unpick")} disabled={bulkActionLoading !== null}>
+          <Instagram className="mr-2 h-4 w-4" />
+          Remove Instagram pick
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void runBulkAction("unfeature")} disabled={bulkActionLoading !== null}>
+          <Star className="mr-2 h-4 w-4" />
+          Unfeature selected
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          className="text-destructive focus:text-destructive"
+          onSelect={() => void runBulkAction("delete", { confirmMessage: `Delete ${selectedIds.length} selected affiliate product(s)? Published products will be blocked.` })}
+          disabled={bulkActionLoading !== null}
+        >
+          <Trash2 className="mr-2 h-4 w-4" />
+          Delete safe drafts
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 
   return (
     <div className="space-y-6">
@@ -832,6 +1141,170 @@ export default function AdminAffiliateProducts() {
         </FormCard>
       ) : null}
 
+      <Dialog open={Boolean(uploadPreview)} onOpenChange={(open) => { if (!open && !confirmingUpload) resetUploadPreview(); }}>
+        <DialogContent className="max-w-6xl">
+          <DialogHeader>
+            <DialogTitle>Preview Affiliate Excel Upload</DialogTitle>
+            <DialogDescription>
+              Review rows before importing. Valid rows will be saved as draft/review products only after confirmation.
+            </DialogDescription>
+          </DialogHeader>
+
+          {uploadPreview ? (
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <div className="rounded-xl border border-border bg-muted/30 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Total rows</p>
+                  <p className="mt-1 font-serif text-2xl">{uploadPreview.summary.total_rows}</p>
+                </div>
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-700">Valid rows</p>
+                  <p className="mt-1 font-serif text-2xl text-emerald-700">{uploadPreview.summary.valid_rows}</p>
+                </div>
+                <div className="rounded-xl border border-rose-200 bg-rose-50 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-rose-700">Issues</p>
+                  <p className="mt-1 font-serif text-2xl text-rose-700">{uploadPreview.summary.invalid_rows}</p>
+                </div>
+                <div className="rounded-xl border border-border bg-card p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Create</p>
+                  <p className="mt-1 font-serif text-2xl">{uploadPreview.summary.create_count}</p>
+                </div>
+                <div className="rounded-xl border border-border bg-card p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Update</p>
+                  <p className="mt-1 font-serif text-2xl">{uploadPreview.summary.update_count}</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border">
+                <div className="flex flex-col gap-1 border-b border-border px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+                  <span>{pendingUploadFile?.name || uploadPreview.meta?.file_name || "Selected workbook"}</span>
+                  <span>{uploadPreview.meta?.sheet_name ? `Sheet: ${uploadPreview.meta.sheet_name}` : "First sheet"}</span>
+                </div>
+                <div className="max-h-[52vh] overflow-auto">
+                  <table className="min-w-[920px] w-full text-left text-sm">
+                    <thead className="sticky top-0 bg-background text-xs uppercase tracking-[0.08em] text-muted-foreground">
+                      <tr className="border-b border-border">
+                        <th className="px-3 py-2">Row</th>
+                        <th className="px-3 py-2">Image</th>
+                        <th className="px-3 py-2">Product</th>
+                        <th className="px-3 py-2">ASIN</th>
+                        <th className="px-3 py-2">Category</th>
+                        <th className="px-3 py-2">Action</th>
+                        <th className="px-3 py-2">Status</th>
+                        <th className="px-3 py-2">Issues</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {uploadPreviewRows.map((row, index) => (
+                        <tr key={`${row.row || "row"}-${index}`} className={row.status === "invalid" ? "bg-rose-50/60" : "bg-card"}>
+                          <td className="px-3 py-3 text-xs text-muted-foreground">{row.row || "-"}</td>
+                          <td className="px-3 py-3">
+                            <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-lg border border-border bg-muted text-[10px] text-muted-foreground">
+                              {row.image_url && isHttpOrUploadImage(row.image_url) ? (
+                                <img src={row.image_url} alt={row.title || "Preview product"} className="h-full w-full object-cover" />
+                              ) : (
+                                "No image"
+                              )}
+                            </div>
+                          </td>
+                          <td className="max-w-[280px] px-3 py-3">
+                            <p className="line-clamp-2 font-medium">{row.title || "Untitled row"}</p>
+                            {row.sku ? <p className="mt-1 truncate text-xs text-muted-foreground">SKU: {row.sku}</p> : null}
+                          </td>
+                          <td className="px-3 py-3 text-xs">
+                            <p>{row.asin || "Missing"}</p>
+                            <p className="mt-1 text-muted-foreground">{row.marketplace || "Marketplace missing"}</p>
+                          </td>
+                          <td className="max-w-[220px] px-3 py-3 text-xs">
+                            <p className="truncate">{row.category || "Missing category"}</p>
+                            <p className="mt-1 truncate text-muted-foreground">{row.subcategory || "Missing subcategory"}</p>
+                          </td>
+                          <td className="px-3 py-3">
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${row.action === "update" ? "bg-blue-100 text-blue-800" : row.action === "create" ? "bg-slate-100 text-slate-700" : "bg-muted text-muted-foreground"}`}>
+                              {row.action || "Skip"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-3">
+                            <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${row.status === "valid" ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}`}>
+                              {row.status === "valid" ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                              {row.status}
+                            </span>
+                          </td>
+                          <td className="max-w-[260px] px-3 py-3 text-xs">
+                            {row.errors.length ? (
+                              <p className="line-clamp-3 text-rose-700">{row.errors.join(" | ")}</p>
+                            ) : (
+                              <p className="text-emerald-700">Ready for review import</p>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
+                <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                <p>Confirming this import saves valid rows as unpublished draft/review products. Invalid rows are skipped and can be downloaded as CSV.</p>
+              </div>
+            </div>
+          ) : null}
+
+          <DialogFooter className="gap-2 sm:space-x-0">
+            {invalidPreviewRows.length ? (
+              <Button type="button" variant="outline" onClick={() => downloadAffiliatePreviewErrorsCsv(invalidPreviewRows)} disabled={confirmingUpload}>
+                Download Errors CSV
+              </Button>
+            ) : null}
+            <Button type="button" variant="outline" onClick={resetUploadPreview} disabled={confirmingUpload}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={() => void confirmUploadPreview()} disabled={confirmingUpload || !uploadPreview?.has_valid_rows}>
+              {confirmingUpload ? "Importing..." : "Confirm Import"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={categoryDialogOpen} onOpenChange={setCategoryDialogOpen}>
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Assign Category</DialogTitle>
+            <DialogDescription>
+              Apply one category and subcategory to {selectedIds.length} selected affiliate product(s). Products still need validation before publishing.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <Field label="Category">
+              <Select value={categoryId} onValueChange={(value) => { setCategoryId(value); setSubcategoryId(""); }}>
+                <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
+                <SelectContent>
+                  {categories.map((category) => <SelectItem key={category.id} value={category.id}>{category.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label="Subcategory">
+              <Select value={subcategoryId} onValueChange={setSubcategoryId} disabled={!categoryId}>
+                <SelectTrigger><SelectValue placeholder="Select subcategory" /></SelectTrigger>
+                <SelectContent>
+                  {subcategories.map((subcategory) => <SelectItem key={subcategory.id} value={subcategory.id}>{subcategory.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <DialogFooter className="gap-2 sm:space-x-0">
+            <Button type="button" variant="outline" onClick={() => setCategoryDialogOpen(false)} disabled={assigning || bulkActionLoading === "assign_category"}>
+              Cancel
+            </Button>
+            <Button onClick={handleAssign} disabled={assigning || bulkActionLoading === "assign_category" || selectedIds.length === 0 || !categoryId || !subcategoryId}>
+              <Tags className="h-4 w-4" />
+              {assigning || bulkActionLoading === "assign_category" ? "Assigning..." : "Assign Category"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <div className="rounded-2xl border border-border bg-card p-5 space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="relative flex-1 max-w-md">
@@ -845,7 +1318,7 @@ export default function AdminAffiliateProducts() {
             </Button>
             <Button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading} className="rounded-xl">
               {uploading ? <FileSpreadsheet className="h-4 w-4 animate-pulse" /> : <Upload className="h-4 w-4" />}
-              {uploading ? "Uploading..." : "Upload Excel"}
+              {uploading ? "Previewing..." : "Upload Excel"}
             </Button>
             <Button type="button" variant="outline" onClick={() => void runAction("/affiliate-products/backfill-compliance", "Existing affiliate products moved to review", { method: "POST" })} className="rounded-xl">
               Review Existing
@@ -858,29 +1331,88 @@ export default function AdminAffiliateProducts() {
           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[1fr_1fr_auto] lg:items-end">
-          <Field label="Assign Category">
-            <Select value={categoryId} onValueChange={(value) => { setCategoryId(value); setSubcategoryId(""); }}>
-              <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
-              <SelectContent>
-                {categories.map((category) => <SelectItem key={category.id} value={category.id}>{category.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field label="Assign Subcategory">
-            <Select value={subcategoryId} onValueChange={setSubcategoryId} disabled={!categoryId}>
-              <SelectTrigger><SelectValue placeholder="Select subcategory" /></SelectTrigger>
-              <SelectContent>
-                {subcategories.map((subcategory) => <SelectItem key={subcategory.id} value={subcategory.id}>{subcategory.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Button onClick={handleAssign} disabled={assigning || selectedIds.length === 0 || !categoryId || !subcategoryId} className="rounded-xl">
-            <Tags className="h-4 w-4" />
-            {assigning ? "Assigning..." : "Assign to Selected"}
-          </Button>
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {quickFilterItems.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              onClick={() => setQuickFilter(item.value)}
+              className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition ${
+                quickFilter === item.value
+                  ? "border-primary bg-primary text-primary-foreground shadow-sm"
+                  : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"
+              }`}
+            >
+              {item.label}
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] ${quickFilter === item.value ? "bg-white/20 text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                {item.count}
+              </span>
+            </button>
+          ))}
         </div>
       </div>
+
+      {selectedIds.length > 0 ? (
+        <>
+          <div className="sticky top-3 z-20 hidden items-center justify-between gap-3 rounded-2xl border border-primary/20 bg-background/95 p-3 shadow-lg backdrop-blur md:flex">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold">{selectedIds.length} selected</p>
+              <p className="truncate text-xs text-muted-foreground">
+                {selectedProducts.slice(0, 3).map((product) => product.title).join(", ")}
+                {selectedProducts.length > 3 ? ` +${selectedProducts.length - 3} more` : ""}
+              </p>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runBulkAction("validate_compliance")} disabled={bulkActionLoading !== null}>
+                <CheckCircle2 className="h-4 w-4" />
+                Validate
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runBulkAction("check_link")} disabled={bulkActionLoading !== null}>
+                <ExternalLink className="h-4 w-4" />
+                Check links
+              </Button>
+              <Button type="button" size="sm" className="rounded-xl" onClick={() => void runBulkAction("publish")} disabled={bulkActionLoading !== null}>
+                <CheckCircle2 className="h-4 w-4" />
+                Publish
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runBulkAction("unpublish")} disabled={bulkActionLoading !== null}>
+                <XCircle className="h-4 w-4" />
+                Unpublish
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runBulkAction("pause", { confirmMessage: `Pause ${selectedIds.length} selected affiliate product(s)?` })} disabled={bulkActionLoading !== null}>
+                <PauseCircle className="h-4 w-4" />
+                Pause
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runBulkAction("feature")} disabled={bulkActionLoading !== null}>
+                <Star className="h-4 w-4" />
+                Feature
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => setCategoryDialogOpen(true)} disabled={bulkActionLoading !== null}>
+                <Tags className="h-4 w-4" />
+                Assign category
+              </Button>
+              {renderBulkActionsMenu("More")}
+              <Button type="button" variant="ghost" size="sm" className="rounded-xl" onClick={() => setSelectedIds([])} disabled={bulkActionLoading !== null}>
+                <X className="h-4 w-4" />
+                Clear
+              </Button>
+            </div>
+          </div>
+
+          <div className="fixed inset-x-3 bottom-3 z-40 flex items-center justify-between gap-3 rounded-2xl border border-primary/20 bg-background/95 p-3 shadow-2xl backdrop-blur md:hidden">
+            <div>
+              <p className="text-sm font-semibold">{selectedIds.length} selected</p>
+              <p className="text-xs text-muted-foreground">{bulkActionLoading ? `${bulkActionLabels[bulkActionLoading]} running...` : "Bulk actions"}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              {renderBulkActionsMenu("Actions", true)}
+              <Button type="button" variant="ghost" size="sm" onClick={() => setSelectedIds([])} disabled={bulkActionLoading !== null} aria-label="Clear selected affiliate products">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        </>
+      ) : null}
 
       <div className="rounded-2xl border border-border bg-card overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-4 py-3 text-sm text-muted-foreground">
@@ -902,13 +1434,14 @@ export default function AdminAffiliateProducts() {
             {filtered.map((product) => {
               const uncategorized = isUncategorizedProduct(product);
               const flags = product.affiliate_compliance_flags ?? [];
-              const published = product.status === "active" && product.is_visible;
+              const published = isPublishedAffiliateProduct(product);
               const dataBadge = getAffiliateDataBadge(product);
+              const linkStatus = String(product.affiliate_link_check_status || "unchecked").toLowerCase();
               return (
-                <div key={product.id} className="grid gap-4 px-4 py-4 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center">
-                  <div className="flex items-center gap-3">
+                <div key={product.id} className={`grid gap-4 px-4 py-4 transition hover:bg-muted/30 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center ${selectedIds.includes(product.id) ? "bg-primary/5" : ""}`}>
+                  <div className="flex items-start gap-3">
                     <input type="checkbox" checked={selectedIds.includes(product.id)} onChange={() => toggleSelection(product.id)} className="h-4 w-4 rounded border-input text-primary" />
-                    <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-xl border border-border bg-muted text-xs font-semibold text-muted-foreground">
+                    <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border bg-muted text-xs font-semibold text-muted-foreground">
                       {product.featured_image ? (
                         <img src={product.featured_image} alt={product.title} className="h-full w-full object-cover" />
                       ) : (
@@ -918,12 +1451,14 @@ export default function AdminAffiliateProducts() {
                   </div>
                   <div className="min-w-0">
                     <div className="mb-1 flex flex-wrap items-center gap-2">
-                      <h4 className="truncate text-sm font-medium">{product.title}</h4>
+                      <h4 className="min-w-0 max-w-full truncate text-sm font-semibold text-foreground">{product.title}</h4>
                       <StatusBadge status={product.status} />
                       <StatusBadge status={product.affiliate_compliance_status || "needs_review"} />
                       {published ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">Published</span> : null}
                       {uncategorized ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">Uncategorized</span> : null}
+                      {!product.featured_image ? <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-800">Missing image</span> : null}
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${dataBadge.className}`}>{dataBadge.label}</span>
+                      {linkStatus !== "ok" ? <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">Link {linkStatus}</span> : null}
                       {product.is_featured_affiliate ? <Star className="h-4 w-4 fill-amber-400 text-amber-400" /> : null}
                       {product.affiliate_is_instagram_pick ? <Instagram className="h-4 w-4 text-pink-600" /> : null}
                     </div>
@@ -942,47 +1477,80 @@ export default function AdminAffiliateProducts() {
                     </p>
                   </div>
                   <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
-                    <Button type="button" variant="outline" size="sm" onClick={() => openEdit(product)}>
+                    <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => openEdit(product)}>
                       <Edit className="h-4 w-4" /> Edit
                     </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/validate-compliance`, "Compliance rechecked", { method: "POST" })}>
-                      <CheckCircle2 className="h-4 w-4" /> Validate
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/check-link`, "Amazon link checked", { method: "POST" })}>
-                      <ExternalLink className="h-4 w-4" /> Check Link
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" disabled={!affiliateDataSettings?.creators_can_refresh} onClick={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
-                      <RefreshCw className="h-4 w-4" /> Refresh API
-                    </Button>
                     {published ? (
-                      <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/unpublish`, "Affiliate product unpublished", { method: "POST" })}>
+                      <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runAction(`/affiliate-products/${product.id}/unpublish`, "Affiliate product unpublished", { method: "POST" })}>
                         <XCircle className="h-4 w-4" /> Unpublish
                       </Button>
                     ) : (
-                      <Button type="button" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/publish`, "Affiliate product published", { method: "POST" })}>
+                      <Button type="button" size="sm" className="rounded-xl" onClick={() => void runAction(`/affiliate-products/${product.id}/publish`, "Affiliate product published", { method: "POST" })}>
                         <CheckCircle2 className="h-4 w-4" /> Publish
                       </Button>
                     )}
-                    <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/pause`, "Affiliate product paused", { method: "POST" })}>
-                      <PauseCircle className="h-4 w-4" /> Pause
-                    </Button>
-                    <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/feature`, "Feature settings updated", {
-                      method: "PATCH",
-                      body: JSON.stringify({
-                        is_featured_affiliate: !product.is_featured_affiliate,
-                        affiliate_is_instagram_pick: product.affiliate_is_instagram_pick,
-                      }),
-                    })}>
-                      <Star className="h-4 w-4" /> {product.is_featured_affiliate ? "Unfeature" : "Feature"}
-                    </Button>
-                    {product.affiliate_url ? (
-                      <a href={product.affiliate_url} target="_blank" rel="sponsored noopener noreferrer nofollow" className="inline-flex h-9 items-center gap-2 rounded-md border border-input px-3 text-sm font-medium">
-                        <ExternalLink className="h-4 w-4" /> Amazon
-                      </a>
-                    ) : null}
-                    <Button type="button" variant="outline" size="sm" onClick={() => void handleDelete(product)}>
-                      <Trash2 className="h-4 w-4" /> Delete
-                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button type="button" variant="outline" size="sm" className="rounded-xl" aria-label={`More actions for ${product.title}`}>
+                          <MoreHorizontal className="h-4 w-4" />
+                          More
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-56">
+                        <DropdownMenuLabel>Product actions</DropdownMenuLabel>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/validate-compliance`, "Compliance rechecked", { method: "POST" })}>
+                          <CheckCircle2 className="mr-2 h-4 w-4" />
+                          Validate compliance
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/check-link`, "Amazon link checked", { method: "POST" })}>
+                          <ExternalLink className="mr-2 h-4 w-4" />
+                          Check Amazon link
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={!affiliateDataSettings?.creators_can_refresh} onSelect={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                          Refresh Creators API
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/pause`, "Affiliate product paused", { method: "POST" })}>
+                          <PauseCircle className="mr-2 h-4 w-4" />
+                          Pause product
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/feature`, "Feature settings updated", {
+                          method: "PATCH",
+                          body: JSON.stringify({
+                            is_featured_affiliate: !product.is_featured_affiliate,
+                            affiliate_is_instagram_pick: product.affiliate_is_instagram_pick,
+                          }),
+                        })}>
+                          <Star className="mr-2 h-4 w-4" />
+                          {product.is_featured_affiliate ? "Unfeature" : "Feature"}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/feature`, "Instagram pick updated", {
+                          method: "PATCH",
+                          body: JSON.stringify({
+                            is_featured_affiliate: product.is_featured_affiliate,
+                            affiliate_is_instagram_pick: !product.affiliate_is_instagram_pick,
+                          }),
+                        })}>
+                          <Instagram className="mr-2 h-4 w-4" />
+                          {product.affiliate_is_instagram_pick ? "Remove Instagram pick" : "Mark Instagram pick"}
+                        </DropdownMenuItem>
+                        {product.affiliate_url ? (
+                          <DropdownMenuItem asChild>
+                            <a href={product.affiliate_url} target="_blank" rel="sponsored noopener noreferrer nofollow">
+                              <ExternalLink className="mr-2 h-4 w-4" />
+                              Open Amazon
+                            </a>
+                          </DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => void handleDelete(product)}>
+                          <Trash2 className="mr-2 h-4 w-4" />
+                          Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 </div>
               );
