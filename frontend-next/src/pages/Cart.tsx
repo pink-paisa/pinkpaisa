@@ -92,7 +92,7 @@ const Cart = () => {
                   >
                     <div className="h-24 w-24 shrink-0 overflow-hidden rounded-2xl bg-accent">
                       {item.image_url ? (
-                        <img src={item.image_url} alt={item.title} className="h-full w-full object-cover" />
+                        <img src={item.image_url} alt={item.title} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                       ) : (
                         <div className="flex h-full w-full items-center justify-center text-primary">
                           <ShoppingBag className="h-6 w-6" />
@@ -116,21 +116,24 @@ const Cart = () => {
                           <button
                             onClick={() => updateQuantity(item.id, item.quantity - 1)}
                             disabled={item.quantity <= 1}
-                            className="rounded-l-lg p-2 transition-colors hover:bg-accent disabled:opacity-40"
+                            aria-label="Decrease quantity"
+                            className="flex min-h-10 min-w-10 items-center justify-center rounded-l-lg transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
                           >
                             <Minus className="h-3.5 w-3.5" />
                           </button>
-                          <span className="w-6 text-center text-sm font-medium tabular-nums">{item.quantity}</span>
+                          <span className="w-8 text-center text-sm font-medium tabular-nums">{item.quantity}</span>
                           <button
                             onClick={() => updateQuantity(item.id, item.quantity + 1)}
                             disabled={!canIncrease}
-                            className="rounded-r-lg p-2 transition-colors hover:bg-accent disabled:opacity-40"
+                            aria-label="Increase quantity"
+                            className="flex min-h-10 min-w-10 items-center justify-center rounded-r-lg transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
                           >
                             <Plus className="h-3.5 w-3.5" />
                           </button>
                         </div>
                         <button
                           onClick={() => removeItem(item.id)}
+                          aria-label={`Remove ${item.title}`}
                           className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
                         >
                           <Trash2 className="h-3.5 w-3.5" /> Remove

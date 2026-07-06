@@ -112,7 +112,7 @@ const ProductCard = ({
     >
       <Link href={`/product/${product.slug}`} className="relative aspect-square overflow-hidden bg-accent/30">
           {product.featured_image ? (
-            <img src={product.featured_image} alt={product.title} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+            <img src={product.featured_image} alt={product.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
           ) : (
             <div className="flex h-full w-full items-center justify-center">
               <Sparkles className="h-12 w-12 text-muted-foreground/30" />
@@ -125,7 +125,7 @@ const ProductCard = ({
               </span>
             ) : null}
             {isAffiliate && product.is_featured_affiliate ? (
-              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Editor&apos;s pick</span>
+              <span className="rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-bold text-primary shadow-sm">Editor&apos;s pick</span>
             ) : null}
             {product.featured && !product.bestseller && !isAffiliate ? (
               <span className="rounded-full bg-accent px-2.5 py-1 text-[10px] font-bold text-accent-foreground">Featured</span>
@@ -134,7 +134,7 @@ const ProductCard = ({
               <span className="rounded-full bg-destructive px-2.5 py-1 text-[10px] font-bold text-destructive-foreground">Sale</span>
             ) : null}
             {isAffiliate ? (
-              <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Curated find</span>
+              <span className="rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-bold text-primary shadow-sm">Curated find</span>
             ) : null}
           </div>
           {outOfStock ? (
@@ -146,7 +146,8 @@ const ProductCard = ({
 
       <button
         onClick={() => onToggleWishlist(product)}
-        className={`absolute right-3 top-3 rounded-full border p-2 backdrop-blur-sm transition-colors ${
+        aria-label={wished ? "Remove from wishlist" : "Add to wishlist"}
+        className={`absolute right-3 top-3 rounded-full border p-2.5 backdrop-blur-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
           wished ? "border-rose-200 bg-white text-rose-500" : "border-white/70 bg-white/85 text-muted-foreground hover:text-rose-500"
         }`}
       >
@@ -160,15 +161,15 @@ const ProductCard = ({
         </p>
 
         <Link href={`/product/${product.slug}`}>
-          <h3 className="mb-2 font-serif text-lg leading-tight transition-colors hover:text-primary">{product.title}</h3>
+          <h3 className="mb-2 line-clamp-2 min-h-[3rem] font-serif text-lg leading-tight transition-colors hover:text-primary">{product.title}</h3>
         </Link>
 
         {product.short_description ? <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">{product.short_description}</p> : null}
 
-        <div className="mt-auto flex items-center justify-between gap-3">
+        <div className={isAffiliate ? "mt-auto space-y-3" : "mt-auto flex items-center justify-between gap-3"}>
           {isAffiliate ? (
             showAffiliateApiPrice ? (
-              <div className="max-w-[12rem]">
+              <div className="w-full">
                 <div className="flex flex-wrap items-baseline gap-2">
                   <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
                   {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
@@ -178,7 +179,7 @@ const ProductCard = ({
                 </p>
               </div>
             ) : (
-              <p className="max-w-[11rem] text-xs leading-5 text-muted-foreground">Confirm price and availability on Amazon.</p>
+              <p className="text-xs leading-5 text-muted-foreground">Confirm price and availability on Amazon.</p>
             )
           ) : (
             <div className="flex items-baseline gap-2">
@@ -188,7 +189,7 @@ const ProductCard = ({
           )}
 
           {isAffiliate ? (
-            <AffiliateCta product={product} size="sm" variant="secondary" className="rounded-xl" />
+            <AffiliateCta product={product} size="sm" variant="secondary" className="w-full rounded-xl" />
           ) : (
             <Button
               size="sm"
@@ -402,7 +403,8 @@ const PhysicalProducts = ({
         <div className="mb-6 flex flex-wrap gap-2">
           <button
             onClick={() => updateParams({ category: null, subcategory: null, page: null })}
-            className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors ${
+            aria-pressed={categorySlug === "all"}
+            className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
               categorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
             }`}
           >
@@ -412,7 +414,8 @@ const PhysicalProducts = ({
             <button
               key={category.id}
               onClick={() => updateParams({ category: category.slug, subcategory: null, page: null })}
-              className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors ${
+              aria-pressed={categorySlug === category.slug}
+              className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                 categorySlug === category.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
               }`}
             >
@@ -429,7 +432,8 @@ const PhysicalProducts = ({
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={() => updateParams({ subcategory: null, page: null })}
-                className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors ${
+                aria-pressed={subcategorySlug === "all"}
+                className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                   subcategorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
                 }`}
               >
@@ -439,7 +443,8 @@ const PhysicalProducts = ({
                 <button
                   key={subcategory.id}
                   onClick={() => updateParams({ subcategory: subcategory.slug, page: null })}
-                  className={`rounded-full px-3.5 py-1.5 text-xs font-medium transition-colors ${
+                  aria-pressed={subcategorySlug === subcategory.slug}
+                  className={`min-h-10 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                     subcategorySlug === subcategory.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
                   }`}
                 >
@@ -535,7 +540,7 @@ const PhysicalProducts = ({
           <SheetHeader>
             <SheetTitle>Filter products</SheetTitle>
           </SheetHeader>
-          <div className="mt-6">
+          <div className="mt-6 pb-6">
             <ProductFilters
               facets={facets}
               minPrice={minPrice}

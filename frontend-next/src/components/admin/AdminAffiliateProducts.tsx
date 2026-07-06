@@ -8,6 +8,7 @@ import {
   Edit,
   ExternalLink,
   FileSpreadsheet,
+  ImageIcon,
   Instagram,
   PauseCircle,
   RefreshCw,
@@ -130,10 +131,19 @@ type AffiliateDataMode = "manual_only" | "creators_api";
 
 type AffiliateDataSettings = {
   affiliate_data_mode: AffiliateDataMode;
+  requested_affiliate_data_mode?: AffiliateDataMode;
+  current_mode?: AffiliateDataMode;
   affiliate_data_marketplaces: Array<"amazon_in" | "amazon_us">;
   affiliate_creators_api_last_health_check_at?: string | null;
   affiliate_creators_api_health_status: "unchecked" | "ok" | "failed";
   affiliate_creators_api_last_error?: string | null;
+  manual_available?: boolean;
+  creators_adapter_implemented?: boolean;
+  creators_env_configured?: boolean;
+  creators_health_status?: "unchecked" | "ok" | "failed";
+  creators_can_enable?: boolean;
+  creators_can_refresh?: boolean;
+  disabled_reason?: string | null;
   creators_api_ready: boolean;
   creators_api_env: {
     enabled: boolean;
@@ -146,6 +156,8 @@ type AffiliateDataSettings = {
 type AffiliateRefreshResponse = {
   ok?: boolean;
   status?: string;
+  skipped?: boolean;
+  reason?: string | null;
   message?: string | null;
   requested?: number;
   refreshed?: number;
@@ -203,6 +215,13 @@ const getAffiliateDataBadge = (product: PhysicalProduct) => {
   return { label: product.affiliate_data_source === "excel-upload" ? "Excel review" : "Manual", className: "bg-slate-100 text-slate-700" };
 };
 
+const readinessPillClass = (ready: boolean) => ready ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800";
+
+const isHttpOrUploadImage = (value?: string | null) => {
+  const normalized = String(value || "").trim();
+  return normalized.startsWith("/uploads/") || /^https?:\/\//i.test(normalized);
+};
+
 const downloadTemplate = async () => {
   const rows = [TEMPLATE_COLUMNS, ...SAMPLE_ROWS.map((row) => TEMPLATE_COLUMNS.map((column) => row[column as keyof typeof row] ?? ""))];
   await downloadWorkbook("pinkpaisa_affiliate_upload_template.xlsx", [
@@ -218,6 +237,7 @@ const downloadTemplate = async () => {
         ["Disclosure", "Buyer CTAs use a short affiliate notice. The required Amazon Associate disclosure remains on the disclosure page and footer."],
         ["Affiliate URL", "Use Amazon.in or Amazon.com product URLs with your Associate tag parameter."],
         ["Manual image", "Optional. Use image_url for a direct image URL or /uploads/ path."],
+        ["Buying intent and campaign", "Optional. Use them when you want better buyer context or campaign analytics."],
         ["Category", "Fill category and subcategory with active Pink Paisa taxonomy names before upload."],
         ["Do not import", "Do not rely on Amazon prices, star ratings, review text, or availability unless API-approved."],
         ["Publish", "Imported rows stay draft/review until admin validates and publishes."],
@@ -242,6 +262,7 @@ export default function AdminAffiliateProducts() {
   const [apiRefreshing, setApiRefreshing] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<AffiliateForm>(blankForm);
+  const [imagePreviewFailed, setImagePreviewFailed] = useState(false);
 
   const { data: affiliateProducts, isLoading } = useQuery({
     queryKey: ["affiliate_products"],
@@ -281,6 +302,32 @@ export default function AdminAffiliateProducts() {
   const uncategorizedCount = useMemo(() => (affiliateProducts ?? []).filter(isUncategorizedProduct).length, [affiliateProducts]);
   const publishedCount = useMemo(() => (affiliateProducts ?? []).filter((item) => item.status === "active" && item.is_visible).length, [affiliateProducts]);
   const reviewCount = useMemo(() => (affiliateProducts ?? []).filter((item) => item.affiliate_compliance_status !== "compliant").length, [affiliateProducts]);
+  const editingProduct = useMemo(() => (form.id ? (affiliateProducts ?? []).find((product) => product.id === form.id) : null), [affiliateProducts, form.id]);
+  const currentAffiliateMode = affiliateDataSettings?.current_mode || affiliateDataSettings?.affiliate_data_mode || "manual_only";
+  const creatorsDisabledReason = affiliateDataSettings?.disabled_reason || affiliateDataSettings?.affiliate_creators_api_last_error || null;
+  const manualImagePreviewUrl = form.image_url.trim();
+  const canPreviewManualImage = isHttpOrUploadImage(manualImagePreviewUrl) && !imagePreviewFailed;
+  const readinessRows = useMemo(() => {
+    const env = affiliateDataSettings?.creators_api_env;
+    const missing = new Set(env?.missing || []);
+    return [
+      { label: "Env enabled", ready: Boolean(env?.enabled) },
+      { label: "Access key present", ready: Boolean(env) && !missing.has("AMAZON_CREATORS_API_ACCESS_KEY") },
+      { label: "Secret key present", ready: Boolean(env) && !missing.has("AMAZON_CREATORS_API_SECRET_KEY") },
+      { label: "Marketplace supported", ready: Boolean(env?.marketplaces?.length) },
+      { label: "Health check passed", ready: affiliateDataSettings?.creators_health_status === "ok" || affiliateDataSettings?.affiliate_creators_api_health_status === "ok" },
+      { label: "Adapter implemented", ready: Boolean(affiliateDataSettings?.creators_adapter_implemented) },
+    ];
+  }, [affiliateDataSettings]);
+  const publishReadinessRows = [
+    { label: "Title", ready: Boolean(form.title.trim()) },
+    { label: "Tagged Amazon URL", ready: Boolean(form.affiliate_url.trim()) },
+    { label: "ASIN and marketplace", ready: Boolean(form.affiliate_asin.trim() && form.affiliate_marketplace) },
+    { label: "Category and subcategory", ready: Boolean(form.category_id && form.subcategory_id) },
+    { label: "Buyer copy", ready: Boolean(form.short_description.trim()) },
+    { label: "Pros and cons", ready: Boolean(form.pros.trim() && form.cons.trim()) },
+    { label: "SEO", ready: Boolean(form.seo_title.trim() && form.seo_description.trim()) },
+  ];
 
   const refreshQueries = () => {
     queryClient.invalidateQueries({ queryKey: ["affiliate_products"] });
@@ -294,6 +341,7 @@ export default function AdminAffiliateProducts() {
 
   const openCreate = () => {
     setForm(blankForm);
+    setImagePreviewFailed(false);
     setFormOpen(true);
   };
 
@@ -323,6 +371,7 @@ export default function AdminAffiliateProducts() {
       affiliate_is_instagram_pick: Boolean(product.affiliate_is_instagram_pick),
       affiliate_sort_order: Number(product.affiliate_sort_order || 0),
     });
+    setImagePreviewFailed(false);
     setFormOpen(true);
   };
 
@@ -448,7 +497,7 @@ export default function AdminAffiliateProducts() {
         method: "POST",
         body: JSON.stringify({ product_ids: productIds }),
       });
-      toast.success(`Creators refresh complete. Refreshed ${response.refreshed ?? 0}, failed ${response.failed ?? 0}.`);
+      toast.success(response.message || `Creators refresh complete. Refreshed ${response.refreshed ?? 0}, failed ${response.failed ?? 0}.`);
       refreshQueries();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Creators API refresh failed");
@@ -459,6 +508,7 @@ export default function AdminAffiliateProducts() {
   };
 
   const handleSave = async () => {
+    const manualImageUrl = form.image_url.trim();
     const requiredFields = [
       { key: "title", label: "Title", value: form.title },
       { key: "affiliate_url", label: "Affiliate URL with tag", value: form.affiliate_url },
@@ -467,12 +517,10 @@ export default function AdminAffiliateProducts() {
       { key: "category_id", label: "Category", value: form.category_id },
       { key: "subcategory_id", label: "Subcategory", value: form.subcategory_id },
       { key: "short_description", label: "Short description", value: form.short_description },
-      { key: "buying_intent", label: "Buying intent", value: form.buying_intent },
       { key: "pros", label: "Pros", value: form.pros },
       { key: "cons", label: "Cons", value: form.cons },
       { key: "seo_title", label: "SEO title", value: form.seo_title },
       { key: "seo_description", label: "SEO description", value: form.seo_description },
-      { key: "campaign_label", label: "Campaign label", value: form.campaign_label },
     ];
     const missing = requiredFields.filter((field) => !String(field.value || "").trim());
     if (missing.length) {
@@ -481,6 +529,9 @@ export default function AdminAffiliateProducts() {
     }
     const payload = {
       ...form,
+      image_url: manualImageUrl,
+      manual_image_url: manualImageUrl,
+      featured_image: manualImageUrl || null,
       pros: form.pros.split("|").map((item) => item.trim()).filter(Boolean),
       cons: form.cons.split("|").map((item) => item.trim()).filter(Boolean),
       tags: form.tags.split(",").map((item) => item.trim()).filter(Boolean),
@@ -551,19 +602,29 @@ export default function AdminAffiliateProducts() {
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <Database className="h-4 w-4 text-primary" />
               <h3 className="font-serif text-lg">Amazon Data Source</h3>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${affiliateDataSettings?.affiliate_data_mode === "creators_api" ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700"}`}>
-                {affiliateDataSettings?.affiliate_data_mode === "creators_api" ? "Creators API mode" : "Manual only"}
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${currentAffiliateMode === "creators_api" ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700"}`}>
+                {currentAffiliateMode === "creators_api" ? "Creators API active" : "Manual Only active"}
               </span>
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${affiliateDataSettings?.creators_api_env?.configured ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
-                {affiliateDataSettings?.creators_api_env?.configured ? "API env configured" : "API env missing"}
+              <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${affiliateDataSettings?.creators_can_enable ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>
+                {affiliateDataSettings?.creators_can_enable ? "Creators API ready to enable" : "Creators API locked"}
               </span>
             </div>
             <p className="text-sm leading-6 text-muted-foreground">
               Manual mode is fastest for now: use tagged Amazon links, your own copy, and an optional direct image URL.
-              Creators API mode can refresh Amazon image and price data later, but buyer pages only show it while the API data is fresh.
+              Creators API mode can refresh Amazon image and price data later, but it stays locked until every readiness check passes.
             </p>
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {readinessRows.map((row) => (
+                <span key={row.label} className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${readinessPillClass(row.ready)}`}>
+                  {row.ready ? <CheckCircle2 className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                  {row.label}
+                </span>
+              ))}
+            </div>
             <div className="mt-3 grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
-              <p>Health: {settingsLoading ? "Loading..." : affiliateDataSettings?.affiliate_creators_api_health_status || "unchecked"}</p>
+              <p>Requested mode: {affiliateDataSettings?.requested_affiliate_data_mode || affiliateDataSettings?.affiliate_data_mode || "manual_only"}</p>
+              <p>Effective mode: {currentAffiliateMode}</p>
+              <p>Health: {settingsLoading ? "Loading..." : affiliateDataSettings?.creators_health_status || affiliateDataSettings?.affiliate_creators_api_health_status || "unchecked"}</p>
               <p>Last check: {formatDateTime(affiliateDataSettings?.affiliate_creators_api_last_health_check_at)}</p>
               {affiliateDataSettings?.creators_api_env?.missing?.length ? (
                 <p className="sm:col-span-2 text-amber-700">
@@ -573,20 +634,23 @@ export default function AdminAffiliateProducts() {
               {affiliateDataSettings?.affiliate_creators_api_last_error ? (
                 <p className="sm:col-span-2 text-rose-700">Last error: {affiliateDataSettings.affiliate_creators_api_last_error}</p>
               ) : null}
+              {creatorsDisabledReason ? (
+                <p className="sm:col-span-2 text-amber-700">Locked reason: {creatorsDisabledReason}</p>
+              ) : null}
             </div>
           </div>
           <div className="flex flex-wrap gap-2 lg:justify-end">
             <Button type="button" variant="outline" onClick={() => void runCreatorsHealthCheck()} disabled={healthChecking || settingsLoading} className="rounded-xl">
               <RefreshCw className={`h-4 w-4 ${healthChecking ? "animate-spin" : ""}`} />
-              {healthChecking ? "Checking..." : "Test API"}
+              {healthChecking ? "Checking..." : "Check Creators API readiness"}
             </Button>
-            <Button type="button" variant="outline" onClick={() => void saveAffiliateDataMode("manual_only")} disabled={settingsSaving || affiliateDataSettings?.affiliate_data_mode === "manual_only"} className="rounded-xl">
-              Manual Only
+            <Button type="button" variant="outline" onClick={() => void saveAffiliateDataMode("manual_only")} disabled={settingsSaving || (currentAffiliateMode === "manual_only" && affiliateDataSettings?.requested_affiliate_data_mode !== "creators_api")} className="rounded-xl">
+              Use Manual Only
             </Button>
-            <Button type="button" onClick={() => void saveAffiliateDataMode("creators_api")} disabled={settingsSaving || !affiliateDataSettings?.creators_api_env?.configured || affiliateDataSettings?.affiliate_creators_api_health_status !== "ok"} className="rounded-xl">
+            <Button type="button" onClick={() => void saveAffiliateDataMode("creators_api")} disabled={settingsSaving || !affiliateDataSettings?.creators_can_enable} className="rounded-xl">
               Enable Creators API
             </Button>
-            <Button type="button" variant="outline" onClick={() => void refreshApiData(selectedIds)} disabled={apiRefreshing || affiliateDataSettings?.affiliate_data_mode !== "creators_api" || selectedIds.length === 0} className="rounded-xl">
+            <Button type="button" variant="outline" onClick={() => void refreshApiData(selectedIds)} disabled={apiRefreshing || !affiliateDataSettings?.creators_can_refresh || selectedIds.length === 0} className="rounded-xl">
               <RefreshCw className={`h-4 w-4 ${apiRefreshing ? "animate-spin" : ""}`} />
               Refresh Selected
             </Button>
@@ -594,16 +658,37 @@ export default function AdminAffiliateProducts() {
         </div>
         <div className="mt-4 flex gap-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
           <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-          <p>Do not paste Amazon prices, ratings, reviews, or availability in manual mode. Use Check price on Amazon until approved API data is available.</p>
+          <p>Manual image URL is shown as admin-provided media, not Amazon API-approved product data. Do not paste Amazon prices, ratings, reviews, or availability in manual mode.</p>
         </div>
       </div>
 
       {formOpen ? (
         <FormCard title={form.id ? "Edit Affiliate Product" : "Create Affiliate Product"} onClose={() => setFormOpen(false)}>
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">
-            Manual entries must use your own product copy. Images are optional and can use a direct image URL or upload path.
+            Manual entries must use your own product copy. Manual image URL is shown as admin-provided media, not Amazon API-approved product data.
             Do not add Amazon prices, ratings, review text, or availability manually.
           </div>
+          {editingProduct?.affiliate_data_source === "creators_api" ? (
+            <div className="grid gap-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center">
+              <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-xl border border-emerald-200 bg-white">
+                {editingProduct.featured_image ? (
+                  <img src={editingProduct.featured_image} alt={editingProduct.title} className="h-full w-full object-cover" />
+                ) : (
+                  <Database className="h-6 w-6 text-emerald-700" />
+                )}
+              </div>
+              <div>
+                <p className="font-semibold">Amazon API Data</p>
+                <p className="text-xs leading-5 text-emerald-900">
+                  API status: {getAffiliateDataBadge(editingProduct).label}. Last refreshed {formatDateTime(editingProduct.affiliate_data_last_refreshed_at)}. Expires {formatDateTime(editingProduct.affiliate_data_expires_at)}.
+                  {editingProduct.affiliate_api_error ? ` Error: ${editingProduct.affiliate_api_error}` : ""}
+                </p>
+              </div>
+              <Button type="button" variant="outline" size="sm" disabled={!affiliateDataSettings?.creators_can_refresh} onClick={() => void runAction(`/affiliate-products/${editingProduct.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
+                <RefreshCw className="h-4 w-4" /> Refresh
+              </Button>
+            </div>
+          ) : null}
           <div className="grid gap-4 md:grid-cols-2">
             <Field label="Title *">
               <Input value={form.title} onChange={(event) => updateForm({ title: event.target.value })} />
@@ -615,7 +700,7 @@ export default function AdminAffiliateProducts() {
               <Input value={form.affiliate_url} onChange={(event) => updateForm({ affiliate_url: event.target.value })} placeholder="https://www.amazon.in/dp/ASIN?tag=..." />
             </Field>
             <Field label="Manual Image URL">
-              <Input value={form.image_url} onChange={(event) => updateForm({ image_url: event.target.value })} placeholder="https://your-cdn.example.com/product.jpg or /uploads/image.webp" />
+              <Input value={form.image_url} onChange={(event) => { setImagePreviewFailed(false); updateForm({ image_url: event.target.value }); }} placeholder="https://your-cdn.example.com/product.jpg or /uploads/image.webp" />
               <p className="mt-1 text-xs text-muted-foreground">Optional. Supports direct image URLs, including media-hosted URLs, or /uploads/ paths.</p>
             </Field>
             <Field label="Marketplace *">
@@ -627,7 +712,10 @@ export default function AdminAffiliateProducts() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="ASIN *">
+            <Field
+              label="ASIN *"
+              hint="Amazon's unique product ID, usually the 10-character code after /dp/ in the Amazon URL. Required for duplicates and future API refresh."
+            >
               <Input value={form.affiliate_asin} onChange={(event) => updateForm({ affiliate_asin: event.target.value.toUpperCase() })} />
             </Field>
             <Field label="SKU">
@@ -655,11 +743,17 @@ export default function AdminAffiliateProducts() {
             <Field label="Tags">
               <Input value={form.tags} onChange={(event) => updateForm({ tags: event.target.value })} placeholder="beauty, wellness" />
             </Field>
-            <Field label="Buying Intent *">
-              <Input value={form.buying_intent} onChange={(event) => updateForm({ buying_intent: event.target.value })} />
+            <Field
+              label="Buying Intent"
+              hint="Optional. The reason someone would buy it, such as budget wireless mouse for work or giftable tech under Rs. 1,000."
+            >
+              <Input value={form.buying_intent} onChange={(event) => updateForm({ buying_intent: event.target.value })} placeholder="Budget wireless mouse for work and study" />
             </Field>
-            <Field label="Campaign Label *">
-              <Input value={form.campaign_label} onChange={(event) => updateForm({ campaign_label: event.target.value })} />
+            <Field
+              label="Campaign Label"
+              hint="Optional. A tracking label for where you promote it, such as instagram-tech-finds or prime-day-picks."
+            >
+              <Input value={form.campaign_label} onChange={(event) => updateForm({ campaign_label: event.target.value })} placeholder="instagram-tech-finds" />
             </Field>
             <Field label="Sort Order">
               <Input type="number" value={form.affiliate_sort_order} onChange={(event) => updateForm({ affiliate_sort_order: Number(event.target.value) || 0 })} />
@@ -689,9 +783,51 @@ export default function AdminAffiliateProducts() {
               <Input value={form.seo_description} onChange={(event) => updateForm({ seo_description: event.target.value })} />
             </Field>
           </div>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="rounded-xl border border-border bg-muted/30 p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <ImageIcon className="h-4 w-4 text-primary" />
+                <p className="text-sm font-semibold">Buyer Card Preview</p>
+              </div>
+              <div className="overflow-hidden rounded-xl border border-border bg-card">
+                <div className="aspect-video bg-accent/30">
+                  {canPreviewManualImage ? (
+                    <img src={manualImagePreviewUrl} alt={form.title || "Affiliate product preview"} onError={() => setImagePreviewFailed(true)} className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                      {manualImagePreviewUrl ? "Image preview unavailable" : "No manual image added"}
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-2 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">{form.category_id ? formCategory?.name || "Category" : "Category"}</p>
+                  <p className="font-serif text-lg leading-tight">{form.title || "Affiliate product title"}</p>
+                  <p className="line-clamp-2 text-sm text-muted-foreground">{form.short_description || "Short benefit-focused description will appear here."}</p>
+                  <p className="text-xs text-muted-foreground">Confirm price and availability on Amazon.</p>
+                </div>
+              </div>
+            </div>
+            <div className="rounded-xl border border-border bg-card p-4">
+              <p className="mb-3 text-sm font-semibold">Publish Readiness</p>
+              <div className="space-y-2">
+                {publishReadinessRows.map((row) => (
+                  <div key={row.label} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="text-muted-foreground">{row.label}</span>
+                    <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium ${readinessPillClass(row.ready)}`}>
+                      {row.ready ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                      {row.ready ? "Ready" : "Missing"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-4 text-xs leading-5 text-muted-foreground">
+                Save creates a draft/review product. Publish remains blocked until the backend compliance gate validates URL tag, ASIN, marketplace, category, and required copy.
+              </p>
+            </div>
+          </div>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="outline" onClick={() => setFormOpen(false)}>Cancel</Button>
-            <Button type="button" onClick={handleSave} disabled={saving}>{saving ? "Saving..." : "Save Draft"}</Button>
+            <Button type="button" onClick={handleSave} disabled={saving}>{saving ? "Saving..." : "Save for Review"}</Button>
           </div>
         </FormCard>
       ) : null}
@@ -713,6 +849,10 @@ export default function AdminAffiliateProducts() {
             </Button>
             <Button type="button" variant="outline" onClick={() => void runAction("/affiliate-products/backfill-compliance", "Existing affiliate products moved to review", { method: "POST" })} className="rounded-xl">
               Review Existing
+            </Button>
+            <Button type="button" variant="outline" onClick={() => void runAction("/affiliate-products/backfill-images", "Affiliate product images backfilled", { method: "POST" })} className="rounded-xl">
+              <ImageIcon className="h-4 w-4" />
+              Backfill Images
             </Button>
             <input ref={fileInputRef} type="file" accept=".xlsx" onChange={(event) => void handleUpload(event)} className="hidden" />
           </div>
@@ -768,8 +908,12 @@ export default function AdminAffiliateProducts() {
                 <div key={product.id} className="grid gap-4 px-4 py-4 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center">
                   <div className="flex items-center gap-3">
                     <input type="checkbox" checked={selectedIds.includes(product.id)} onChange={() => toggleSelection(product.id)} className="h-4 w-4 rounded border-input text-primary" />
-                    <div className="flex h-14 w-14 items-center justify-center rounded-xl border border-border bg-muted text-xs font-semibold text-muted-foreground">
-                      {product.affiliate_marketplace === "amazon_us" ? "US" : "IN"}
+                    <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-xl border border-border bg-muted text-xs font-semibold text-muted-foreground">
+                      {product.featured_image ? (
+                        <img src={product.featured_image} alt={product.title} className="h-full w-full object-cover" />
+                      ) : (
+                        product.affiliate_marketplace === "amazon_us" ? "US" : "IN"
+                      )}
                     </div>
                   </div>
                   <div className="min-w-0">
@@ -807,7 +951,7 @@ export default function AdminAffiliateProducts() {
                     <Button type="button" variant="outline" size="sm" onClick={() => void runAction(`/affiliate-products/${product.id}/check-link`, "Amazon link checked", { method: "POST" })}>
                       <ExternalLink className="h-4 w-4" /> Check Link
                     </Button>
-                    <Button type="button" variant="outline" size="sm" disabled={affiliateDataSettings?.affiliate_data_mode !== "creators_api"} onClick={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
+                    <Button type="button" variant="outline" size="sm" disabled={!affiliateDataSettings?.creators_can_refresh} onClick={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
                       <RefreshCw className="h-4 w-4" /> Refresh API
                     </Button>
                     {published ? (

@@ -6,12 +6,12 @@ const { CAMPAIGN_SETTINGS_KEY, normaliseCampaignSettings } = require("../utils/c
 const { buildImageProviderRegistryResponse } = require("../services/imageProviders");
 const {
   AFFILIATE_DATA_SETTINGS_KEY,
-  buildAffiliateDataSettingsResponse,
   getAffiliateDataSettings,
   getCreatorsApiEnvStatus,
   normalizeAffiliateDataSettings,
 } = require("../utils/affiliateDataSettings");
 const {
+  buildAffiliateDataModeResponse,
   isCreatorsApiAdapterImplemented,
   runCreatorsApiHealthCheck,
 } = require("../services/amazonCreatorsApiService");
@@ -119,7 +119,7 @@ router.put("/settings/campaigns", protect, adminOnly, async (req, res) => {
 // GET /api/admin/settings/affiliate-data
 router.get("/settings/affiliate-data", protect, adminOnly, async (_req, res) => {
   try {
-    res.json(await getAffiliateDataSettings());
+    res.json(buildAffiliateDataModeResponse(await getAffiliateDataSettings()));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -161,7 +161,7 @@ router.put("/settings/affiliate-data", protect, adminOnly, async (req, res) => {
 
     res.json({
       message: "Affiliate data settings updated",
-      ...buildAffiliateDataSettingsResponse(settings),
+      ...buildAffiliateDataModeResponse(settings),
     });
   } catch (err) {
     res.status(400).json({ message: err.message });

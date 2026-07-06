@@ -40,7 +40,7 @@ export function AffiliateCta({
   };
 
   return (
-    <div className="space-y-2">
+    <div className="w-full space-y-2">
       {disabled ? (
         <Button type="button" size={size} variant="secondary" className={className} disabled>
           Amazon link under review

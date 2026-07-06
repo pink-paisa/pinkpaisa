@@ -474,6 +474,24 @@ test("admin affiliate CRUD cannot promote manual submissions into API-sourced co
     "Manual product"
   );
   assert.equal(payloadImageManual.featured_image, "https://m.media-amazon.com/images/I/payload-product.jpg");
+
+  const aliasImageManual = affiliateProductPrivate.buildAffiliateImageContent(
+    { featured_image: "https://cdn.example.com/featured-alias.jpg" },
+    null,
+    "manual",
+    "Manual product"
+  );
+  assert.equal(aliasImageManual.featured_image, "https://cdn.example.com/featured-alias.jpg");
+
+  const mergedPayload = affiliateProductPrivate.buildAffiliatePayloadSnapshot(
+    { image_url: "https://m.media-amazon.com/images/I/new-product.jpg", title: "Manual product" },
+    { affiliate_payload: { image_url: "", existing_field: "keep-me" } },
+    "https://m.media-amazon.com/images/I/new-product.jpg",
+    "manual"
+  );
+  assert.equal(mergedPayload.image_url, "https://m.media-amazon.com/images/I/new-product.jpg");
+  assert.equal(mergedPayload.manual_image_url, "https://m.media-amazon.com/images/I/new-product.jpg");
+  assert.equal(mergedPayload.existing_field, "keep-me");
 });
 
 test("admin affiliate required fields include selling metadata", () => {
@@ -499,8 +517,8 @@ test("admin affiliate required fields include selling metadata", () => {
 
   assert.equal(errors.image_url, undefined);
   assert.equal(errors.short_description, "Short description is required");
-  assert.equal(errors.buying_intent, "Buying intent is required");
-  assert.equal(errors.campaign_label, "Campaign label is required");
+  assert.equal(errors.buying_intent, undefined);
+  assert.equal(errors.campaign_label, undefined);
   assert.equal(errors.pros, "At least one pro is required");
   assert.equal(errors.cons, "At least one con is required");
   assert.equal(errors.seo_title, "SEO title is required");
@@ -527,6 +545,22 @@ test("creators api readiness is gated by env, mode, health status, and implement
     });
     assert.equal(notReady.ready, false);
     assert.equal(notReady.adapter_implemented, false);
+    assert.equal(notReady.current_mode, "manual_only");
+    assert.equal(notReady.manual_available, true);
+    assert.equal(notReady.creators_can_enable, false);
+    assert.equal(notReady.creators_can_refresh, false);
+    assert.match(notReady.disabled_reason, /not implemented/i);
+
+    const response = creatorsApiService.buildAffiliateDataModeResponse({
+      affiliate_data_mode: "creators_api",
+      affiliate_data_marketplaces: ["amazon_in"],
+      affiliate_creators_api_health_status: "ok",
+    });
+    assert.equal(response.requested_affiliate_data_mode, "creators_api");
+    assert.equal(response.affiliate_data_mode, "manual_only");
+    assert.equal(response.current_mode, "manual_only");
+    assert.equal(response.creators_adapter_implemented, false);
+    assert.equal(response.creators_can_enable, false);
 
     const manual = creatorsApiPrivate.buildCreatorsApiReadiness({
       settings: {
@@ -537,6 +571,7 @@ test("creators api readiness is gated by env, mode, health status, and implement
       envStatus: getCreatorsApiEnvStatus(),
     });
     assert.equal(manual.ready, false);
+    assert.equal(manual.current_mode, "manual_only");
   } finally {
     if (originalEnabled) process.env.AMAZON_CREATORS_API_ENABLED = originalEnabled;
     else delete process.env.AMAZON_CREATORS_API_ENABLED;

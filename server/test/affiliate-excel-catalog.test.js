@@ -31,12 +31,10 @@ test("affiliate excel parser supports clean Pink Paisa template columns", async 
       category: "Beauty",
       subcategory: "Skincare",
       short_description: "A calming skincare tool.",
-      buying_intent: "Quick routine upgrade",
       pros: "Easy to use | Giftable",
       cons: "Check seller details on Amazon",
       seo_title: "Rose Quartz Face Roller",
       seo_description: "Curated skincare pick from Pink Paisa.",
-      campaign_label: "instagram-beauty-finds",
       sku: "AMZ-B0CTVGPLQX",
       external_id: "B0CTVGPLQX",
       brand: "Example Brand",
@@ -56,6 +54,8 @@ test("affiliate excel parser supports clean Pink Paisa template columns", async 
   assert.equal(result.items[0].category, "Beauty");
   assert.equal(result.items[0].subcategory, "Skincare");
   assert.equal(result.items[0].short_description, "A calming skincare tool.");
+  assert.equal(result.items[0].buying_intent, null);
+  assert.equal(result.items[0].campaign_label, null);
   assert.equal(result.items[0].external_id, "B0CTVGPLQX");
   assert.equal(result.items[0].brand, "Example Brand");
 });

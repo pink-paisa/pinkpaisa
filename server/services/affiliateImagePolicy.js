@@ -71,7 +71,7 @@ function buildImagePayload(imageUrl, title = "Affiliate product") {
   };
 }
 
-function filterSafeManualAffiliateImages(doc = {}) {
+function filterManualAffiliateImages(doc = {}) {
   const imageItems = Array.isArray(doc.image_items) ? doc.image_items : [];
   const legacyImages = Array.isArray(doc.images) ? doc.images : [];
   const candidateItems = imageItems.length
@@ -107,7 +107,7 @@ function filterSafeManualAffiliateImages(doc = {}) {
 
 module.exports = {
   buildImagePayload,
-  filterSafeManualAffiliateImages,
+  filterManualAffiliateImages,
   isAmazonHostedImageUrl,
   normalizeManualAffiliateImageUrl,
 };

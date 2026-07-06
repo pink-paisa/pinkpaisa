@@ -15,13 +15,13 @@ const Footer = () => {
           <div className="flex flex-wrap items-center justify-center gap-6 text-sm text-muted-foreground">
             <Link
               href="/vendor/signup"
-              className="transition-colors hover:text-foreground"
+              className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
             >
               Vendor Sign Up
             </Link>
             <Link
               href="/affiliate-disclosure"
-              className="transition-colors hover:text-foreground"
+              className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
             >
               Affiliate Disclosure
             </Link>
@@ -29,7 +29,7 @@ const Footer = () => {
               href="https://pinkpaisa.in"
               target="_blank"
               rel="noopener noreferrer"
-              className="transition-colors hover:text-foreground"
+              className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
             >
               pinkpaisa.in
             </a>
@@ -37,7 +37,7 @@ const Footer = () => {
               href="https://instagram.com/pinkpaisa.in"
               target="_blank"
               rel="noopener noreferrer"
-              className="transition-colors hover:text-foreground"
+              className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
             >
               Instagram
             </a>

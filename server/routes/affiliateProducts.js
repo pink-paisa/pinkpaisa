@@ -19,6 +19,7 @@ const {
   refreshAffiliateProductApiData,
   refreshAffiliateProductsApiData,
   backfillAffiliateCompliance,
+  backfillAffiliateImages,
 } = require("../controllers/affiliateProductController");
 
 const upload = multer({
@@ -49,6 +50,7 @@ router.post("/", protect, adminOnly, createAffiliateProduct);
 router.post("/upload-excel", protect, adminOnly, uploadAffiliateExcel, uploadAffiliateProducts);
 router.patch("/assign-category", protect, adminOnly, assignAffiliateCategory);
 router.post("/backfill-compliance", protect, adminOnly, backfillAffiliateCompliance);
+router.post("/backfill-images", protect, adminOnly, backfillAffiliateImages);
 router.post("/refresh-api-data", protect, adminOnly, refreshAffiliateProductsApiData);
 router.put("/:id", protect, adminOnly, updateAffiliateProduct);
 router.delete("/:id", protect, adminOnly, deleteAffiliateProduct);

@@ -9,7 +9,7 @@ const { ensureUniqueProductSlug } = require("../utils/productSlug");
 const logger = require("../utils/logger");
 const { enqueueAdminProductCampaign } = require("../services/marketingAgentOrchestrator");
 const { ingestVendorImage, validateRemoteImageUrl } = require("../utils/vendorMedia");
-const { filterSafeManualAffiliateImages } = require("../services/affiliateImagePolicy");
+const { filterManualAffiliateImages } = require("../services/affiliateImagePolicy");
 
 const SORT_PRESETS = {
   popular: { is_affiliate: 1, sort_order: 1, createdAt: -1 },
@@ -266,10 +266,10 @@ const toFlat = (doc, { publicView = false } = {}) => {
       flat.image_items = [];
       flat.featured_image = null;
     } else {
-      const safeManualImages = filterSafeManualAffiliateImages(flat);
-      flat.images = safeManualImages.images;
-      flat.image_items = safeManualImages.image_items;
-      flat.featured_image = safeManualImages.featured_image;
+      const manualImages = filterManualAffiliateImages(flat);
+      flat.images = manualImages.images;
+      flat.image_items = manualImages.image_items;
+      flat.featured_image = manualImages.featured_image;
     }
     flat.price = 0;
     flat.sale_price = null;

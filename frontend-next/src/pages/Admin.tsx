@@ -287,19 +287,23 @@ const Admin = () => {
             className="space-y-4"
           >
             <Input
+              id="admin-email"
               type="email"
               placeholder="Admin email"
               value={adminEmail}
               onChange={(e) => setAdminEmail(e.target.value)}
               required
             />
+            <label htmlFor="admin-email" className="sr-only">Admin email</label>
             <Input
+              id="admin-password"
               type="password"
               placeholder="Admin password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
+            <label htmlFor="admin-password" className="sr-only">Admin password</label>
             <div className="flex items-center justify-between gap-3 text-sm">
               <button type="button" onClick={handleForgotPassword} disabled={resetSubmitting} className="font-medium text-primary">
                 {resetSubmitting ? "Sending..." : "Forgot password?"}
@@ -335,6 +339,7 @@ const Admin = () => {
               className="fixed inset-0 z-40 bg-foreground/35 backdrop-blur-[1px] lg:hidden"
             />
             <motion.aside
+              id="admin-mobile-navigation"
               initial={{ x: -320 }}
               animate={{ x: 0 }}
               exit={{ x: -320 }}
@@ -351,7 +356,8 @@ const Admin = () => {
                 <button
                   type="button"
                   onClick={() => setMobileNavOpen(false)}
-                  className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  aria-label="Close admin navigation"
+                  className="rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -366,6 +372,7 @@ const Admin = () => {
                     <div key={group.key} className="space-y-1">
                       <button
                         onClick={() => toggleGroup(group.key)}
+                        aria-expanded={hasChildren ? groupOpen : undefined}
                         className={cn(
                           "flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-medium transition-all",
                           groupActive
@@ -373,7 +380,7 @@ const Admin = () => {
                             : "text-muted-foreground hover:bg-accent hover:text-foreground"
                         )}
                       >
-                        <group.icon className="h-4.5 w-4.5 shrink-0" />
+                        <group.icon className="h-[18px] w-[18px] shrink-0" />
                         <div className="min-w-0 flex-1 text-left">
                           <p className="leading-tight">{group.label}</p>
                           <p className="text-[10px] font-normal opacity-60">{group.sublabel}</p>
@@ -415,14 +422,14 @@ const Admin = () => {
                   onClick={() => setMobileNavOpen(false)}
                   className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
-                  <Home className="h-4.5 w-4.5 shrink-0" />
+                  <Home className="h-[18px] w-[18px] shrink-0" />
                   <span>Back to Home</span>
                 </Link>
                 <button
                   onClick={handleLogout}
                   className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                 >
-                  <LogOut className="h-4.5 w-4.5 shrink-0" />
+                  <LogOut className="h-[18px] w-[18px] shrink-0" />
                   <span>Logout</span>
                 </button>
               </div>
@@ -448,7 +455,8 @@ const Admin = () => {
           )}
           <button
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent"
+            aria-label={sidebarCollapsed ? "Expand admin sidebar" : "Collapse admin sidebar"}
+            className="rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
           </button>
@@ -479,8 +487,9 @@ const Admin = () => {
                       : "text-muted-foreground hover:bg-accent hover:text-foreground"
                   )}
                   title={group.label}
+                  aria-label={group.label}
                 >
-                  <group.icon className="h-4.5 w-4.5 shrink-0" />
+                  <group.icon className="h-[18px] w-[18px] shrink-0" />
                 </button>
               );
             }
@@ -489,6 +498,7 @@ const Admin = () => {
               <div key={group.key} className="space-y-1">
                 <button
                   onClick={() => toggleGroup(group.key)}
+                  aria-expanded={hasChildren ? groupOpen : undefined}
                   className={cn(
                     "flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all",
                     groupActive
@@ -496,7 +506,7 @@ const Admin = () => {
                       : "text-muted-foreground hover:bg-accent hover:text-foreground"
                   )}
                 >
-                  <group.icon className="h-4.5 w-4.5 shrink-0" />
+                  <group.icon className="h-[18px] w-[18px] shrink-0" />
                   <div className="min-w-0 flex-1 text-left">
                     <p className="leading-tight">{group.label}</p>
                     <p className="text-[10px] font-normal opacity-60">{group.sublabel}</p>
@@ -537,14 +547,15 @@ const Admin = () => {
             href="/"
             className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
-            <Home className="h-4.5 w-4.5 shrink-0" />
+            <Home className="h-[18px] w-[18px] shrink-0" />
             {!sidebarCollapsed && <span>Back to Home</span>}
           </Link>
           <button
             onClick={handleLogout}
+            aria-label="Logout"
             className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
           >
-            <LogOut className="h-4.5 w-4.5 shrink-0" />
+            <LogOut className="h-[18px] w-[18px] shrink-0" />
             {!sidebarCollapsed && <span>Logout</span>}
           </button>
         </div>
@@ -557,7 +568,10 @@ const Admin = () => {
               <button
                 type="button"
                 onClick={() => setMobileNavOpen((open) => !open)}
-                className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:hidden"
+                aria-label={mobileNavOpen ? "Close admin navigation" : "Open admin navigation"}
+                aria-expanded={mobileNavOpen}
+                aria-controls="admin-mobile-navigation"
+                className="rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
               >
                 {mobileNavOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
               </button>

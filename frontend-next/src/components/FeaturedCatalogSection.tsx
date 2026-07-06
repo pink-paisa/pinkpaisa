@@ -41,7 +41,7 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
     <div className="group flex flex-col overflow-hidden rounded-3xl border border-border bg-card shadow-sm transition-shadow hover:shadow-xl hover:shadow-primary/10">
       <Link href={`/product/${product.slug}`} className="relative aspect-square overflow-hidden bg-accent/20">
         {product.featured_image ? (
-          <img src={product.featured_image} alt={product.title} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+          <img src={product.featured_image} alt={product.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
         ) : (
           <div className="flex h-full w-full items-center justify-center">
             <Sparkles className="h-12 w-12 text-muted-foreground/30" />
@@ -51,7 +51,7 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
           <span className="absolute left-3 top-3 rounded-full bg-destructive px-2.5 py-1 text-[10px] font-bold text-destructive-foreground">Sale</span>
         ) : null}
         {isAffiliate ? (
-          <span className="absolute left-3 top-3 rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">Curated find</span>
+          <span className="absolute left-3 top-3 rounded-full bg-background/95 px-2.5 py-1 text-[10px] font-bold text-primary shadow-sm">Curated find</span>
         ) : null}
         {outOfStock ? (
           <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
@@ -70,10 +70,10 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
         </Link>
         {product.short_description ? <p className="mb-4 line-clamp-2 text-sm text-muted-foreground">{product.short_description}</p> : null}
 
-        <div className="mt-auto flex items-center justify-between gap-3">
+        <div className={isAffiliate ? "mt-auto space-y-3" : "mt-auto flex items-center justify-between gap-3"}>
           {isAffiliate ? (
             showAffiliateApiPrice ? (
-              <div>
+              <div className="w-full">
                 <div className="flex flex-wrap items-baseline gap-2">
                   <span className="font-serif text-xl font-bold text-foreground">{formatPrice(product.sale_price ?? product.price)}</span>
                   {product.sale_price ? <span className="text-sm text-muted-foreground line-through">{formatPrice(product.price)}</span> : null}
@@ -83,7 +83,7 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
                 </p>
               </div>
             ) : (
-              <p className="max-w-[11rem] text-xs leading-5 text-muted-foreground">Confirm price on Amazon.</p>
+              <p className="text-xs leading-5 text-muted-foreground">Confirm price on Amazon.</p>
             )
           ) : (
             <div className="flex items-baseline gap-2">
@@ -92,7 +92,7 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
             </div>
           )}
           {isAffiliate ? (
-            <AffiliateCta product={product} size="sm" variant="secondary" className="rounded-xl" />
+            <AffiliateCta product={product} size="sm" variant="secondary" className="w-full rounded-xl" />
           ) : (
             <Button size="sm" className="rounded-xl" variant={isInCart ? "secondary" : "default"} onClick={handleAdd} disabled={outOfStock || quantityReachedCap}>
               {isInCart ? (

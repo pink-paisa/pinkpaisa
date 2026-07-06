@@ -64,7 +64,7 @@ const Navbar = () => {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 8 }}
                   transition={{ duration: 0.18 }}
-                  className="absolute left-[-100px] top-[calc(100%-8px)] z-50 w-max min-w-[500px] max-w-[min(90vw,900px)] pt-4"
+                  className="absolute left-1/2 top-[calc(100%-8px)] z-50 w-[min(90vw,900px)] -translate-x-1/2 pt-4"
                 >
                   <div className="rounded-3xl border border-border bg-background p-6 shadow-2xl">
                     <div className="grid gap-6 md:grid-cols-3 xl:grid-cols-4">
@@ -110,7 +110,7 @@ const Navbar = () => {
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 8 }}
                   transition={{ duration: 0.18 }}
-                  className="absolute left-[-100px] top-[calc(100%-8px)] z-50 w-max min-w-[500px] max-w-[min(90vw,900px)] pt-4"
+                  className="absolute left-1/2 top-[calc(100%-8px)] z-50 w-[min(90vw,760px)] -translate-x-1/2 pt-4"
                 >
                   <div className="rounded-3xl border border-border bg-background p-6 shadow-2xl">
                     <div className="grid gap-6 md:grid-cols-2">
@@ -151,7 +151,7 @@ const Navbar = () => {
 
         <div className="flex items-center gap-2 sm:gap-2.5">
           <GoogleTranslate />
-          <Link href="/account/wishlist" className="relative hidden rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:inline-flex" aria-label="Wishlist">
+          <Link href="/account/wishlist" className="relative hidden rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:inline-flex" aria-label="Wishlist">
             <Heart className="h-5 w-5" />
             {wishlistCount > 0 ? (
               <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
@@ -159,17 +159,23 @@ const Navbar = () => {
               </span>
             ) : null}
           </Link>
-          <Link href={user ? "/account" : "/account/auth"} className="hidden rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:inline-flex" aria-label="Account">
+          <Link href={user ? "/account" : "/account/auth"} className="hidden rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:inline-flex" aria-label="Account">
             <UserRound className="h-5 w-5" />
           </Link>
-          <button onClick={() => setIsCartOpen(true)} className="relative rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" aria-label="Open cart">
+          <button onClick={() => setIsCartOpen(true)} className="relative rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" aria-label="Open cart">
             <ShoppingCart className="h-5 w-5" />
             {totalItems > 0 ? <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">{totalItems > 9 ? "9+" : totalItems}</span> : null}
           </button>
           <Link href="/products" className="hidden rounded-lg bg-primary px-3.5 py-1.5 text-[13px] font-semibold text-primary-foreground shadow-sm transition-all hover:brightness-110 active:scale-[0.97] sm:inline-flex">
             Shop Now
           </Link>
-          <button onClick={() => setMobileOpen((value) => !value)} className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground lg:hidden" aria-label="Toggle menu">
+          <button
+            onClick={() => setMobileOpen((value) => !value)}
+            className="rounded-lg p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+            aria-label={mobileOpen ? "Close menu" : "Open menu"}
+            aria-expanded={mobileOpen}
+            aria-controls="pinkpaisa-mobile-nav"
+          >
             {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
           </button>
         </div>
@@ -178,11 +184,12 @@ const Navbar = () => {
       <AnimatePresence>
         {mobileOpen ? (
           <motion.nav
+            id="pinkpaisa-mobile-nav"
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            className="overflow-hidden border-t border-border/50 bg-background lg:hidden"
+            className="max-h-[calc(100dvh-3.5rem)] overflow-y-auto overscroll-contain border-t border-border/50 bg-background lg:hidden"
           >
             <div className="container mx-auto flex flex-col gap-1 py-4">
               <Link href="/#products" onClick={() => setMobileOpen(false)} className="rounded-lg px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent">

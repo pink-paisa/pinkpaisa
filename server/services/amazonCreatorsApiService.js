@@ -35,23 +35,64 @@ function isCreatorsApiAdapterImplemented() {
   return false;
 }
 
+function getCreatorsApiDisabledReason({ envStatus, healthOk, adapterImplemented }) {
+  if (!adapterImplemented) return "Creators API product refresh is not implemented yet. Keep Manual Only active.";
+  if (!envStatus.configured) return `Creators API mode requires configuration: ${envStatus.missing.join(", ")}`;
+  if (!healthOk) return "Run a successful Creators API readiness check before enabling Creators API mode.";
+  return null;
+}
+
 function buildCreatorsApiReadiness({ settings, envStatus = getCreatorsApiEnvStatus() }) {
   const normalizedSettings = buildAffiliateDataSettingsResponse(settings || {});
   const modeEnabled = normalizedSettings.affiliate_data_mode === APPROVED_API_SOURCE;
   const healthOk = normalizedSettings.affiliate_creators_api_health_status === "ok";
   const adapterImplemented = isCreatorsApiAdapterImplemented();
-  const ready = modeEnabled && envStatus.configured && healthOk && adapterImplemented;
+  const disabledReason = getCreatorsApiDisabledReason({ envStatus, healthOk, adapterImplemented });
+  const creatorsCanEnable = !disabledReason;
+  const currentMode = modeEnabled && creatorsCanEnable ? APPROVED_API_SOURCE : "manual_only";
+  const creatorsCanRefresh = currentMode === APPROVED_API_SOURCE;
+  const message = creatorsCanRefresh
+    ? "Creators API mode is ready"
+    : creatorsCanEnable
+      ? "Creators API is ready to enable. Manual Only remains active until an admin enables it."
+      : disabledReason || "Creators API mode is not ready. Keep Manual Only active.";
 
   return {
-    ready,
+    ready: creatorsCanRefresh,
+    current_mode: currentMode,
+    manual_available: true,
+    creators_adapter_implemented: adapterImplemented,
+    creators_env_configured: envStatus.configured,
+    creators_health_status: normalizedSettings.affiliate_creators_api_health_status,
+    creators_can_enable: creatorsCanEnable,
+    creators_can_refresh: creatorsCanRefresh,
+    disabled_reason: disabledReason,
     mode_enabled: modeEnabled,
     env_configured: envStatus.configured,
     health_ok: healthOk,
     adapter_implemented: adapterImplemented,
     missing: envStatus.missing,
-    message: ready
-      ? "Creators API mode is ready"
-      : "Creators API mode is not ready. Keep manual-only display until credentials and health check are valid.",
+    message,
+  };
+}
+
+function buildAffiliateDataModeResponse(settings = {}) {
+  const base = buildAffiliateDataSettingsResponse(settings);
+  const readiness = buildCreatorsApiReadiness({ settings: base });
+  return {
+    ...base,
+    requested_affiliate_data_mode: base.affiliate_data_mode,
+    affiliate_data_mode: readiness.current_mode,
+    current_mode: readiness.current_mode,
+    manual_available: readiness.manual_available,
+    creators_adapter_implemented: readiness.creators_adapter_implemented,
+    creators_env_configured: readiness.creators_env_configured,
+    creators_health_status: readiness.creators_health_status,
+    creators_can_enable: readiness.creators_can_enable,
+    creators_can_refresh: readiness.creators_can_refresh,
+    disabled_reason: readiness.disabled_reason,
+    creators_api_ready: readiness.creators_can_refresh,
+    creators_api_readiness: readiness,
   };
 }
 
@@ -67,7 +108,7 @@ async function persistHealthCheck(result) {
     },
     { new: true, upsert: true, lean: true }
   );
-  return buildAffiliateDataSettingsResponse(settings);
+  return buildAffiliateDataModeResponse(settings);
 }
 
 async function runCreatorsApiHealthCheck() {
@@ -191,6 +232,22 @@ async function refreshAffiliateProductFromCreatorsApi(productOrId) {
 }
 
 async function refreshAffiliateProductsFromCreatorsApi({ productIds = [], limit = getRefreshBatchSize() } = {}) {
+  const settings = await getAffiliateDataSettings();
+  const readiness = buildCreatorsApiReadiness({ settings });
+  if (!readiness.creators_can_refresh) {
+    return {
+      skipped: true,
+      status: "not_ready",
+      reason: readiness.disabled_reason || readiness.message,
+      message: readiness.disabled_reason || readiness.message,
+      requested: 0,
+      refreshed: 0,
+      failed: 0,
+      results: [],
+      readiness,
+    };
+  }
+
   const filter = {
     is_affiliate: true,
     source_type: "admin",
@@ -230,8 +287,9 @@ async function refreshAffiliateProductsFromCreatorsApi({ productIds = [], limit 
 
 async function runDueCreatorsApiRefresh({ limit = getRefreshBatchSize() } = {}) {
   const settings = await getAffiliateDataSettings();
-  if (settings.affiliate_data_mode !== APPROVED_API_SOURCE) {
-    return { skipped: true, reason: "manual_only", requested: 0, refreshed: 0, failed: 0 };
+  const readiness = buildCreatorsApiReadiness({ settings });
+  if (!readiness.creators_can_refresh) {
+    return { skipped: true, reason: readiness.disabled_reason || readiness.message, requested: 0, refreshed: 0, failed: 0 };
   }
   const summary = await refreshAffiliateProductsFromCreatorsApi({ limit });
   logger.info({ requested: summary.requested, refreshed: summary.refreshed, failed: summary.failed }, "creators api affiliate refresh completed");
@@ -241,6 +299,7 @@ async function runDueCreatorsApiRefresh({ limit = getRefreshBatchSize() } = {}) 
 module.exports = {
   APPROVED_API_SOURCE,
   applyCreatorsApiDataToProduct,
+  buildAffiliateDataModeResponse,
   buildCreatorsApiReadiness,
   fetchCreatorsApiProductData,
   isCreatorsApiAdapterImplemented,

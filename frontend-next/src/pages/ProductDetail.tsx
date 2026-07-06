@@ -163,6 +163,8 @@ const ProductDetail = ({
   const maxQuantity = Math.max(product.stock_quantity - currentCartQuantity, 0);
   const discount = !isAffiliate && product.sale_price ? Math.round(((product.price - product.sale_price) / product.price) * 100) : 0;
   const wished = isWishlisted(product.id);
+  const showStickyAffiliateCta = isAffiliate && product.affiliate_compliance_status === "compliant";
+  const showStickyPhysicalCta = !isAffiliate && !outOfStock;
 
   const handleAdd = () => {
     if (outOfStock || isAffiliate || quantity <= 0) return;
@@ -231,7 +233,12 @@ const ProductDetail = ({
           <motion.div initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.5 }}>
             <div className="relative mb-4 aspect-square overflow-hidden rounded-2xl bg-accent/30">
               {imageItems.length > 0 ? (
-                <img src={imageItems[selectedImage]?.url} alt={imageItems[selectedImage]?.alt || product.title} className="h-full w-full object-cover" />
+                <img
+                  src={imageItems[selectedImage]?.url}
+                  alt={imageItems[selectedImage]?.alt || product.title}
+                  decoding="async"
+                  className={`h-full w-full ${isAffiliate ? "object-contain" : "object-cover"}`}
+                />
               ) : (
                 <div className="flex h-full w-full items-center justify-center">
                   <Sparkles className="h-20 w-20 text-muted-foreground/20" />
@@ -259,6 +266,7 @@ const ProductDetail = ({
               {!isAffiliate ? (
                 <button
                   onClick={handleToggleWishlist}
+                  aria-label={wished ? "Remove from wishlist" : "Add to wishlist"}
                   className={`absolute right-4 top-4 rounded-full border p-3 transition-colors ${
                     wished ? "border-rose-200 bg-white text-rose-500" : "border-white/80 bg-white/90 text-muted-foreground hover:text-rose-500"
                   }`}
@@ -274,11 +282,13 @@ const ProductDetail = ({
                   <button
                     key={`${image.url}-${index}`}
                     onClick={() => setSelectedImage(index)}
+                    aria-label={`View image ${index + 1}`}
+                    aria-pressed={selectedImage === index}
                     className={`h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border-2 transition-colors ${
                       selectedImage === index ? "border-primary" : "border-border hover:border-primary/50"
                     }`}
                   >
-                    <img src={image.url} alt={image.alt || product.title} className="h-full w-full object-cover" />
+                    <img src={image.url} alt={image.alt || product.title} loading="lazy" decoding="async" className={`h-full w-full ${isAffiliate ? "object-contain" : "object-cover"}`} />
                   </button>
                 ))}
               </div>
@@ -367,6 +377,7 @@ const ProductDetail = ({
                     <button
                       onClick={() => setQuantity(Math.max(1, quantity - 1))}
                       disabled={quantity <= 1}
+                      aria-label="Decrease quantity"
                       className="rounded-l-xl p-3 transition-colors hover:bg-accent disabled:opacity-40"
                     >
                       <Minus className="h-4 w-4" />
@@ -375,6 +386,7 @@ const ProductDetail = ({
                     <button
                       onClick={() => setQuantity(Math.min(maxQuantity || 1, quantity + 1))}
                       disabled={quantity >= maxQuantity}
+                      aria-label="Increase quantity"
                       className="rounded-r-xl p-3 transition-colors hover:bg-accent disabled:opacity-40"
                     >
                       <Plus className="h-4 w-4" />
@@ -459,7 +471,7 @@ const ProductDetail = ({
                 <Link key={related.id} href={`/product/${related.slug}`} className="group overflow-hidden rounded-2xl border border-border bg-card">
                   <div className="aspect-[1.1] overflow-hidden bg-accent/30">
                     {related.featured_image ? (
-                      <img src={related.featured_image} alt={related.title} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                      <img src={related.featured_image} alt={related.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center">
                         <Sparkles className="h-10 w-10 text-muted-foreground/30" />
@@ -499,7 +511,7 @@ const ProductDetail = ({
                 <Link key={recent.slug} href={`/product/${recent.slug}`} className="group overflow-hidden rounded-2xl border border-border bg-card">
                   <div className="aspect-[1.1] overflow-hidden bg-accent/30">
                     {recent.featured_image ? (
-                      <img src={recent.featured_image} alt={recent.title} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                      <img src={recent.featured_image} alt={recent.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center">
                         <Sparkles className="h-10 w-10 text-muted-foreground/30" />
@@ -517,8 +529,8 @@ const ProductDetail = ({
         ) : null}
       </div>
 
-      {!isAffiliate && !outOfStock ? (
-        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 px-4 py-3 shadow-2xl backdrop-blur md:hidden">
+      {showStickyPhysicalCta ? (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 px-4 py-3 pb-safe shadow-2xl backdrop-blur md:hidden">
           <div className="mx-auto flex max-w-xl items-center gap-3">
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{product.title}</p>
@@ -530,6 +542,17 @@ const ProductDetail = ({
           </div>
         </div>
       ) : null}
+
+      {showStickyAffiliateCta ? (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 px-4 py-3 pb-safe shadow-2xl backdrop-blur md:hidden">
+          <div className="mx-auto max-w-xl space-y-2">
+            <p className="truncate text-sm font-medium">{product.title}</p>
+            <AffiliateCta product={product} size="lg" className="w-full rounded-xl" />
+          </div>
+        </div>
+      ) : null}
+
+      {showStickyPhysicalCta || showStickyAffiliateCta ? <div className="h-28 md:hidden" /> : null}
 
       <Footer />
     </div>

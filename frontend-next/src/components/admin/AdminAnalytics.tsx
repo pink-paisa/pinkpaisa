@@ -3,6 +3,7 @@ import { apiFetch } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StatCard, formatPrice } from "./AdminShared";
+import { toast } from "sonner";
 
 type AnalyticsResponse = {
   from?: string | null;
@@ -99,6 +100,7 @@ export const AdminAnalytics = () => {
   const [amazonReportMessage, setAmazonReportMessage] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [error, setError] = useState("");
 
   const load = async ({ silent = false }: { silent?: boolean } = {}) => {
     try {
@@ -109,8 +111,13 @@ export const AdminAnalytics = () => {
       if (fromDate) params.set("from", fromDate);
       if (toDate) params.set("to", toDate);
 
+      setError("");
       const response = await apiFetch<AnalyticsResponse>(`/admin/analytics${params.toString() ? `?${params}` : ""}`);
       setStats({ ...INITIAL_STATS, ...response });
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Could not load analytics.";
+      setError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -175,6 +182,12 @@ export const AdminAnalytics = () => {
           </Button>
         </div>
       </div>
+
+      {error ? (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      ) : null}
 
       <div>
         <h3 className="mb-3 font-semibold">Revenue</h3>

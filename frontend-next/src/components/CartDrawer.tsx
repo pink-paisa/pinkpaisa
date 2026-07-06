@@ -62,10 +62,10 @@ const CartDrawer = () => {
                     {item.image_url ? (
                       item.slug ? (
                         <Link href={`/product/${item.slug}`} onClick={() => setIsCartOpen(false)}>
-                          <img src={item.image_url} alt={item.title} className="h-full w-full object-cover" />
+                          <img src={item.image_url} alt={item.title} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                         </Link>
                       ) : (
-                        <img src={item.image_url} alt={item.title} className="h-full w-full object-cover" />
+                        <img src={item.image_url} alt={item.title} loading="lazy" decoding="async" className="h-full w-full object-cover" />
                       )
                     ) : (
                       <div className="flex h-full w-full items-center justify-center text-muted-foreground">
@@ -101,8 +101,8 @@ const CartDrawer = () => {
                   <div className="flex flex-col items-end justify-between">
                     <button
                       onClick={() => removeItem(item.id)}
-                      className="p-1 text-muted-foreground transition-colors hover:text-destructive"
-                      aria-label="Remove item"
+                      className="flex min-h-10 min-w-10 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={`Remove ${item.title}`}
                     >
                       <Trash2 className="h-4 w-4" />
                     </button>
@@ -111,15 +111,17 @@ const CartDrawer = () => {
                       <button
                         onClick={() => updateQuantity(item.id, item.quantity - 1)}
                         disabled={item.quantity <= 1}
-                        className="rounded-l-lg p-1.5 transition-colors hover:bg-accent disabled:opacity-40"
+                        aria-label="Decrease quantity"
+                        className="flex min-h-10 min-w-10 items-center justify-center rounded-l-lg transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
                       >
                         <Minus className="h-3 w-3" />
                       </button>
-                      <span className="w-5 text-center text-sm font-medium tabular-nums">{item.quantity}</span>
+                      <span className="w-8 text-center text-sm font-medium tabular-nums">{item.quantity}</span>
                       <button
                         onClick={() => updateQuantity(item.id, item.quantity + 1)}
                         disabled={item.stock_quantity_at_add != null && item.quantity >= item.stock_quantity_at_add}
-                        className="rounded-r-lg p-1.5 transition-colors hover:bg-accent disabled:opacity-40"
+                        aria-label="Increase quantity"
+                        className="flex min-h-10 min-w-10 items-center justify-center rounded-r-lg transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40"
                       >
                         <Plus className="h-3 w-3" />
                       </button>

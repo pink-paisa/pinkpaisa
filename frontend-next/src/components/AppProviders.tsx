@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MotionConfig } from "framer-motion";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
@@ -13,18 +14,20 @@ export default function AppProviders({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <Toaster />
-        <Sonner />
-        <CustomerAuthProvider>
-          <VendorAuthProvider>
-            <CartProvider>
-              <CartDrawer />
-              {children}
-            </CartProvider>
-          </VendorAuthProvider>
-        </CustomerAuthProvider>
-      </TooltipProvider>
+      <MotionConfig reducedMotion="user">
+        <TooltipProvider>
+          <Toaster />
+          <Sonner />
+          <CustomerAuthProvider>
+            <VendorAuthProvider>
+              <CartProvider>
+                <CartDrawer />
+                {children}
+              </CartProvider>
+            </VendorAuthProvider>
+          </CustomerAuthProvider>
+        </TooltipProvider>
+      </MotionConfig>
     </QueryClientProvider>
   );
 }

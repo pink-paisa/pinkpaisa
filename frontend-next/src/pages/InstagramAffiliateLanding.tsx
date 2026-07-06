@@ -39,13 +39,18 @@ export default function InstagramAffiliateLanding({
             <Link
               key={tab.key}
               href={tab.href}
-              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+              className={`inline-flex min-h-11 items-center rounded-full px-4 py-2 text-sm font-medium transition-colors ${
                 activeTab === tab.key ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
               }`}
             >
               {tab.label}
             </Link>
           ))}
+          {activeTab === "campaign" ? (
+            <span className="inline-flex min-h-11 items-center rounded-full bg-primary text-primary-foreground px-4 py-2 text-sm font-medium">
+              Campaign
+            </span>
+          ) : null}
         </div>
 
         {products.length ? (
@@ -54,7 +59,7 @@ export default function InstagramAffiliateLanding({
               <article key={product.id} className="flex flex-col rounded-2xl border border-border bg-card p-4 shadow-sm">
                 <Link href={`/product/${product.slug}`} className="mb-4 aspect-square overflow-hidden rounded-xl bg-accent/30">
                   {product.featured_image ? (
-                    <img src={product.featured_image} alt={product.title} className="h-full w-full object-cover transition-transform duration-500 hover:scale-105" />
+                    <img src={product.featured_image} alt={product.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 hover:scale-105" />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center">
                       <Sparkles className="h-12 w-12 text-muted-foreground/30" />

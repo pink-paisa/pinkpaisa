@@ -184,12 +184,10 @@ function buildCatalogItem(row, index) {
     ["Category", category],
     ["Subcategory", subcategory],
     ["Short description", shortDescription],
-    ["Buying intent", buyingIntent],
     ["Pros", pros],
     ["Cons", cons],
     ["SEO title", seoTitle],
     ["SEO description", seoDescription],
-    ["Campaign label", campaignLabel],
   ].forEach(([label, value]) => {
     if (!normalizeText(value)) errors.push(`${label} is required`);
   });

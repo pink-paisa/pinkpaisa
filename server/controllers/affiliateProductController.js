@@ -94,6 +94,64 @@ function normalizeAdminAffiliateDataSource(source = {}, existing = null) {
   return "manual";
 }
 
+function normalizePlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function resolveManualAffiliateImageUrl(source = {}) {
+  const payload = normalizePlainObject(source.affiliate_payload);
+  const rawPayload = normalizePlainObject(payload.raw);
+  const firstImageItem = Array.isArray(source.image_items)
+    ? source.image_items.find((item) => normalizeString(typeof item === "string" ? item : item?.url))
+    : null;
+  const firstImage = Array.isArray(source.images)
+    ? source.images.find((image) => normalizeString(image))
+    : null;
+
+  return normalizeString(
+    source.image_url
+    || source.manual_image_url
+    || source.featured_image
+    || (typeof firstImageItem === "string" ? firstImageItem : firstImageItem?.url)
+    || firstImage
+    || payload.image_url
+    || payload.manual_image_url
+    || payload.featured_image
+    || rawPayload.image_url
+    || rawPayload.manual_image_url
+    || rawPayload.featured_image
+  );
+}
+
+function buildAffiliatePayloadSnapshot(item = {}, source = {}, imageUrl = null, dataSource = "manual") {
+  const existingPayload = normalizePlainObject(source.affiliate_payload);
+  const incomingPayload = normalizePlainObject(item);
+  const rawPayload = normalizePlainObject(source.raw);
+  const existingRawPayload = normalizePlainObject(existingPayload.raw);
+  const manualDataSource = !APPROVED_AFFILIATE_DATA_SOURCES.has(String(dataSource || ""));
+  const hasImageInput = ["image_url", "manual_image_url", "featured_image", "images", "image_items"]
+    .some((key) => Object.prototype.hasOwnProperty.call(incomingPayload, key));
+
+  const payload = {
+    ...existingPayload,
+    ...incomingPayload,
+  };
+
+  if (Object.keys(rawPayload).length) {
+    payload.raw = {
+      ...existingRawPayload,
+      ...rawPayload,
+    };
+  }
+
+  if (manualDataSource && (imageUrl || hasImageInput)) {
+    payload.image_url = imageUrl || "";
+    payload.manual_image_url = imageUrl || "";
+  }
+
+  return payload;
+}
+
 function buildPreservedApiContent(existing = null, dataSource = "manual") {
   if (!existing || !APPROVED_AFFILIATE_DATA_SOURCES.has(String(dataSource || ""))) {
     return {
@@ -132,15 +190,7 @@ function buildAffiliateImageContent(source = {}, existing = null, dataSource = "
   }
 
   try {
-    const payloadImageUrl = source.affiliate_payload && typeof source.affiliate_payload === "object"
-      ? source.affiliate_payload.image_url
-        || source.affiliate_payload.manual_image_url
-        || source.affiliate_payload.featured_image
-        || source.affiliate_payload.raw?.image_url
-      : null;
-    const manualImageUrl = normalizeManualAffiliateImageUrl(
-      source.image_url || source.manual_image_url || source.featured_image || payloadImageUrl
-    );
+    const manualImageUrl = normalizeManualAffiliateImageUrl(resolveManualAffiliateImageUrl(source));
     return {
       ...buildImagePayload(manualImageUrl, title),
       price: 0,
@@ -175,8 +225,6 @@ function buildRequiredAffiliateFieldErrors(payload = {}, raw = {}) {
   if (!normalizeString(raw.short_description || raw.description || payload.short_description)) {
     fieldErrors.short_description = "Short description is required";
   }
-  if (!normalizeString(payload.buying_intent)) fieldErrors.buying_intent = "Buying intent is required";
-  if (!normalizeString(payload.campaign_label)) fieldErrors.campaign_label = "Campaign label is required";
   if (!Array.isArray(payload.pros) || !payload.pros.length) fieldErrors.pros = "At least one pro is required";
   if (!Array.isArray(payload.cons) || !payload.cons.length) fieldErrors.cons = "At least one con is required";
   if (!normalizeString(payload.seo_title || payload.seo_meta_title)) fieldErrors.seo_title = "SEO title is required";
@@ -289,6 +337,7 @@ async function buildAffiliatePayload(item, existing = null) {
   });
   const dataSource = normalizeAdminAffiliateDataSource(source, existing);
   const apiContent = buildAffiliateImageContent(source, existing, dataSource, title);
+  const affiliatePayload = buildAffiliatePayloadSnapshot(item, source, apiContent.featured_image, dataSource);
   const taxonomy = await resolveAffiliateTaxonomy(source, existing);
   const requestedStatus = AFFILIATE_STATUSES.has(String(source.status || "")) ? String(source.status) : existing?.status || "draft";
   const complianceStatus = existing?.affiliate_compliance_status === "paused"
@@ -349,7 +398,7 @@ async function buildAffiliatePayload(item, existing = null) {
     affiliate_url: validation.normalizedUrl,
     affiliate_external_id: normalizeString(source.external_id || source.affiliate_external_id) || validation.asin,
     affiliate_source_platform: normalizeString(source.affiliate_source_platform || source.source_platform) || "manual",
-    affiliate_payload: source.raw || source.affiliate_payload || item,
+    affiliate_payload: affiliatePayload,
     affiliate_asin: validation.asin,
     affiliate_marketplace: validation.marketplace,
     affiliate_tag: validation.affiliateTag,
@@ -709,12 +758,17 @@ const refreshAffiliateProductsApiData = async (req, res) => {
     const productIds = Array.isArray(req.body?.product_ids) ? req.body.product_ids.filter(Boolean) : [];
     const limit = Number.isFinite(Number(req.body?.limit)) ? Number(req.body.limit) : undefined;
     const summary = await refreshAffiliateProductsFromCreatorsApi({ productIds, limit });
-    res.status(summary.failed > 0 && summary.refreshed === 0 ? 400 : 200).json({
-      message: `Creators API refresh complete. Refreshed ${summary.refreshed}, failed ${summary.failed}.`,
+    const skipped = Boolean(summary.skipped);
+    res.status(skipped || (summary.failed > 0 && summary.refreshed === 0) ? 400 : 200).json({
+      message: summary.message || `Creators API refresh complete. Refreshed ${summary.refreshed}, failed ${summary.failed}.`,
+      skipped,
+      status: summary.status || (skipped ? "not_ready" : "complete"),
+      reason: summary.reason || null,
       requested: summary.requested,
       refreshed: summary.refreshed,
       failed: summary.failed,
-      results: summary.results.map(serializeRefreshResult),
+      results: (summary.results || []).map(serializeRefreshResult),
+      readiness: summary.readiness || null,
     });
   } catch (err) {
     res.status(400).json({ message: err.message });
@@ -750,6 +804,68 @@ const backfillAffiliateCompliance = async (_req, res) => {
   }
 };
 
+function getAffiliatePayloadImageUrl(product = {}) {
+  if (!product.affiliate_payload || typeof product.affiliate_payload !== "object") return null;
+  return normalizeString(
+    product.affiliate_payload.image_url
+    || product.affiliate_payload.manual_image_url
+    || product.affiliate_payload.featured_image
+    || product.affiliate_payload.raw?.image_url
+  );
+}
+
+const backfillAffiliateImages = async (_req, res) => {
+  try {
+    const products = await Product.find({
+      is_affiliate: true,
+      source_type: "admin",
+      $or: [
+        { featured_image: { $exists: false } },
+        { featured_image: null },
+        { featured_image: "" },
+      ],
+      affiliate_payload: { $ne: null },
+    });
+    let updated = 0;
+    let skipped = 0;
+    const errors = [];
+
+    for (const product of products) {
+      const payloadImageUrl = getAffiliatePayloadImageUrl(product);
+      if (!payloadImageUrl) {
+        skipped += 1;
+        continue;
+      }
+
+      try {
+        const imageUrl = normalizeManualAffiliateImageUrl(payloadImageUrl);
+        const imagePayload = buildImagePayload(imageUrl, product.title);
+        product.images = imagePayload.images;
+        product.image_items = imagePayload.image_items;
+        product.featured_image = imagePayload.featured_image;
+        await product.save();
+        updated += 1;
+      } catch (error) {
+        skipped += 1;
+        errors.push({
+          id: product._id.toString(),
+          title: product.title,
+          error: error.message,
+        });
+      }
+    }
+
+    res.json({
+      message: `Affiliate image backfill completed. Updated ${updated}, skipped ${skipped}.`,
+      updated,
+      skipped,
+      errors,
+    });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
 module.exports = {
   listAffiliateProducts,
   createAffiliateProduct,
@@ -767,12 +883,15 @@ module.exports = {
   refreshAffiliateProductApiData,
   refreshAffiliateProductsApiData,
   backfillAffiliateCompliance,
+  backfillAffiliateImages,
   buildAffiliatePayload,
   findExistingAffiliateProduct,
   _private: {
     buildPreservedApiContent,
     buildAffiliateImageContent,
+    buildAffiliatePayloadSnapshot,
     buildRequiredAffiliateFieldErrors,
     normalizeAdminAffiliateDataSource,
+    resolveManualAffiliateImageUrl,
   },
 };

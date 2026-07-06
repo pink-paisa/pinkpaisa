@@ -15,24 +15,24 @@
     --popover: 0 0% 100%;
     --popover-foreground: 340 20% 15%;
 
-    --primary: 340 45% 55%;
+    --primary: 340 50% 45%;
     --primary-foreground: 0 0% 100%;
 
     --secondary: 30 30% 93%;
     --secondary-foreground: 340 20% 15%;
 
     --muted: 30 20% 94%;
-    --muted-foreground: 340 10% 45%;
+    --muted-foreground: 340 12% 38%;
 
     --accent: 340 35% 92%;
-    --accent-foreground: 340 45% 35%;
+    --accent-foreground: 340 45% 32%;
 
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
 
     --border: 340 15% 90%;
     --input: 340 15% 90%;
-    --ring: 340 45% 55%;
+    --ring: 340 50% 45%;
 
     --radius: 0.75rem;
 
@@ -76,6 +76,21 @@
     text-wrap: pretty;
     overflow-wrap: break-word;
   }
+
+  img {
+    max-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 @layer components {
@@ -97,6 +112,19 @@
 
   .scrollbar-hidden::-webkit-scrollbar {
     display: none;
+  }
+
+  .min-h-dvh-screen {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
   }
 }
 

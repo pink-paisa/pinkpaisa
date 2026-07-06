@@ -257,20 +257,23 @@ const Checkout = () => {
               <h2 className="font-serif text-lg">{user ? "Account & Contact" : "Contact Details"}</h2>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Full Name *</Label>
-                  <Input value={form.name} onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))} />
+                  <Label htmlFor="checkout-name">Full Name *</Label>
+                  <Input id="checkout-name" autoComplete="name" value={form.name} onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Email *</Label>
+                  <Label htmlFor="checkout-email">Email *</Label>
                   <Input
+                    id="checkout-email"
+                    type="email"
+                    autoComplete="email"
                     value={form.email}
                     disabled={Boolean(user)}
                     onChange={(e) => setForm((prev) => ({ ...prev, email: e.target.value }))}
                   />
                 </div>
                 <div className="space-y-1.5 sm:col-span-2">
-                  <Label>Phone *</Label>
-                  <Input value={form.phone} onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))} />
+                  <Label htmlFor="checkout-phone">Phone *</Label>
+                  <Input id="checkout-phone" type="tel" inputMode="numeric" autoComplete="tel" value={form.phone} onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))} />
                 </div>
               </div>
             </div>
@@ -284,20 +287,20 @@ const Checkout = () => {
               ) : null}
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5 sm:col-span-2">
-                  <Label>Address *</Label>
-                  <Input value={form.address} onChange={(e) => setForm((prev) => ({ ...prev, address: e.target.value }))} />
+                  <Label htmlFor="checkout-address">Address *</Label>
+                  <Input id="checkout-address" autoComplete="address-line1" value={form.address} onChange={(e) => setForm((prev) => ({ ...prev, address: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>City *</Label>
-                  <Input value={form.city} onChange={(e) => setForm((prev) => ({ ...prev, city: e.target.value }))} />
+                  <Label htmlFor="checkout-city">City *</Label>
+                  <Input id="checkout-city" autoComplete="address-level2" value={form.city} onChange={(e) => setForm((prev) => ({ ...prev, city: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>State *</Label>
-                  <Input value={form.state} onChange={(e) => setForm((prev) => ({ ...prev, state: e.target.value }))} />
+                  <Label htmlFor="checkout-state">State *</Label>
+                  <Input id="checkout-state" autoComplete="address-level1" value={form.state} onChange={(e) => setForm((prev) => ({ ...prev, state: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>PIN Code *</Label>
-                  <Input value={form.pincode} onChange={(e) => setForm((prev) => ({ ...prev, pincode: e.target.value }))} />
+                  <Label htmlFor="checkout-pincode">PIN Code *</Label>
+                  <Input id="checkout-pincode" inputMode="numeric" autoComplete="postal-code" value={form.pincode} onChange={(e) => setForm((prev) => ({ ...prev, pincode: e.target.value }))} />
                 </div>
               </div>
             </div>
@@ -308,6 +311,7 @@ const Checkout = () => {
                 {user ? (
                   <button
                     onClick={() => setPaymentMethod("wallet")}
+                    aria-pressed={paymentMethod === "wallet"}
                     className={`rounded-2xl border p-4 text-left ${paymentMethod === "wallet" ? "border-primary bg-primary/5" : "border-border"}`}
                   >
                     <div className="flex items-center gap-3">
@@ -322,6 +326,7 @@ const Checkout = () => {
 
                 <button
                   onClick={() => setPaymentMethod("phonepe")}
+                  aria-pressed={paymentMethod === "phonepe"}
                   className={`rounded-2xl border p-4 text-left ${paymentMethod === "phonepe" ? "border-primary bg-primary/5" : "border-border"}`}
                 >
                   <div className="flex items-center gap-3">
@@ -335,6 +340,7 @@ const Checkout = () => {
 
                 <button
                   onClick={() => setPaymentMethod("cod")}
+                  aria-pressed={paymentMethod === "cod"}
                   className={`rounded-2xl border p-4 text-left ${paymentMethod === "cod" ? "border-primary bg-primary/5" : "border-border"}`}
                 >
                   <div className="flex items-center gap-3">

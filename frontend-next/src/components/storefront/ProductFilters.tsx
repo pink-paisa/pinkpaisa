@@ -105,18 +105,22 @@ const ProductFilters = ({
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">Min</label>
+            <label htmlFor="product-filter-min-price" className="text-xs font-medium text-muted-foreground">Min</label>
             <Input
+              id="product-filter-min-price"
               type="number"
+              inputMode="numeric"
               min={0}
               value={minPrice ?? ""}
               onChange={(event) => onMinPriceChange(parseInputNumber(event.target.value))}
             />
           </div>
           <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">Max</label>
+            <label htmlFor="product-filter-max-price" className="text-xs font-medium text-muted-foreground">Max</label>
             <Input
+              id="product-filter-max-price"
               type="number"
+              inputMode="numeric"
               min={0}
               value={maxPrice ?? ""}
               onChange={(event) => onMaxPriceChange(parseInputNumber(event.target.value))}
@@ -128,11 +132,11 @@ const ProductFilters = ({
       <section className="space-y-3">
         <p className="font-medium">Availability</p>
         <div className="space-y-3">
-          <label className="flex items-center gap-3 text-sm">
+          <label className="flex min-h-10 items-center gap-3 text-sm">
             <Checkbox checked={inStock} onCheckedChange={(value) => onInStockChange(value === true)} />
             In stock only
           </label>
-          <label className="flex items-center gap-3 text-sm">
+          <label className="flex min-h-10 items-center gap-3 text-sm">
             <Checkbox checked={onSale} onCheckedChange={(value) => onOnSaleChange(value === true)} />
             On sale only
           </label>
@@ -149,7 +153,7 @@ const ProductFilters = ({
             {facets.brands.map((brand) => {
               const selected = selectedBrands.includes(brand.name);
               return (
-                <label key={brand.name} className="flex items-center justify-between gap-3 text-sm">
+                <label key={brand.name} className="flex min-h-10 items-center justify-between gap-3 text-sm">
                   <span className="flex items-center gap-3">
                     <Checkbox checked={selected} onCheckedChange={() => onToggleBrand(brand.name)} />
                     {brand.name}
