@@ -42,6 +42,62 @@ const DELIVERY_STATUS_FLOW = {
   returned: [],
 };
 
+const ORDER_LIST_DEFAULT_LIMIT = 25;
+const ORDER_LIST_MAX_LIMIT = 100;
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseListPagination(query = {}) {
+  const page = Math.max(parseInt(String(query.page || "1"), 10) || 1, 1);
+  const requestedLimit = parseInt(String(query.limit || ORDER_LIST_DEFAULT_LIMIT), 10) || ORDER_LIST_DEFAULT_LIMIT;
+  const limit = Math.min(Math.max(requestedLimit, 1), ORDER_LIST_MAX_LIMIT);
+  return { page, limit };
+}
+
+function wantsPaginatedOrderList(query = {}) {
+  return ["page", "limit", "search"].some((key) => Object.prototype.hasOwnProperty.call(query, key));
+}
+
+function buildOrderListFilter(req) {
+  const isAdmin = req.user?.role === "admin";
+  const filter = isAdmin ? {} : { user_id: req.user._id };
+  const search = String(req.query.search || "").trim();
+  const status = String(req.query.status || "all").trim();
+
+  if (status && status !== "all") {
+    filter.$or = [
+      { status },
+      { delivery_status: status },
+      { payment_status: status },
+    ];
+  }
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    const searchOr = [
+      { guest_name: regex },
+      { guest_email: regex },
+      { guest_phone: regex },
+      { order_number: regex },
+      { invoice_number: regex },
+    ];
+    if (mongoose.Types.ObjectId.isValid(search)) searchOr.push({ _id: new mongoose.Types.ObjectId(search) });
+    const searchClause = {
+      $or: searchOr,
+    };
+    if (filter.$or) {
+      filter.$and = [{ $or: filter.$or }, searchClause];
+      delete filter.$or;
+    } else {
+      Object.assign(filter, searchClause);
+    }
+  }
+
+  return filter;
+}
+
 const applyQueryParams = (query, req) => {
   const { _sort, _order, _limit, _page, _select, ...filters } = req.query;
   for (const [key, value] of Object.entries(filters)) {
@@ -1131,53 +1187,109 @@ const releaseVendorPayments = async (req, res) => {
   } catch (err) { res.status(Number(err.status) || 400).json({ message: err.message }); }
 };
 
+async function serializeOrderListWithItems(orders = [], isAdmin = false) {
+  const orderIds = orders.map((order) => order._id.toString());
+  const items = orderIds.length ? await OrderItem.find({ order_id: { $in: orderIds } }).lean() : [];
+
+  let vendorMap = new Map();
+  let adminWarehouse = null;
+  if (isAdmin) {
+    const vendorIds = [...new Set(items.map((item) => item.vendor_id?.toString?.()).filter(Boolean))];
+    if (vendorIds.length) {
+      const vendors = await Vendor.find({ _id: { $in: vendorIds } }).select("shop_name business_name owner_name city state mobile email commission_percent gstin address pincode").lean();
+      vendorMap = new Map(vendors.map((vendor) => [String(vendor._id), vendor]));
+    }
+    const AdminSettings = require("../models/AdminSettings");
+    const wh = await AdminSettings.findOne({ key: "warehouse" }).lean();
+    if (wh) {
+      adminWarehouse = { warehouse_name: wh.warehouse_name || "PinkPaisa Warehouse", warehouse_address: wh.warehouse_address || null, warehouse_city: wh.warehouse_city || null, warehouse_state: wh.warehouse_state || null, warehouse_pincode: wh.warehouse_pincode || null, warehouse_phone: wh.warehouse_phone || null, warehouse_email: wh.warehouse_email || null };
+    }
+  }
+
+  const itemMap = {};
+  items.forEach((item) => {
+    const orderId = item.order_id?.toString?.() || String(item.order_id);
+    if (!itemMap[orderId]) itemMap[orderId] = [];
+    const vendor = item.vendor_id ? vendorMap.get(String(item.vendor_id)) : null;
+    const enriched = {
+      ...item,
+      id: item._id.toString(),
+      source_type: item.vendor_id ? "vendor" : "admin",
+    };
+    if (vendor) {
+      enriched.vendor = { id: String(vendor._id), shop_name: vendor.shop_name, business_name: vendor.business_name, owner_name: vendor.owner_name, city: vendor.city, state: vendor.state, mobile: vendor.mobile, email: vendor.email, commission_percent: vendor.commission_percent, gstin: vendor.gstin, address: vendor.address || null, pincode: vendor.pincode || null };
+    } else {
+      enriched.vendor = null;
+      if (adminWarehouse) enriched.admin_warehouse = adminWarehouse;
+    }
+    itemMap[orderId].push(enriched);
+  });
+
+  return orders.map((order) => ({ ...serializeOrder(order), items: itemMap[order._id.toString()] || [], admin_warehouse: adminWarehouse }));
+}
+
 const getOrders = async (req, res) => {
   try {
     const isAdmin = req.user?.role === "admin";
-    let q = Order.find(isAdmin ? {} : { user_id: req.user._id }).populate("user_id", "full_name email phone").populate("delivery_partner_id", "name phone company_name status");
-    q = applyQueryParams(q, req);
-    if (!req.query._sort) q = q.sort({ createdAt: -1 });
-    const orders = await q.lean();
-    const orderIds = orders.map((order) => order._id.toString());
-    const items = await OrderItem.find({ order_id: { $in: orderIds } }).lean();
-
-    // Populate vendor info + admin warehouse for each order item (admin only)
-    let vendorMap = new Map();
-    let adminWarehouse = null;
-    if (isAdmin) {
-      const vendorIds = [...new Set(items.map((item) => item.vendor_id?.toString?.()).filter(Boolean))];
-      if (vendorIds.length) {
-        const vendors = await Vendor.find({ _id: { $in: vendorIds } }).select("shop_name business_name owner_name city state mobile email commission_percent gstin address pincode").lean();
-        vendorMap = new Map(vendors.map((v) => [String(v._id), v]));
-      }
-      // Load admin warehouse for admin-sourced items
-      const AdminSettings = require("../models/AdminSettings");
-      const wh = await AdminSettings.findOne({ key: "warehouse" }).lean();
-      if (wh) {
-        adminWarehouse = { warehouse_name: wh.warehouse_name || "PinkPaisa Warehouse", warehouse_address: wh.warehouse_address || null, warehouse_city: wh.warehouse_city || null, warehouse_state: wh.warehouse_state || null, warehouse_pincode: wh.warehouse_pincode || null, warehouse_phone: wh.warehouse_phone || null, warehouse_email: wh.warehouse_email || null };
-      }
+    if (!wantsPaginatedOrderList(req.query || {})) {
+      let q = Order.find(isAdmin ? {} : { user_id: req.user._id }).populate("user_id", "full_name email phone").populate("delivery_partner_id", "name phone company_name status");
+      q = applyQueryParams(q, req);
+      if (!req.query._sort) q = q.sort({ createdAt: -1 });
+      const orders = await q.lean();
+      return res.json(await serializeOrderListWithItems(orders, isAdmin));
     }
 
-    const itemMap = {};
-    items.forEach((item) => {
-      if (!itemMap[item.order_id]) itemMap[item.order_id] = [];
-      const vendor = item.vendor_id ? vendorMap.get(String(item.vendor_id)) : null;
-      const enriched = {
-        ...item,
-        id: item._id.toString(),
-        source_type: item.vendor_id ? "vendor" : "admin",
-      };
-      if (vendor) {
-        enriched.vendor = { id: String(vendor._id), shop_name: vendor.shop_name, business_name: vendor.business_name, owner_name: vendor.owner_name, city: vendor.city, state: vendor.state, mobile: vendor.mobile, email: vendor.email, commission_percent: vendor.commission_percent, gstin: vendor.gstin, address: vendor.address || null, pincode: vendor.pincode || null };
-      } else {
-        enriched.vendor = null;
-        if (adminWarehouse) {
-          enriched.admin_warehouse = adminWarehouse;
-        }
-      }
-      itemMap[item.order_id].push(enriched);
+    const { page, limit } = parseListPagination(req.query);
+    const filter = buildOrderListFilter(req);
+    const [orders, total, summaryRows] = await Promise.all([
+      Order.find(filter)
+        .populate("user_id", "full_name email phone")
+        .populate("delivery_partner_id", "name phone company_name status")
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Order.countDocuments(filter),
+      Order.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: null,
+            total_orders: { $sum: 1 },
+            revenue: {
+              $sum: {
+                $cond: [
+                  { $in: ["$status", ["cancelled", "refunded"]] },
+                  0,
+                  { $ifNull: ["$total", 0] },
+                ],
+              },
+            },
+            in_transit: {
+              $sum: {
+                $cond: [{ $in: ["$status", ["shipped", "picked_up", "pickup_assigned"]] }, 1, 0],
+              },
+            },
+            delivered: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "delivered"] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
+    ]);
+
+    return res.json({
+      items: await serializeOrderListWithItems(orders, isAdmin),
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(Math.ceil(total / limit), 1),
+      },
+      summary: summaryRows[0] || { total_orders: 0, revenue: 0, in_transit: 0, delivered: 0 },
     });
-    res.json(orders.map((order) => ({ ...serializeOrder(order), items: itemMap[order._id.toString()] || [], admin_warehouse: adminWarehouse })));
   } catch (err) { res.status(500).json({ message: err.message }); }
 };
 

@@ -17,6 +17,20 @@ const VENDOR_ITEM_STATUS_FLOW = {
   rejected: [],
 };
 
+const VENDOR_ORDER_LIST_DEFAULT_LIMIT = 25;
+const VENDOR_ORDER_LIST_MAX_LIMIT = 100;
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseListPagination(query = {}) {
+  const page = Math.max(parseInt(String(query.page || "1"), 10) || 1, 1);
+  const requestedLimit = parseInt(String(query.limit || VENDOR_ORDER_LIST_DEFAULT_LIMIT), 10) || VENDOR_ORDER_LIST_DEFAULT_LIMIT;
+  const limit = Math.min(Math.max(requestedLimit, 1), VENDOR_ORDER_LIST_MAX_LIMIT);
+  return { page, limit };
+}
+
 function canVendorMove(from, to) {
   if (!to || from === to) return true;
   return (VENDOR_ITEM_STATUS_FLOW[from] || []).includes(to);
@@ -76,14 +90,41 @@ const listVendorOrders = async (req, res) => {
   try {
     const vendorId = req.vendor._id || req.vendor.id;
     const status = String(req.query.status || "all");
+    const search = String(req.query.search || "").trim();
+    const { page, limit } = parseListPagination(req.query);
     const query = { vendor_id: vendorId };
     if (status !== "all") query.vendor_status = status;
-    const items = await OrderItem.find(query).sort({ createdAt: -1 }).lean();
+
+    if (search) {
+      const regex = new RegExp(escapeRegex(search), "i");
+      const matchingOrders = await Order.find({ order_number: regex }).select("_id").limit(500).lean();
+      const matchingOrderIds = matchingOrders.map((order) => String(order._id));
+      query.$or = [{ product_title: regex }];
+      if (matchingOrderIds.length) query.$or.push({ order_id: { $in: matchingOrderIds } });
+    }
+
+    const [items, total] = await Promise.all([
+      OrderItem.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      OrderItem.countDocuments(query),
+    ]);
     const orderIds = [...new Set(items.map((item) => item.order_id))];
     const orders = await Order.find({ _id: { $in: orderIds } }).lean();
     const orderMap = new Map(orders.map((order) => [order._id.toString(), order]));
     const summary = await getVendorBalanceSummary(vendorId);
-    res.json({ items: items.map((item) => serializeVendorOrderItem(item, orderMap.get(item.order_id))).filter(Boolean), summary });
+    res.json({
+      items: items.map((item) => serializeVendorOrderItem(item, orderMap.get(item.order_id?.toString?.() || String(item.order_id)))).filter(Boolean),
+      summary,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(Math.ceil(total / limit), 1),
+      },
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -107,7 +148,7 @@ const getVendorPayoutLedger = async (req, res) => {
     const orders = await Order.find({ _id: { $in: orderIds } }).lean();
     const orderMap = new Map(orders.map((order) => [order._id.toString(), order]));
     const ledger = items
-      .map((item) => serializeVendorOrderItem(item, orderMap.get(item.order_id)))
+      .map((item) => serializeVendorOrderItem(item, orderMap.get(item.order_id?.toString?.() || String(item.order_id))))
       .filter(Boolean)
       .map((entry) => ({
         ...entry,

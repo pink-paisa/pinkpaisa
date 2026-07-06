@@ -30,6 +30,83 @@ const toFlat = (doc) => ({
   subcategory_id: doc.subcategory_id?.toString?.() || doc.subcategory_id || null,
 });
 
+const AFFILIATE_LIST_DEFAULT_LIMIT = 25;
+const AFFILIATE_LIST_MAX_LIMIT = 100;
+const AFFILIATE_QUICK_FILTERS = ["all", "needs_review", "published", "draft", "paused", "uncategorized", "missing_image", "link_issue"];
+
+function escapeRegex(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseListPagination(query = {}) {
+  const page = Math.max(parseInt(String(query.page || "1"), 10) || 1, 1);
+  const requestedLimit = parseInt(String(query.limit || AFFILIATE_LIST_DEFAULT_LIMIT), 10) || AFFILIATE_LIST_DEFAULT_LIMIT;
+  const limit = Math.min(Math.max(requestedLimit, 1), AFFILIATE_LIST_MAX_LIMIT);
+  return { page, limit };
+}
+
+function wantsPaginatedAffiliateList(query = {}) {
+  return ["page", "limit", "search", "quick_filter", "category_id", "subcategory_id"].some((key) =>
+    Object.prototype.hasOwnProperty.call(query, key)
+  );
+}
+
+function buildAffiliateListBaseQuery(query = {}) {
+  const filter = { is_affiliate: true, source_type: "admin" };
+  const categoryId = normalizeString(query.category_id);
+  const subcategoryId = normalizeString(query.subcategory_id);
+  const search = normalizeString(query.search);
+
+  if (categoryId && categoryId !== "all") filter.category_id = categoryId;
+  if (subcategoryId && subcategoryId !== "all") filter.subcategory_id = subcategoryId;
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    filter.$or = [
+      { title: regex },
+      { sku: regex },
+      { category: regex },
+      { subcategory: regex },
+      { brand_name: regex },
+      { affiliate_external_id: regex },
+      { affiliate_asin: regex },
+      { affiliate_marketplace: regex },
+      { campaign_label: regex },
+    ];
+  }
+
+  return filter;
+}
+
+function applyAffiliateQuickFilter(filter = {}, quickFilter = "all") {
+  const nextFilter = { ...filter };
+  if (quickFilter === "needs_review") nextFilter.affiliate_compliance_status = { $ne: "compliant" };
+  if (quickFilter === "published") {
+    nextFilter.status = "active";
+    nextFilter.is_visible = true;
+  }
+  if (quickFilter === "draft") nextFilter.status = "draft";
+  if (quickFilter === "paused") {
+    nextFilter.$and = [
+      ...(Array.isArray(nextFilter.$and) ? nextFilter.$and : []),
+      { $or: [{ status: "inactive" }, { affiliate_compliance_status: "paused" }] },
+    ];
+  }
+  if (quickFilter === "uncategorized") {
+    nextFilter.$and = [
+      ...(Array.isArray(nextFilter.$and) ? nextFilter.$and : []),
+      { $or: [{ category: /^uncategorized$/i }, { subcategory: /^uncategorized$/i }] },
+    ];
+  }
+  if (quickFilter === "missing_image") {
+    nextFilter.$and = [
+      ...(Array.isArray(nextFilter.$and) ? nextFilter.$and : []),
+      { $or: [{ featured_image: null }, { featured_image: "" }, { featured_image: { $exists: false } }] },
+    ];
+  }
+  if (quickFilter === "link_issue") nextFilter.affiliate_link_check_status = { $in: ["unchecked", "failed", "invalid", null] };
+  return nextFilter;
+}
+
 function normalizeString(value) {
   const normalized = String(value ?? "").trim();
   return normalized || null;
@@ -588,14 +665,45 @@ async function assertPublishable(product) {
   return validation;
 }
 
-const listAffiliateProducts = async (_req, res) => {
+const listAffiliateProducts = async (req, res) => {
   try {
-    const products = await Product.find({ is_affiliate: true, source_type: "admin" })
+    if (!wantsPaginatedAffiliateList(req.query || {})) {
+      const products = await Product.find({ is_affiliate: true, source_type: "admin" })
+        .sort({ affiliate_sort_order: 1, createdAt: -1 })
+        .lean();
+      return res.json(products.map(toFlat));
+    }
+
+    const { page, limit } = parseListPagination(req.query);
+    const baseQuery = buildAffiliateListBaseQuery(req.query);
+    const quickFilter = AFFILIATE_QUICK_FILTERS.includes(String(req.query.quick_filter || "")) ? String(req.query.quick_filter) : "all";
+    const listQuery = applyAffiliateQuickFilter(baseQuery, quickFilter);
+
+    const [products, total, countValues] = await Promise.all([
+      Product.find(listQuery)
       .sort({ affiliate_sort_order: 1, createdAt: -1 })
-      .lean();
-    res.json(products.map(toFlat));
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Product.countDocuments(listQuery),
+      Promise.all(
+        AFFILIATE_QUICK_FILTERS.map((filter) => Product.countDocuments(applyAffiliateQuickFilter(baseQuery, filter)))
+      ),
+    ]);
+
+    const counts = Object.fromEntries(AFFILIATE_QUICK_FILTERS.map((filter, index) => [filter, countValues[index] || 0]));
+    return res.json({
+      items: products.map(toFlat),
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.max(Math.ceil(total / limit), 1),
+      },
+      counts,
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    return res.status(500).json({ message: err.message });
   }
 };
 

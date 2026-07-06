@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -205,6 +205,19 @@ type AffiliateBulkResponse = {
   results: AffiliateBulkResult[];
 };
 
+type PaginationMeta = {
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+};
+
+type AffiliateListResponse = {
+  items: PhysicalProduct[];
+  pagination: PaginationMeta;
+  counts: Record<AffiliateQuickFilter, number>;
+};
+
 type PendingBulkConfirmation = {
   action: AffiliateBulkAction;
   title: string;
@@ -278,6 +291,7 @@ const isUncategorizedProduct = (product: PhysicalProduct) => {
 };
 
 const MAX_AFFILIATE_IMPORT_FILE_SIZE_BYTES = 5 * 1024 * 1024;
+const AFFILIATE_PAGE_SIZE = 25;
 
 const splitPipeList = (value?: string[] | null) => Array.isArray(value) ? value.join(" | ") : "";
 
@@ -328,23 +342,6 @@ const bulkActionLabels: Record<AffiliateBulkAction, string> = {
 };
 
 const isPublishedAffiliateProduct = (product: PhysicalProduct) => product.status === "active" && Boolean(product.is_visible);
-
-const hasAffiliateLinkIssue = (product: PhysicalProduct) => {
-  const status = String(product.affiliate_link_check_status || "unchecked").toLowerCase();
-  return status === "unchecked" || status === "failed" || status === "invalid";
-};
-
-const filterMatchesAffiliateQuickFilter = (product: PhysicalProduct, filter: AffiliateQuickFilter) => {
-  if (filter === "all") return true;
-  if (filter === "needs_review") return product.affiliate_compliance_status !== "compliant";
-  if (filter === "published") return isPublishedAffiliateProduct(product);
-  if (filter === "draft") return product.status === "draft";
-  if (filter === "paused") return product.status === "inactive" || product.affiliate_compliance_status === "paused";
-  if (filter === "uncategorized") return isUncategorizedProduct(product);
-  if (filter === "missing_image") return !product.featured_image;
-  if (filter === "link_issue") return hasAffiliateLinkIssue(product);
-  return true;
-};
 
 const isHttpOrUploadImage = (value?: string | null) => {
   const normalized = String(value || "").trim();
@@ -412,6 +409,7 @@ export default function AdminAffiliateProducts() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState("");
   const [quickFilter, setQuickFilter] = useState<AffiliateQuickFilter>("all");
+  const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [categoryId, setCategoryId] = useState("");
   const [subcategoryId, setSubcategoryId] = useState("");
@@ -432,9 +430,18 @@ export default function AdminAffiliateProducts() {
   const [pendingBulkConfirmation, setPendingBulkConfirmation] = useState<PendingBulkConfirmation | null>(null);
   const [productPendingDelete, setProductPendingDelete] = useState<PhysicalProduct | null>(null);
 
-  const { data: affiliateProducts, isLoading } = useQuery({
-    queryKey: ["affiliate_products"],
-    queryFn: async () => apiFetch<PhysicalProduct[]>("/affiliate-products"),
+  const { data: affiliateList, isLoading } = useQuery({
+    queryKey: ["affiliate_products", page, search, quickFilter],
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(AFFILIATE_PAGE_SIZE),
+        quick_filter: quickFilter,
+      });
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) params.set("search", trimmedSearch);
+      return apiFetch<AffiliateListResponse>(`/affiliate-products?${params.toString()}`);
+    },
   });
 
   const { data: affiliateDataSettings, isLoading: settingsLoading } = useQuery({
@@ -449,41 +456,36 @@ export default function AdminAffiliateProducts() {
   const subcategories = activeCategory?.subcategories ?? [];
   const formSubcategories = formCategory?.subcategories ?? [];
 
-  const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    return (affiliateProducts ?? []).filter((product) => {
-      if (!filterMatchesAffiliateQuickFilter(product, quickFilter)) return false;
-      if (!term) return true;
-      return [
-        product.title,
-        product.sku ?? "",
-        product.category ?? "",
-        product.subcategory ?? "",
-        product.affiliate_external_id ?? "",
-        product.affiliate_asin ?? "",
-        product.affiliate_marketplace ?? "",
-        product.campaign_label ?? "",
-      ].some((value) => value.toLowerCase().includes(term));
-    });
-  }, [affiliateProducts, quickFilter, search]);
+  const affiliateProducts = affiliateList?.items ?? [];
+  const affiliatePagination = affiliateList?.pagination ?? { page, limit: AFFILIATE_PAGE_SIZE, total: 0, total_pages: 1 };
+  const affiliateCounts = affiliateList?.counts ?? {
+    all: 0,
+    needs_review: 0,
+    published: 0,
+    draft: 0,
+    paused: 0,
+    uncategorized: 0,
+    missing_image: 0,
+    link_issue: 0,
+  };
+  const filtered = affiliateProducts;
 
   const allVisibleSelected = filtered.length > 0 && filtered.every((item) => selectedIds.includes(item.id));
   const selectedProducts = useMemo(() => {
     const selected = new Set(selectedIds);
-    return (affiliateProducts ?? []).filter((product) => selected.has(product.id));
+    return affiliateProducts.filter((product) => selected.has(product.id));
   }, [affiliateProducts, selectedIds]);
   const quickFilterItems = useMemo(() => {
-    const products = affiliateProducts ?? [];
     return (Object.keys(quickFilterLabels) as AffiliateQuickFilter[]).map((value) => ({
       value,
       label: quickFilterLabels[value],
-      count: products.filter((product) => filterMatchesAffiliateQuickFilter(product, value)).length,
+      count: affiliateCounts[value] || 0,
     }));
-  }, [affiliateProducts]);
-  const uncategorizedCount = useMemo(() => (affiliateProducts ?? []).filter(isUncategorizedProduct).length, [affiliateProducts]);
-  const publishedCount = useMemo(() => (affiliateProducts ?? []).filter((item) => item.status === "active" && item.is_visible).length, [affiliateProducts]);
-  const reviewCount = useMemo(() => (affiliateProducts ?? []).filter((item) => item.affiliate_compliance_status !== "compliant").length, [affiliateProducts]);
-  const editingProduct = useMemo(() => (form.id ? (affiliateProducts ?? []).find((product) => product.id === form.id) : null), [affiliateProducts, form.id]);
+  }, [affiliateCounts]);
+  const uncategorizedCount = affiliateCounts.uncategorized || 0;
+  const publishedCount = affiliateCounts.published || 0;
+  const reviewCount = affiliateCounts.needs_review || 0;
+  const editingProduct = useMemo(() => (form.id ? affiliateProducts.find((product) => product.id === form.id) : null), [affiliateProducts, form.id]);
   const currentAffiliateMode = affiliateDataSettings?.current_mode || affiliateDataSettings?.affiliate_data_mode || "manual_only";
   const creatorsDisabledReason = affiliateDataSettings?.disabled_reason || affiliateDataSettings?.affiliate_creators_api_last_error || null;
   const manualImagePreviewUrl = form.image_url.trim();
@@ -511,6 +513,16 @@ export default function AdminAffiliateProducts() {
   ];
   const uploadPreviewRows = uploadPreview?.preview_rows ?? [];
   const invalidPreviewRows = uploadPreviewRows.filter((row) => row.status === "invalid");
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, quickFilter]);
+
+  useEffect(() => {
+    if (page > affiliatePagination.total_pages) {
+      setPage(Math.max(affiliatePagination.total_pages, 1));
+    }
+  }, [affiliatePagination.total_pages, page]);
 
   const refreshQueries = () => {
     queryClient.invalidateQueries({ queryKey: ["affiliate_products"] });
@@ -944,7 +956,7 @@ export default function AdminAffiliateProducts() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-        <StatCard label="Total Affiliate Products" value={(affiliateProducts ?? []).length} />
+        <StatCard label="Total Affiliate Products" value={affiliateCounts.all || affiliatePagination.total} />
         <StatCard label="Published" value={publishedCount} color="text-emerald-600" />
         <StatCard label="Needs Review" value={reviewCount} color="text-amber-600" />
         <StatCard label="Uncategorized" value={uncategorizedCount} color="text-amber-600" />
@@ -1495,7 +1507,9 @@ export default function AdminAffiliateProducts() {
             <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAllVisible} className="h-4 w-4 rounded border-input text-primary" />
             Select visible results
           </label>
-          <span>{filtered.length} item(s)</span>
+          <span>
+            Showing {filtered.length} of {affiliatePagination.total} item(s)
+          </span>
         </div>
 
         {isLoading ? (
@@ -1632,6 +1646,33 @@ export default function AdminAffiliateProducts() {
             })}
           </div>
         )}
+        <div className="flex flex-col gap-3 border-t border-border px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+          <p>
+            Page {affiliatePagination.page} of {affiliatePagination.total_pages}
+          </p>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="rounded-xl"
+              disabled={affiliatePagination.page <= 1 || isLoading}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+            >
+              Previous
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="rounded-xl"
+              disabled={affiliatePagination.page >= affiliatePagination.total_pages || isLoading}
+              onClick={() => setPage((current) => Math.min(affiliatePagination.total_pages, current + 1))}
+            >
+              Next
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Download, HandCoins, PackageSearch, Search, WalletCards } from "lucide-react";
 import { vendorFetch } from "@/lib/vendor-api";
 import { VendorOrderItem, VendorOrderSummary, formatCurrency, formatDate } from "@/lib/vendor";
@@ -22,76 +22,110 @@ const ACTIONS: Record<string, string[]> = {
   rejected: [],
 };
 
+const VENDOR_ORDER_PAGE_SIZE = 25;
+
+type PaginationMeta = {
+  page: number;
+  limit: number;
+  total: number;
+  total_pages: number;
+};
+
+type VendorOrderListResponse = {
+  items: VendorOrderItem[];
+  summary: VendorOrderSummary;
+  pagination: PaginationMeta;
+};
+
 const VendorOrders = () => {
   const [items, setItems] = useState<VendorOrderItem[]>([]);
-  const [ledger, setLedger] = useState<VendorOrderItem[]>([]);
   const [summary, setSummary] = useState<VendorOrderSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [ledgerDownloading, setLedgerDownloading] = useState(false);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationMeta>({ page: 1, limit: VENDOR_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
 
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       setLoading(true);
-      const query = new URLSearchParams({ status }).toString();
-      const [data, ledgerData] = await Promise.all([
-        vendorFetch<{ items: VendorOrderItem[]; summary: VendorOrderSummary }>(`/vendor-orders/mine?${query}`),
-        vendorFetch<{ items: VendorOrderItem[] }>("/vendor-orders/mine/ledger"),
-      ]);
+      const query = new URLSearchParams({
+        status,
+        page: String(page),
+        limit: String(VENDOR_ORDER_PAGE_SIZE),
+      });
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) query.set("search", trimmedSearch);
+      const data = await vendorFetch<VendorOrderListResponse>(`/vendor-orders/mine?${query.toString()}`);
       setItems(data.items || []);
       setSummary(data.summary || null);
-      setLedger(ledgerData.items || []);
+      setPagination(data.pagination || { page, limit: VENDOR_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load vendor orders");
     } finally {
       setLoading(false);
     }
-  };
+  }, [page, search, status]);
 
   useEffect(() => {
-    load();
-  }, [status]);
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (page > pagination.total_pages) {
+      setPage(Math.max(pagination.total_pages, 1));
+    }
+  }, [page, pagination.total_pages]);
 
   const updateStatus = async (itemId: string, vendor_status: string) => {
     try {
       await vendorFetch(`/vendor-orders/mine/${itemId}/status`, { method: "PUT", body: JSON.stringify({ vendor_status }) });
       toast.success(`Vendor order updated to ${vendor_status.replace(/_/g, " ")}`);
-      load();
+      void load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not update order status");
     }
   };
 
-  const filtered = useMemo(() => items.filter((item) => {
-    const target = `${item.order_number} ${item.product_title}`.toLowerCase();
-    return !search || target.includes(search.toLowerCase());
-  }), [items, search]);
-
-  const downloadLedger = () => {
-    const header = ["order_number", "invoice_number", "product_title", "gross_amount", "commission_amount", "payout_amount", "payout_status", "settlement_stage", "created_at", "delivered_at", "payout_released_at"];
-    const rows = ledger.map((item) => [
-      item.order_number,
-      item.invoice_number || "",
-      item.product_title,
-      item.gross_amount,
-      item.commission_amount,
-      item.payout_amount,
-      item.payout_status,
-      item.settlement_stage || "",
-      item.created_at,
-      item.delivered_at || "",
-      item.payout_released_at || "",
-    ]);
-    const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "vendor-payout-ledger.csv";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+  const downloadLedger = async () => {
+    try {
+      setLedgerDownloading(true);
+      const ledgerData = await vendorFetch<{ items: VendorOrderItem[] }>("/vendor-orders/mine/ledger");
+      const ledger = ledgerData.items || [];
+      if (!ledger.length) {
+        toast.info("No payout ledger entries yet.");
+        return;
+      }
+      const header = ["order_number", "invoice_number", "product_title", "gross_amount", "commission_amount", "payout_amount", "payout_status", "settlement_stage", "created_at", "delivered_at", "payout_released_at"];
+      const rows = ledger.map((item) => [
+        item.order_number,
+        item.invoice_number || "",
+        item.product_title,
+        item.gross_amount,
+        item.commission_amount,
+        item.payout_amount,
+        item.payout_status,
+        item.settlement_stage || "",
+        item.created_at,
+        item.delivered_at || "",
+        item.payout_released_at || "",
+      ]);
+      const csv = [header, ...rows].map((row) => row.map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "vendor-payout-ledger.csv";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download payout ledger");
+    } finally {
+      setLedgerDownloading(false);
+    }
   };
 
   return (
@@ -116,16 +150,16 @@ const VendorOrders = () => {
             <h3 className="mt-1 font-serif text-2xl">Settlement history, commission, and invoices</h3>
             <p className="mt-1 text-sm text-muted-foreground">This ledger shows the gross order value, Pink Paisa commission, vendor payout amount, invoice number, and release timing for every order item.</p>
           </div>
-          <Button variant="outline" className="rounded-full border-[#f0c0c8] bg-white text-[#c05070] hover:bg-[#fff4f7]" onClick={downloadLedger} disabled={!ledger.length}>
-            <Download className="mr-2 h-4 w-4" /> Download statement
+          <Button variant="outline" className="rounded-full border-[#f0c0c8] bg-white text-[#c05070] hover:bg-[#fff4f7]" onClick={() => void downloadLedger()} disabled={ledgerDownloading}>
+            <Download className="mr-2 h-4 w-4" /> {ledgerDownloading ? "Preparing..." : "Download statement"}
           </Button>
         </div>
       </section>
 
       <section className="rounded-[1.8rem] border border-[#f0e0d5] bg-white/95 p-5 shadow-[0_20px_46px_rgba(186,131,149,0.08)]">
         <div className="grid gap-3 md:grid-cols-[1fr,220px]">
-          <div className="relative"><Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input className="h-12 rounded-full border-[#efd3db] bg-[#fffaf8] pl-11" placeholder="Search by order or product" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="h-12 rounded-full border border-[#efd3db] bg-[#fffaf8] px-4 text-sm text-[#6a4050] outline-none">
+          <div className="relative"><Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input className="h-12 rounded-full border-[#efd3db] bg-[#fffaf8] pl-11" placeholder="Search by order or product" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} /></div>
+          <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className="h-12 rounded-full border border-[#efd3db] bg-[#fffaf8] px-4 text-sm text-[#6a4050] outline-none">
             <option value="all">All statuses</option>
             <option value="new">Order received</option>
             <option value="pickup_assigned">Pickup assigned</option>
@@ -149,7 +183,7 @@ const VendorOrders = () => {
               </tr>
             </thead>
             <tbody>
-              {loading ? <tr><td colSpan={5} className="px-4 py-14 text-center text-muted-foreground">Loading vendor orders...</td></tr> : filtered.length === 0 ? <tr><td colSpan={5} className="px-4 py-14 text-center text-muted-foreground">No vendor orders found.</td></tr> : filtered.map((item) => {
+              {loading ? <tr><td colSpan={5} className="px-4 py-14 text-center text-muted-foreground">Loading vendor orders...</td></tr> : items.length === 0 ? <tr><td colSpan={5} className="px-4 py-14 text-center text-muted-foreground">No vendor orders found.</td></tr> : items.map((item) => {
                 const nextStatuses = ACTIONS[item.vendor_status] || [];
                 return (
                   <tr key={item.id} className="border-t border-[#f5ede5] align-top">
@@ -187,55 +221,28 @@ const VendorOrders = () => {
             </tbody>
           </table>
         </div>
+        <div className="flex flex-col gap-3 border-t border-[#f5ede5] px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+          <p>
+            Showing {items.length} of {pagination.total} order item(s). Page {pagination.page} of {pagination.total_pages}.
+          </p>
+          <div className="flex gap-2">
+            <Button variant="outline" className="rounded-full" disabled={pagination.page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+              Previous
+            </Button>
+            <Button variant="outline" className="rounded-full" disabled={pagination.page >= pagination.total_pages || loading} onClick={() => setPage((current) => Math.min(pagination.total_pages, current + 1))}>
+              Next
+            </Button>
+          </div>
+        </div>
       </section>
 
-      <section className="overflow-hidden rounded-[1.8rem] border border-[#f0e0d5] bg-white/95 shadow-[0_20px_46px_rgba(186,131,149,0.08)]">
-        <div className="border-b border-[#f5ede5] bg-[#fff6f7] px-4 py-4">
+      <section className="rounded-[1.8rem] border border-[#f0e0d5] bg-white/95 p-5 shadow-[0_20px_46px_rgba(186,131,149,0.08)]">
+        <div>
           <p className="text-xs font-semibold uppercase tracking-[0.22em] text-primary/80">Ledger table</p>
           <h3 className="mt-1 font-serif text-2xl">Commission and payout breakdown</h3>
-        </div>
-        <div className="overflow-auto">
-          <table className="min-w-full text-sm">
-            <thead className="bg-[#fffafb] text-left text-xs uppercase tracking-[0.14em] text-muted-foreground">
-              <tr>
-                <th className="px-4 py-4">Order</th>
-                <th className="px-4 py-4">Gross</th>
-                <th className="px-4 py-4">Commission</th>
-                <th className="px-4 py-4">Vendor payout</th>
-                <th className="px-4 py-4">Settlement</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!ledger.length ? <tr><td colSpan={5} className="px-4 py-10 text-center text-muted-foreground">No payout ledger entries yet.</td></tr> : ledger.map((item) => (
-                <tr key={`ledger-${item.id}`} className="border-t border-[#f5ede5] align-top">
-                  <td className="px-4 py-4">
-                    <p className="font-medium">{item.order_number}</p>
-                    <p className="text-xs text-muted-foreground">{item.product_title}</p>
-                    {item.invoice_number ? <p className="mt-1 text-xs text-muted-foreground">Invoice: {item.invoice_number}</p> : null}
-                  </td>
-                  <td className="px-4 py-4">
-                    <p className="font-medium">{formatCurrency(item.gross_amount)}</p>
-                    <p className="text-xs text-muted-foreground">Created {formatDate(item.created_at)}</p>
-                  </td>
-                  <td className="px-4 py-4">
-                    <p className="font-medium">{formatCurrency(item.commission_amount)}</p>
-                    <p className="text-xs text-muted-foreground">{item.commission_percent}% commission</p>
-                  </td>
-                  <td className="px-4 py-4">
-                    <p className="font-medium">{formatCurrency(item.payout_amount)}</p>
-                    <p className="text-xs text-muted-foreground">Released {formatDate(item.payout_released_at || null)}</p>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="flex flex-wrap gap-2">
-                      <VendorStatusBadge status={item.payout_status} />
-                      {item.settlement_stage ? <VendorStatusBadge status={item.settlement_stage} /> : null}
-                    </div>
-                    <p className="mt-2 text-xs text-muted-foreground">Delivered {formatDate(item.delivered_at || null)}</p>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <p className="mt-2 text-sm leading-7 text-muted-foreground">
+            Ledger rows are no longer loaded automatically. Use Download statement to generate the full CSV only when needed.
+          </p>
         </div>
       </section>
 

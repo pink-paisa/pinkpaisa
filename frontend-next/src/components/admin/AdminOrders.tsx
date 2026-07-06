@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiFetch, API_URL } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,11 @@ type AdminWarehouse = { warehouse_name?: string; warehouse_address?: string | nu
 type VendorInfo = { id: string; shop_name?: string; business_name?: string; owner_name?: string; city?: string; state?: string; mobile?: string; email?: string; commission_percent?: number; gstin?: string; address?: string | null; pincode?: string | null };
 type OrderItem = { id?: string; product_title: string; price: number; quantity: number; vendor_status?: string; return_status?: string; vendor_id?: string | null; vendor?: VendorInfo | null; source_type?: "admin" | "vendor"; admin_warehouse?: AdminWarehouse | null; payout_amount?: number; commission_percent?: number; commission_amount?: number; payout_status?: string; returnable?: boolean };
 type OrderRow = { id: string; order_number?: string; guest_name: string; guest_email: string; guest_phone: string; shipping_address: string; shipping_city: string; shipping_state: string; shipping_pincode: string; subtotal: number; shipping_cost: number; total: number; status: string; delivery_status: string; payment_status: string; payment_method: string; createdAt?: string; created_at?: string; delivery_partner_id?: string | null; delivery_partner?: { id: string; name: string; company_name?: string | null; phone?: string | null } | null; items?: OrderItem[]; user?: { full_name?: string; email?: string; phone?: string } | null; pickup_address?: string | null; pickup_city?: string | null; pickup_state?: string | null; pickup_pincode?: string | null; vendor_payout_amount?: number; pinkpaisa_commission_amount?: number; vendor_payout_status?: string; invoice_number?: string | null; delivered_at?: string | null; phonepe_transaction_id?: string | null; wallet_used?: number; admin_warehouse?: AdminWarehouse | null };
+type PaginationMeta = { page: number; limit: number; total: number; total_pages: number };
+type OrderListSummary = { total_orders: number; revenue: number; in_transit: number; delivered: number };
+type OrderListResponse = { items: OrderRow[]; pagination: PaginationMeta; summary: OrderListSummary };
+
+const ADMIN_ORDER_PAGE_SIZE = 25;
 
 /* ── Shipment group type ── */
 type ShipmentGroup = {
@@ -277,20 +282,38 @@ export const AdminOrders = () => {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pagination, setPagination] = useState<PaginationMeta>({ page: 1, limit: ADMIN_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
+  const [summary, setSummary] = useState<OrderListSummary>({ total_orders: 0, revenue: 0, in_transit: 0, delivered: 0 });
   const [expandedOrder, setExpandedOrder] = useState<string | null>(null);
 
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     setLoading(true);
     try {
-      const [orderData, partnerData] = await Promise.all([apiFetch<OrderRow[]>("/orders"), apiFetch<any[]>("/delivery-partners")]);
-      setOrders(orderData || []);
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(ADMIN_ORDER_PAGE_SIZE),
+        status: statusFilter,
+      });
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) params.set("search", trimmedSearch);
+      const [orderData, partnerData] = await Promise.all([apiFetch<OrderListResponse>(`/orders?${params.toString()}`), apiFetch<any[]>("/delivery-partners")]);
+      setOrders(orderData.items || []);
+      setPagination(orderData.pagination || { page, limit: ADMIN_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
+      setSummary(orderData.summary || { total_orders: 0, revenue: 0, in_transit: 0, delivered: 0 });
       setPartners(partnerData || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load orders");
     } finally { setLoading(false); }
-  };
+  }, [page, search, statusFilter]);
 
-  useEffect(() => { fetchOrders(); }, []);
+  useEffect(() => { void fetchOrders(); }, [fetchOrders]);
+
+  useEffect(() => {
+    if (page > pagination.total_pages) {
+      setPage(Math.max(pagination.total_pages, 1));
+    }
+  }, [page, pagination.total_pages]);
 
   const assignDelivery = async (id: string, delivery_partner_id: string, delivery_status?: string) => {
     try {
@@ -327,12 +350,7 @@ export const AdminOrders = () => {
     setOrders((current) => current.map((o) => o.id === orderId ? { ...o, ...updatedOrder } : o));
   };
 
-  const filteredOrders = useMemo(() => orders.filter((order) => {
-    const target = `${order.guest_name} ${order.guest_email} ${order.id} ${order.order_number || ""}`.toLowerCase();
-    return (!search || target.includes(search.toLowerCase())) && (statusFilter === "all" || order.status === statusFilter || order.delivery_status === statusFilter);
-  }), [orders, search, statusFilter]);
-
-  const orderRevenue = filteredOrders.filter((order) => !["cancelled", "refunded"].includes(order.status)).reduce((sum, order) => sum + Number(order.total), 0);
+  const visibleOrders = orders;
 
   return (
     <div className="space-y-6">
@@ -341,17 +359,17 @@ export const AdminOrders = () => {
         <p className="text-sm text-muted-foreground">Track buyer orders, manage per-shipment status, and handle returns individually per vendor/admin source.</p>
       </div>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total Orders" value={orders.length} />
-        <StatCard label="Revenue" value={formatPrice(orderRevenue)} color="text-primary" />
-        <StatCard label="In Transit" value={orders.filter((o) => ["shipped", "picked_up", "pickup_assigned"].includes(o.status)).length} />
-        <StatCard label="Delivered" value={orders.filter((o) => o.status === "delivered").length} color="text-emerald-600" />
+        <StatCard label="Total Orders" value={summary.total_orders || pagination.total} />
+        <StatCard label="Revenue" value={formatPrice(summary.revenue || 0)} color="text-primary" />
+        <StatCard label="In Transit" value={summary.in_transit || 0} />
+        <StatCard label="Delivered" value={summary.delivered || 0} color="text-emerald-600" />
       </div>
       <div className="flex flex-col gap-3 sm:flex-row">
-        <div className="relative flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search orders..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" /></div>
-        <Select value={statusFilter} onValueChange={setStatusFilter}><SelectTrigger className="w-full sm:w-56"><SelectValue placeholder="Filter" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem>{[...ORDER_STATUSES, ...DELIVERY_STATUSES.filter((s) => !ORDER_STATUSES.includes(s as any))].map((s) => <SelectItem key={s} value={s}>{s.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select>
-        <Button variant="outline" size="sm" onClick={fetchOrders}><RefreshCw className="h-4 w-4" /></Button>
+        <div className="relative flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search orders..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="pl-9" /></div>
+        <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value); setPage(1); }}><SelectTrigger className="w-full sm:w-56"><SelectValue placeholder="Filter" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem>{[...ORDER_STATUSES, ...DELIVERY_STATUSES.filter((s) => !ORDER_STATUSES.includes(s as any))].map((s) => <SelectItem key={s} value={s}>{s.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select>
+        <Button variant="outline" size="sm" onClick={() => void fetchOrders()}><RefreshCw className="h-4 w-4" /></Button>
       </div>
-      {loading ? <LoadingSpinner /> : filteredOrders.length === 0 ? <EmptyState icon={Package} text="No orders found" /> : <div className="space-y-3">{filteredOrders.map((order) => (
+      {loading ? <LoadingSpinner /> : visibleOrders.length === 0 ? <EmptyState icon={Package} text="No orders found" /> : <div className="space-y-3">{visibleOrders.map((order) => (
         <div key={order.id} className="overflow-hidden rounded-xl border border-border bg-card">
           <button onClick={() => setExpandedOrder(expandedOrder === order.id ? null : order.id)} className="flex w-full items-center gap-4 p-4 text-left transition-colors hover:bg-accent/30">
             <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 md:grid-cols-5">
@@ -453,6 +471,19 @@ export const AdminOrders = () => {
           </motion.div>}
         </div>
       ))}</div>}
+      <div className="flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <p>
+          Showing {visibleOrders.length} of {pagination.total} order(s). Page {pagination.page} of {pagination.total_pages}.
+        </p>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" disabled={pagination.page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+            Previous
+          </Button>
+          <Button variant="outline" size="sm" disabled={pagination.page >= pagination.total_pages || loading} onClick={() => setPage((current) => Math.min(pagination.total_pages, current + 1))}>
+            Next
+          </Button>
+        </div>
+      </div>
     </div>
   );
 };

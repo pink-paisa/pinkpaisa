@@ -18,9 +18,20 @@ function queryResult(value) {
   return {
     select() { return this; },
     sort() { return this; },
+    skip() { return this; },
+    limit() { return this; },
     lean() { return Promise.resolve(value); },
     then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
     catch(reject) { return Promise.resolve(value).catch(reject); },
+  };
+}
+
+function createListQuery(value, tracker = {}) {
+  return {
+    sort(value) { tracker.sort = value; return this; },
+    skip(value) { tracker.skip = value; return this; },
+    limit(value) { tracker.limit = value; return this; },
+    lean() { return Promise.resolve(value); },
   };
 }
 
@@ -226,6 +237,106 @@ async function withAffiliateBulkMocks(callback) {
     AdminSettings.create = originals.adminSettingsCreate;
   }
 }
+
+test("affiliate product list keeps legacy array response without pagination params", async () => {
+  const originalFind = Product.find;
+  const originalCountDocuments = Product.countDocuments;
+  const docs = [
+    {
+      _id: { toString: () => "affiliate-1" },
+      title: "Legacy Affiliate",
+      category_id: { toString: () => "category-1" },
+      subcategory_id: { toString: () => "subcategory-1" },
+    },
+  ];
+  let countCalled = false;
+
+  try {
+    Product.find = (query) => {
+      assert.deepEqual(query, { is_affiliate: true, source_type: "admin" });
+      return queryResult(docs);
+    };
+    Product.countDocuments = async () => {
+      countCalled = true;
+      return 0;
+    };
+
+    let payload = null;
+    await affiliateProductController.listAffiliateProducts(
+      { query: {} },
+      {
+        json(value) {
+          payload = value;
+        },
+        status() {
+          throw new Error("Legacy affiliate list should not fail");
+        },
+      },
+    );
+
+    assert.equal(countCalled, false);
+    assert.equal(Array.isArray(payload), true);
+    assert.equal(payload[0].id, "affiliate-1");
+    assert.equal(payload[0].category_id, "category-1");
+  } finally {
+    Product.find = originalFind;
+    Product.countDocuments = originalCountDocuments;
+  }
+});
+
+test("affiliate product list returns paginated response with clamped limit and counts", async () => {
+  const originalFind = Product.find;
+  const originalCountDocuments = Product.countDocuments;
+  const tracker = {};
+  const docs = [
+    {
+      _id: { toString: () => "affiliate-2" },
+      title: "Wireless Mouse",
+      category_id: null,
+      subcategory_id: null,
+      affiliate_compliance_status: "needs_review",
+    },
+  ];
+  const countQueries = [];
+
+  try {
+    Product.find = (query) => {
+      assert.equal(query.is_affiliate, true);
+      assert.equal(query.source_type, "admin");
+      assert.equal(query.affiliate_compliance_status.$ne, "compliant");
+      assert.ok(query.$or.some((item) => item.title instanceof RegExp));
+      return createListQuery(docs, tracker);
+    };
+    Product.countDocuments = async (query) => {
+      countQueries.push(query);
+      return 42;
+    };
+
+    let payload = null;
+    await affiliateProductController.listAffiliateProducts(
+      { query: { page: "2", limit: "500", search: "mouse", quick_filter: "needs_review" } },
+      {
+        json(value) {
+          payload = value;
+        },
+        status() {
+          throw new Error("Paginated affiliate list should not fail");
+        },
+      },
+    );
+
+    assert.equal(tracker.skip, 100);
+    assert.equal(tracker.limit, 100);
+    assert.equal(payload.items[0].id, "affiliate-2");
+    assert.deepEqual(payload.pagination, { page: 2, limit: 100, total: 42, total_pages: 1 });
+    assert.equal(payload.counts.all, 42);
+    assert.equal(payload.counts.needs_review, 42);
+    assert.ok(countQueries.length >= 2);
+  } finally {
+    Product.find = originalFind;
+    Product.countDocuments = originalCountDocuments;
+  }
+});
 
 function mockResponse() {
   return {
