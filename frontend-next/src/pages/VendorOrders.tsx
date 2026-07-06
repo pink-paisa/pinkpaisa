@@ -152,7 +152,7 @@ const VendorOrders = () => {
             <h3 className="mt-1 font-serif text-2xl">Settlement history, commission, and invoices</h3>
             <p className="mt-1 text-sm text-muted-foreground">This ledger shows the gross order value, Pink Paisa commission, vendor payout amount, invoice number, and release timing for every order item.</p>
           </div>
-          <Button variant="outline" className="rounded-full border-[#f0c0c8] bg-white text-[#c05070] hover:bg-[#fff4f7]" onClick={() => void downloadLedger()} disabled={ledgerDownloading}>
+          <Button variant="outline" className="w-full rounded-full border-[#f0c0c8] bg-white text-[#c05070] hover:bg-[#fff4f7] md:w-auto" onClick={() => void downloadLedger()} disabled={ledgerDownloading}>
             <Download className="mr-2 h-4 w-4" /> {ledgerDownloading ? "Preparing..." : "Download statement"}
           </Button>
         </div>
@@ -173,13 +173,70 @@ const VendorOrders = () => {
       </section>
 
       <section className="overflow-hidden rounded-[1.8rem] border border-[#f0e0d5] bg-white/95 shadow-[0_20px_46px_rgba(186,131,149,0.08)]">
-        <div className="overflow-auto">
+        <div className="divide-y divide-[#f5ede5] md:hidden">
+          {loading ? (
+            <div className="px-4 py-14 text-center text-sm text-muted-foreground">Loading vendor orders...</div>
+          ) : items.length === 0 ? (
+            <div className="px-4 py-14 text-center text-sm text-muted-foreground">No vendor orders found.</div>
+          ) : items.map((item) => {
+            const nextStatuses = ACTIONS[item.vendor_status] || [];
+            return (
+              <article key={item.id} className="p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium text-[#4a2030]">{item.order_number}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{formatDate(item.created_at)}</p>
+                    {item.invoice_number ? <p className="mt-1 text-xs text-muted-foreground">Invoice: {item.invoice_number}</p> : null}
+                  </div>
+                  <VendorStatusBadge status={item.vendor_status} />
+                </div>
+
+                <div className="mt-4">
+                  <p className="break-words text-sm font-medium text-[#4a2030]">{item.product_title}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{item.quantity} x {formatCurrency(item.price)}</p>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 rounded-2xl bg-[#fff8f5] p-3 text-sm">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Payout</p>
+                    <p className="font-semibold text-[#4a2030]">{formatCurrency(item.payout_amount)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Commission</p>
+                    <p className="font-semibold text-[#4a2030]">{formatCurrency(item.commission_amount)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Rate</p>
+                    <p className="font-semibold text-[#4a2030]">{item.commission_percent}%</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Return window</p>
+                    <p className="font-semibold text-[#4a2030]">{item.return_window_days} day(s)</p>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <VendorStatusBadge status={item.payout_status} />
+                  {item.return_status !== "not_requested" ? <VendorStatusBadge status={item.return_status} /> : null}
+                </div>
+
+                <div className="mt-4 grid gap-2">
+                  {nextStatuses.length === 0 ? <span className="text-xs text-muted-foreground">Waiting for admin step</span> : null}
+                  {nextStatuses.includes("picked_up") ? <Button variant="outline" className="w-full rounded-full" onClick={() => updateStatus(item.id, "picked_up")}>Pickup Done</Button> : null}
+                  {nextStatuses.includes("rejected") ? <Button variant="outline" className="w-full rounded-full text-rose-600" onClick={() => updateStatus(item.id, "rejected")}>Reject</Button> : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="hidden overflow-auto md:block">
           <table className="min-w-full text-sm">
             <thead className="bg-[#fff6f7] text-left text-xs uppercase tracking-[0.14em] text-muted-foreground">
               <tr>
                 <th className="px-4 py-4">Order</th>
                 <th className="px-4 py-4">Product</th>
-                                <th className="px-4 py-4">Balance</th>
+                <th className="px-4 py-4">Balance</th>
                 <th className="px-4 py-4">Status</th>
                 <th className="px-4 py-4">Actions</th>
               </tr>
@@ -227,11 +284,11 @@ const VendorOrders = () => {
           <p>
             Showing {items.length} of {pagination.total} order item(s). Page {pagination.page} of {pagination.total_pages}.
           </p>
-          <div className="flex gap-2">
-            <Button variant="outline" className="rounded-full" disabled={pagination.page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+          <div className="grid grid-cols-2 gap-2 sm:flex">
+            <Button variant="outline" className="w-full rounded-full sm:w-auto" disabled={pagination.page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
               Previous
             </Button>
-            <Button variant="outline" className="rounded-full" disabled={pagination.page >= pagination.total_pages || loading} onClick={() => setPage((current) => Math.min(pagination.total_pages, current + 1))}>
+            <Button variant="outline" className="w-full rounded-full sm:w-auto" disabled={pagination.page >= pagination.total_pages || loading} onClick={() => setPage((current) => Math.min(pagination.total_pages, current + 1))}>
               Next
             </Button>
           </div>

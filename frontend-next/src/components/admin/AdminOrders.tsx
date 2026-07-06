@@ -382,20 +382,22 @@ export const AdminOrders = () => {
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search orders..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="pl-9" /></div>
         <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value); setPage(1); }}><SelectTrigger className="w-full sm:w-56"><SelectValue placeholder="Filter" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem>{[...ORDER_STATUSES, ...DELIVERY_STATUSES.filter((s) => !ORDER_STATUSES.includes(s as any))].map((s) => <SelectItem key={s} value={s}>{s.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select>
-        <Button variant="outline" size="sm" onClick={() => void refreshOrderScreen()}><RefreshCw className="h-4 w-4" /></Button>
+        <Button variant="outline" size="sm" className="w-full sm:w-auto" onClick={() => void refreshOrderScreen()}><RefreshCw className="mr-2 h-4 w-4 sm:mr-0" /><span className="sm:hidden">Refresh orders</span></Button>
       </div>
       {loading ? <LoadingSpinner /> : visibleOrders.length === 0 ? <EmptyState icon={Package} text="No orders found" /> : <div className="space-y-3">{visibleOrders.map((order) => (
         <div key={order.id} className="overflow-hidden rounded-xl border border-border bg-card">
-          <button onClick={() => setExpandedOrder(expandedOrder === order.id ? null : order.id)} className="flex w-full items-center gap-4 p-4 text-left transition-colors hover:bg-accent/30">
-            <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 md:grid-cols-5">
+          <button onClick={() => setExpandedOrder(expandedOrder === order.id ? null : order.id)} className="flex w-full flex-col gap-3 p-4 text-left transition-colors hover:bg-accent/30 sm:flex-row sm:items-center">
+            <div className="grid w-full min-w-0 flex-1 grid-cols-2 gap-3 md:grid-cols-5">
               <div><p className="text-xs text-muted-foreground">Order</p><p className="font-mono text-sm font-medium truncate">{(order.order_number || order.id.slice(0, 8)).toUpperCase()}</p></div>
               <div><p className="text-xs text-muted-foreground">Customer</p><p className="text-sm truncate">{order.guest_name}</p></div>
               <div><p className="text-xs text-muted-foreground">Payment</p><p className="text-sm capitalize">{order.payment_method} · {order.payment_status.replace(/_/g, " ")}</p></div>
               <div><p className="text-xs text-muted-foreground">Amount</p><p className="text-sm font-semibold">{formatPrice(order.total)}</p></div>
               <div><p className="text-xs text-muted-foreground">Date</p><p className="text-sm">{formatOrderDate(order.createdAt || order.created_at, { year: undefined })}</p></div>
             </div>
-            <div className="flex flex-col items-end gap-2"><StatusBadge status={order.status} /><StatusBadge status={order.delivery_status || "pending"} /></div>
-            {expandedOrder === order.id ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+            <div className="flex w-full items-center justify-between gap-3 sm:w-auto sm:justify-end">
+              <div className="flex flex-wrap gap-2 sm:flex-col sm:items-end"><StatusBadge status={order.status} /><StatusBadge status={order.delivery_status || "pending"} /></div>
+              {expandedOrder === order.id ? <ChevronUp className="h-4 w-4 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />}
+            </div>
           </button>
 
           {/* ── Expanded Detail Panel ── */}
@@ -490,11 +492,11 @@ export const AdminOrders = () => {
         <p>
           Showing {visibleOrders.length} of {pagination.total} order(s). Page {pagination.page} of {pagination.total_pages}.
         </p>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" disabled={pagination.page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+        <div className="grid grid-cols-2 gap-2 sm:flex">
+          <Button variant="outline" size="sm" className="w-full sm:w-auto" disabled={pagination.page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
             Previous
           </Button>
-          <Button variant="outline" size="sm" disabled={pagination.page >= pagination.total_pages || loading} onClick={() => setPage((current) => Math.min(pagination.total_pages, current + 1))}>
+          <Button variant="outline" size="sm" className="w-full sm:w-auto" disabled={pagination.page >= pagination.total_pages || loading} onClick={() => setPage((current) => Math.min(pagination.total_pages, current + 1))}>
             Next
           </Button>
         </div>
