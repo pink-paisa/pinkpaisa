@@ -31,6 +31,21 @@ function parseListPagination(query = {}) {
   return { page, limit };
 }
 
+function buildVendorOrderListQuery({ vendorId, status = "all", search = "", matchingOrderIds = [] } = {}) {
+  const query = { vendor_id: vendorId };
+  if (status !== "all") query.vendor_status = status;
+
+  const trimmedSearch = String(search || "").trim();
+  if (trimmedSearch) {
+    const regex = new RegExp(escapeRegex(trimmedSearch), "i");
+    const orderIds = matchingOrderIds.map((orderId) => String(orderId)).filter(Boolean);
+    query.$or = [{ product_title: regex }];
+    if (orderIds.length) query.$or.push({ order_id: { $in: orderIds } });
+  }
+
+  return query;
+}
+
 function canVendorMove(from, to) {
   if (!to || from === to) return true;
   return (VENDOR_ITEM_STATUS_FLOW[from] || []).includes(to);
@@ -92,16 +107,13 @@ const listVendorOrders = async (req, res) => {
     const status = String(req.query.status || "all");
     const search = String(req.query.search || "").trim();
     const { page, limit } = parseListPagination(req.query);
-    const query = { vendor_id: vendorId };
-    if (status !== "all") query.vendor_status = status;
-
+    let matchingOrderIds = [];
     if (search) {
       const regex = new RegExp(escapeRegex(search), "i");
       const matchingOrders = await Order.find({ order_number: regex }).select("_id").limit(500).lean();
-      const matchingOrderIds = matchingOrders.map((order) => String(order._id));
-      query.$or = [{ product_title: regex }];
-      if (matchingOrderIds.length) query.$or.push({ order_id: { $in: matchingOrderIds } });
+      matchingOrderIds = matchingOrders.map((order) => order._id);
     }
+    const query = buildVendorOrderListQuery({ vendorId, status, search, matchingOrderIds });
 
     const [items, total] = await Promise.all([
       OrderItem.find(query)
@@ -200,4 +212,14 @@ const updateVendorOrderStatus = async (req, res) => {
   }
 };
 
-module.exports = { listVendorOrders, getVendorOrderSummary, getVendorPayoutLedger, updateVendorOrderStatus, VENDOR_ITEM_STATUS_FLOW };
+module.exports = {
+  listVendorOrders,
+  getVendorOrderSummary,
+  getVendorPayoutLedger,
+  updateVendorOrderStatus,
+  VENDOR_ITEM_STATUS_FLOW,
+  _private: {
+    parseListPagination,
+    buildVendorOrderListQuery,
+  },
+};

@@ -338,6 +338,13 @@ test("affiliate product list returns paginated response with clamped limit and c
   }
 });
 
+test("affiliate product schema includes admin pagination support indexes", () => {
+  const indexes = Product.schema.indexes().map(([index]) => JSON.stringify(index));
+  assert.ok(indexes.includes(JSON.stringify({ is_affiliate: 1, source_type: 1, affiliate_sort_order: 1, createdAt: -1 })));
+  assert.ok(indexes.includes(JSON.stringify({ is_affiliate: 1, source_type: 1, category_id: 1, subcategory_id: 1, affiliate_sort_order: 1, createdAt: -1 })));
+  assert.ok(indexes.includes(JSON.stringify({ is_affiliate: 1, source_type: 1, status: 1, is_visible: 1, affiliate_sort_order: 1, createdAt: -1 })));
+});
+
 function mockResponse() {
   return {
     statusCode: 200,

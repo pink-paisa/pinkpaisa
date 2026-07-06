@@ -116,5 +116,8 @@ ProductSchema.index(
 );
 ProductSchema.index({ is_affiliate: 1, affiliate_compliance_status: 1, is_visible: 1, status: 1 });
 ProductSchema.index({ affiliate_is_instagram_pick: 1, affiliate_sort_order: 1, createdAt: -1 });
+ProductSchema.index({ is_affiliate: 1, source_type: 1, affiliate_sort_order: 1, createdAt: -1 });
+ProductSchema.index({ is_affiliate: 1, source_type: 1, category_id: 1, subcategory_id: 1, affiliate_sort_order: 1, createdAt: -1 });
+ProductSchema.index({ is_affiliate: 1, source_type: 1, status: 1, is_visible: 1, affiliate_sort_order: 1, createdAt: -1 });
 
 module.exports = mongoose.model("Product", ProductSchema);

@@ -5,6 +5,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-with-enough-leng
 
 const PendingPayment = require("../models/PendingPayment");
 const Order = require("../models/Order");
+const OrderItem = require("../models/OrderItem");
 const AmazonReportRow = require("../models/AmazonReportRow");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
 const {
@@ -20,6 +21,8 @@ const { createRateLimiter, getClientIp } = require("../middleware/requestGuards"
 const { hashToken } = require("../utils/tokens");
 const authRoute = require("../routes/auth");
 const productController = require("../controllers/productController");
+const orderController = require("../controllers/orderController");
+const vendorOrderController = require("../controllers/vendorOrderController");
 const emailUtils = require("../utils/email");
 const dailyBatchScheduler = require("../services/dailyBatchScheduler");
 const { _private: amazonReportPrivate } = require("../controllers/adminAmazonReportController");
@@ -29,6 +32,8 @@ const creatorsApiService = require("../services/amazonCreatorsApiService");
 const affiliateProductController = require("../controllers/affiliateProductController");
 const authPrivate = authRoute._private;
 const productPrivate = productController._private;
+const orderPrivate = orderController._private;
+const vendorOrderPrivate = vendorOrderController._private;
 const emailPrivate = emailUtils._private;
 const creatorsApiPrivate = creatorsApiService._private;
 const affiliateProductPrivate = affiliateProductController._private;
@@ -53,6 +58,64 @@ test("order schema keeps phonepe order ids unique for idempotent completion", ()
   assert.ok(phonepeIndex, "phonepe_order_id index should exist");
   assert.equal(phonepeIndex[1].unique, true);
   assert.equal(phonepeIndex[1].sparse, true);
+});
+
+test("order list pagination preserves legacy status-only filters", () => {
+  assert.equal(orderPrivate.wantsPaginatedOrderList({ status: "pending" }), false);
+  assert.equal(orderPrivate.wantsPaginatedOrderList({ page: "1", status: "pending" }), true);
+  assert.equal(orderPrivate.wantsPaginatedOrderList({ limit: "25", status: "pending" }), true);
+  assert.equal(orderPrivate.wantsPaginatedOrderList({ search: "PP123" }), true);
+
+  assert.deepEqual(orderPrivate.parseListPagination({ page: "2", limit: "999" }), {
+    page: 2,
+    limit: 100,
+  });
+
+  const filter = orderPrivate.buildOrderListFilter({
+    user: { _id: "user-id", role: "user" },
+    query: { status: "pending", search: "PP123" },
+  });
+  assert.equal(filter.user_id, "user-id");
+  assert.ok(Array.isArray(filter.$and));
+  assert.deepEqual(filter.$and[0], {
+    $or: [
+      { status: "pending" },
+      { delivery_status: "pending" },
+      { payment_status: "pending" },
+    ],
+  });
+  assert.ok(filter.$and[1].$or.some((clause) => clause.order_number instanceof RegExp));
+});
+
+test("order and order item schemas include pagination support indexes", () => {
+  const orderIndexes = Order.schema.indexes().map(([index]) => JSON.stringify(index));
+  assert.ok(orderIndexes.includes(JSON.stringify({ status: 1, createdAt: -1 })));
+  assert.ok(orderIndexes.includes(JSON.stringify({ delivery_status: 1, createdAt: -1 })));
+  assert.ok(orderIndexes.includes(JSON.stringify({ payment_status: 1, createdAt: -1 })));
+  assert.ok(orderIndexes.includes(JSON.stringify({ createdAt: -1 })));
+
+  const itemIndexes = OrderItem.schema.indexes().map(([index]) => JSON.stringify(index));
+  assert.ok(itemIndexes.includes(JSON.stringify({ vendor_id: 1, createdAt: -1 })));
+  assert.ok(itemIndexes.includes(JSON.stringify({ vendor_id: 1, vendor_status: 1, createdAt: -1 })));
+});
+
+test("vendor order list query matches searched order numbers against string order ids", () => {
+  const orderId = new Order()._id;
+  const query = vendorOrderPrivate.buildVendorOrderListQuery({
+    vendorId: "vendor-id",
+    status: "pickup_assigned",
+    search: "PP123",
+    matchingOrderIds: [orderId],
+  });
+
+  assert.equal(query.vendor_id, "vendor-id");
+  assert.equal(query.vendor_status, "pickup_assigned");
+  assert.equal(query.$or[0].product_title instanceof RegExp, true);
+  assert.deepEqual(query.$or[1], { order_id: { $in: [String(orderId)] } });
+  assert.deepEqual(vendorOrderPrivate.parseListPagination({ page: "-1", limit: "500" }), {
+    page: 1,
+    limit: 100,
+  });
 });
 
 test("marketing campaign schema supports affiliate product source events", () => {

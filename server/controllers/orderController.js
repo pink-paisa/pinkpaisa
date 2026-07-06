@@ -1872,4 +1872,9 @@ module.exports = {
   applyOrderSideEffects,
   refreshPayoutReadinessForOrder,
   syncOrderFromItems,
+  _private: {
+    parseListPagination,
+    wantsPaginatedOrderList,
+    buildOrderListFilter,
+  },
 };

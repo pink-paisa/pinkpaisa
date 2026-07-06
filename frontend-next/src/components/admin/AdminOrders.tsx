@@ -9,6 +9,7 @@ import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { StatCard, StatusBadge, LoadingSpinner, EmptyState, Field, formatPrice, ORDER_STATUSES, DELIVERY_STATUSES } from "./AdminShared";
 import { formatDateIN } from "@/lib/date";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 
 /* ── Types ── */
 type AdminWarehouse = { warehouse_name?: string; warehouse_address?: string | null; warehouse_city?: string | null; warehouse_state?: string | null; warehouse_pincode?: string | null; warehouse_phone?: string | null; warehouse_email?: string | null };
@@ -286,6 +287,16 @@ export const AdminOrders = () => {
   const [pagination, setPagination] = useState<PaginationMeta>({ page: 1, limit: ADMIN_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
   const [summary, setSummary] = useState<OrderListSummary>({ total_orders: 0, revenue: 0, in_transit: 0, delivered: 0 });
   const [expandedOrder, setExpandedOrder] = useState<string | null>(null);
+  const debouncedSearch = useDebouncedValue(search, 350);
+
+  const fetchDeliveryPartners = useCallback(async () => {
+    try {
+      const partnerData = await apiFetch<any[]>("/delivery-partners");
+      setPartners(partnerData || []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not load delivery partners");
+    }
+  }, []);
 
   const fetchOrders = useCallback(async () => {
     setLoading(true);
@@ -295,18 +306,22 @@ export const AdminOrders = () => {
         limit: String(ADMIN_ORDER_PAGE_SIZE),
         status: statusFilter,
       });
-      const trimmedSearch = search.trim();
+      const trimmedSearch = debouncedSearch.trim();
       if (trimmedSearch) params.set("search", trimmedSearch);
-      const [orderData, partnerData] = await Promise.all([apiFetch<OrderListResponse>(`/orders?${params.toString()}`), apiFetch<any[]>("/delivery-partners")]);
+      const orderData = await apiFetch<OrderListResponse>(`/orders?${params.toString()}`);
       setOrders(orderData.items || []);
       setPagination(orderData.pagination || { page, limit: ADMIN_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
       setSummary(orderData.summary || { total_orders: 0, revenue: 0, in_transit: 0, delivered: 0 });
-      setPartners(partnerData || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load orders");
     } finally { setLoading(false); }
-  }, [page, search, statusFilter]);
+  }, [debouncedSearch, page, statusFilter]);
 
+  const refreshOrderScreen = useCallback(async () => {
+    await Promise.all([fetchOrders(), fetchDeliveryPartners()]);
+  }, [fetchDeliveryPartners, fetchOrders]);
+
+  useEffect(() => { void fetchDeliveryPartners(); }, [fetchDeliveryPartners]);
   useEffect(() => { void fetchOrders(); }, [fetchOrders]);
 
   useEffect(() => {
@@ -367,7 +382,7 @@ export const AdminOrders = () => {
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input placeholder="Search orders..." value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="pl-9" /></div>
         <Select value={statusFilter} onValueChange={(value) => { setStatusFilter(value); setPage(1); }}><SelectTrigger className="w-full sm:w-56"><SelectValue placeholder="Filter" /></SelectTrigger><SelectContent><SelectItem value="all">All</SelectItem>{[...ORDER_STATUSES, ...DELIVERY_STATUSES.filter((s) => !ORDER_STATUSES.includes(s as any))].map((s) => <SelectItem key={s} value={s}>{s.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select>
-        <Button variant="outline" size="sm" onClick={() => void fetchOrders()}><RefreshCw className="h-4 w-4" /></Button>
+        <Button variant="outline" size="sm" onClick={() => void refreshOrderScreen()}><RefreshCw className="h-4 w-4" /></Button>
       </div>
       {loading ? <LoadingSpinner /> : visibleOrders.length === 0 ? <EmptyState icon={Package} text="No orders found" /> : <div className="space-y-3">{visibleOrders.map((order) => (
         <div key={order.id} className="overflow-hidden rounded-xl border border-border bg-card">

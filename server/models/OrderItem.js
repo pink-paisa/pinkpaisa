@@ -32,6 +32,8 @@ const OrderItemSchema = new mongoose.Schema(
 );
 
 OrderItemSchema.index({ vendor_id: 1, vendor_status: 1, payout_status: 1 });
+OrderItemSchema.index({ vendor_id: 1, createdAt: -1 });
+OrderItemSchema.index({ vendor_id: 1, vendor_status: 1, createdAt: -1 });
 
 OrderItemSchema.pre("save", async function lockPayoutSnapshot(next) {
   if (this.isNew) return next();

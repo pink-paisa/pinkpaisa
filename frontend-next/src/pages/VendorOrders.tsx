@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import VendorMetricCard from "@/components/vendor/VendorMetricCard";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 
 const ACTIONS: Record<string, string[]> = {
   new: ["rejected"],
@@ -46,6 +47,7 @@ const VendorOrders = () => {
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState<PaginationMeta>({ page: 1, limit: VENDOR_ORDER_PAGE_SIZE, total: 0, total_pages: 1 });
+  const debouncedSearch = useDebouncedValue(search, 350);
 
   const load = useCallback(async () => {
     try {
@@ -55,7 +57,7 @@ const VendorOrders = () => {
         page: String(page),
         limit: String(VENDOR_ORDER_PAGE_SIZE),
       });
-      const trimmedSearch = search.trim();
+      const trimmedSearch = debouncedSearch.trim();
       if (trimmedSearch) query.set("search", trimmedSearch);
       const data = await vendorFetch<VendorOrderListResponse>(`/vendor-orders/mine?${query.toString()}`);
       setItems(data.items || []);
@@ -66,7 +68,7 @@ const VendorOrders = () => {
     } finally {
       setLoading(false);
     }
-  }, [page, search, status]);
+  }, [debouncedSearch, page, status]);
 
   useEffect(() => {
     void load();

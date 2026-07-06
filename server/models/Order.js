@@ -62,5 +62,9 @@ OrderSchema.pre("validate", function (next) {
 });
 
 OrderSchema.index({ phonepe_order_id: 1 }, { unique: true, sparse: true });
+OrderSchema.index({ status: 1, createdAt: -1 });
+OrderSchema.index({ delivery_status: 1, createdAt: -1 });
+OrderSchema.index({ payment_status: 1, createdAt: -1 });
+OrderSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("Order", OrderSchema);

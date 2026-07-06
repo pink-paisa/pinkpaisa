@@ -37,6 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { apiFetch } from "@/lib/api";
 import { downloadWorkbook } from "@/lib/excelWorkbook";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { useProductTaxonomy } from "@/hooks/useProductTaxonomy";
 import type { PhysicalProduct } from "@/hooks/usePhysicalProducts";
 import { CheckboxField, EmptyState, Field, FormCard, LoadingSpinner, StatCard, StatusBadge } from "./AdminShared";
@@ -429,16 +430,17 @@ export default function AdminAffiliateProducts() {
   const [confirmingUpload, setConfirmingUpload] = useState(false);
   const [pendingBulkConfirmation, setPendingBulkConfirmation] = useState<PendingBulkConfirmation | null>(null);
   const [productPendingDelete, setProductPendingDelete] = useState<PhysicalProduct | null>(null);
+  const debouncedSearch = useDebouncedValue(search, 350);
 
   const { data: affiliateList, isLoading } = useQuery({
-    queryKey: ["affiliate_products", page, search, quickFilter],
+    queryKey: ["affiliate_products", page, debouncedSearch, quickFilter],
     queryFn: async () => {
       const params = new URLSearchParams({
         page: String(page),
         limit: String(AFFILIATE_PAGE_SIZE),
         quick_filter: quickFilter,
       });
-      const trimmedSearch = search.trim();
+      const trimmedSearch = debouncedSearch.trim();
       if (trimmedSearch) params.set("search", trimmedSearch);
       return apiFetch<AffiliateListResponse>(`/affiliate-products?${params.toString()}`);
     },
@@ -516,7 +518,11 @@ export default function AdminAffiliateProducts() {
 
   useEffect(() => {
     setPage(1);
-  }, [search, quickFilter]);
+  }, [debouncedSearch, quickFilter]);
+
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [debouncedSearch, page, quickFilter]);
 
   useEffect(() => {
     if (page > affiliatePagination.total_pages) {
