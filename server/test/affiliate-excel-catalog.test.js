@@ -7,6 +7,7 @@ const {
   extractAsin,
   normalizeUrl,
 } = require("../services/affiliateExcelCatalog");
+const Product = require("../models/Product");
 
 async function workbookBuffer(rows) {
   const workbook = new ExcelJS.Workbook();
@@ -102,4 +103,14 @@ test("affiliate excel URL and ASIN helpers normalize common Amazon inputs", () =
   assert.equal(normalizeUrl("/dp/B0CTVGPLQX"), "https://www.amazon.in/dp/B0CTVGPLQX");
   assert.equal(normalizeUrl("amzn.to/example"), "https://amzn.to/example");
   assert.equal(extractAsin("https://www.amazon.in/gp/product/B0CTVGPLQX?th=1"), "B0CTVGPLQX");
+});
+
+test("vendor product uniqueness ignores admin and affiliate products without vendor links", () => {
+  const vendorProductIndex = Product.schema.indexes().find(([fields]) => fields.vendor_product_id === 1);
+
+  assert.ok(vendorProductIndex, "vendor_product_id index should exist");
+  assert.equal(vendorProductIndex[1].unique, true);
+  assert.deepEqual(vendorProductIndex[1].partialFilterExpression, {
+    vendor_product_id: { $type: "objectId" },
+  });
 });

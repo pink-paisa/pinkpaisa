@@ -393,7 +393,6 @@ async function buildAffiliatePayload(item, existing = null) {
     sort_order: normalizeNumber(source.sort_order, existing?.sort_order ?? 9999),
     source_type: "admin",
     vendor_id: null,
-    vendor_product_id: null,
     is_affiliate: true,
     affiliate_url: validation.normalizedUrl,
     affiliate_external_id: normalizeString(source.external_id || source.affiliate_external_id) || validation.asin,

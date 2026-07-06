@@ -46,7 +46,7 @@ const ProductSchema = new mongoose.Schema({
   sort_order: { type: Number, default: 0 },
   source_type: { type: String, enum: ["admin", "vendor"], default: "admin" },
   vendor_id: { type: mongoose.Schema.Types.ObjectId, ref: "Vendor", default: null, index: true },
-  vendor_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "VendorProduct", default: null },
+  vendor_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "VendorProduct", default: undefined },
   is_affiliate: { type: Boolean, default: false, index: true },
   affiliate_url: { type: String, default: null },
   affiliate_external_id: { type: String, default: null, index: true },
@@ -90,7 +90,15 @@ const ProductSchema = new mongoose.Schema({
   affiliate_link_failure_reason: { type: String, default: null, trim: true },
 }, { timestamps: true });
 
-ProductSchema.index({ vendor_product_id: 1 }, { unique: true, sparse: true });
+ProductSchema.index(
+  { vendor_product_id: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      vendor_product_id: { $type: "objectId" },
+    },
+  }
+);
 ProductSchema.index({ title: "text", tags: "text", sku: "text" });
 ProductSchema.index({ is_visible: 1, is_affiliate: 1, sort_order: 1, createdAt: -1 });
 ProductSchema.index({ category_id: 1, is_visible: 1, sort_order: 1, createdAt: -1 });
