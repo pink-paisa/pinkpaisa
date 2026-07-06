@@ -68,7 +68,7 @@ const VendorLogin = () => {
         body: JSON.stringify({ email }),
       });
       toast.success(response.message || "If that account exists, a reset link has been sent.");
-      if (response.reset_url) {
+      if (process.env.NODE_ENV !== "production" && response.reset_url) {
         toast.info(`Dev preview: ${response.reset_url}`);
       }
     } catch (error) {

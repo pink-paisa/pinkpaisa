@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/router";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
@@ -49,6 +50,7 @@ import AdminAffiliateProducts from "@/components/admin/AdminAffiliateProducts";
 import { AdminWarehouse } from "@/components/admin/AdminWarehouse";
 import AdminSettlements from "@/components/admin/AdminSettlements";
 import { API_URL, apiFetch } from "@/lib/api";
+import ErrorBoundary from "@/components/ui/error-boundary";
 
 type Section =
   | "dashboard"
@@ -115,12 +117,21 @@ const sectionMeta = Object.fromEntries(sectionItems.map((item) => [item.key, ite
   { key: Section; label: string; sublabel: string; icon: any }
 >;
 
+const validSections = new Set<Section>(sectionItems.map((item) => item.key));
+
+const normalizeSectionQuery = (section: string | string[] | undefined): Section | null => {
+  const sectionValue = Array.isArray(section) ? section[0] : section;
+  if (!sectionValue) return null;
+  return validSections.has(sectionValue as Section) ? (sectionValue as Section) : null;
+};
+
 const getGroupForSection = (section: Section) =>
   navGroups.find((group) => group.sections.includes(section)) ?? navGroups[0];
 
 const AUTH_API_BASE = `${API_URL}/auth`;
 
 const Admin = () => {
+  const router = useRouter();
   const [authenticated, setAuthenticated] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [adminEmail, setAdminEmail] = useState("");
@@ -204,7 +215,7 @@ const Admin = () => {
         body: JSON.stringify({ email: trimmedEmail }),
       });
       toast.success(response.message || "If that admin account exists, a reset link has been sent.");
-      if (response.reset_url) {
+      if (process.env.NODE_ENV !== "production" && response.reset_url) {
         toast.info(`Dev preview: ${response.reset_url}`);
       }
     } catch (error) {
@@ -214,11 +225,25 @@ const Admin = () => {
     }
   };
 
+  useEffect(() => {
+    if (!router.isReady) return;
+    const sectionFromQuery = normalizeSectionQuery(router.query.section);
+    const nextSection = sectionFromQuery || "dashboard";
+
+    setActiveSection(nextSection);
+    const groupKey = getGroupForSection(nextSection).key;
+    setOpenGroups((current) => (current.includes(groupKey) ? current : [...current, groupKey]));
+  }, [router.isReady, router.query.section]);
+
   const handleSelectSection = (section: Section) => {
     setActiveSection(section);
     const groupKey = getGroupForSection(section).key;
     setOpenGroups((current) => (current.includes(groupKey) ? current : [...current, groupKey]));
     setMobileNavOpen(false);
+    if (router.isReady) {
+      const query = section === "dashboard" ? {} : { section };
+      void router.push({ pathname: "/admin", query }, undefined, { shallow: true });
+    }
   };
 
   const toggleGroup = (groupKey: NavGroupKey) => {
@@ -584,22 +609,29 @@ const Admin = () => {
         </header>
 
         <div className="mx-auto w-full max-w-[1600px] p-4 sm:p-6">
-          {activeSection === "dashboard" && <AdminDashboard onNavigate={handleSelectSection} />}
-          {activeSection === "orders" && <AdminOrders />}
-          {activeSection === "products" && <AdminProducts />}
-          {activeSection === "affiliate_products" && <AdminAffiliateProducts />}
-          {activeSection === "vendors" && <AdminVendors />}
-          {activeSection === "campaigns" && <AdminCampaigns />}
-          {activeSection === "vendor_outstanding" && <AdminVendorOutstanding />}
-          {activeSection === "settlements" && <AdminSettlements />}
-          {activeSection === "customers" && <AdminCustomers />}
-          {activeSection === "delivery" && <AdminDeliveryPartners />}
-          {activeSection === "warehouse" && <AdminWarehouse />}
-          {activeSection === "workshops" && <AdminWorkshops />}
-          {activeSection === "pinkpages" && <AdminPinkPages />}
-          {activeSection === "content" && <AdminContent />}
-          {activeSection === "engagement" && <AdminEngagement />}
-          {activeSection === "analytics" && <AdminAnalytics />}
+          <ErrorBoundary
+            resetKey={activeSection}
+            title={`${activeSectionMeta.label} could not load`}
+            description="This admin section failed while rendering. Reload the section and try again."
+            actionLabel="Reload this section"
+          >
+            {activeSection === "dashboard" && <AdminDashboard onNavigate={handleSelectSection} />}
+            {activeSection === "orders" && <AdminOrders />}
+            {activeSection === "products" && <AdminProducts />}
+            {activeSection === "affiliate_products" && <AdminAffiliateProducts />}
+            {activeSection === "vendors" && <AdminVendors />}
+            {activeSection === "campaigns" && <AdminCampaigns />}
+            {activeSection === "vendor_outstanding" && <AdminVendorOutstanding />}
+            {activeSection === "settlements" && <AdminSettlements />}
+            {activeSection === "customers" && <AdminCustomers />}
+            {activeSection === "delivery" && <AdminDeliveryPartners />}
+            {activeSection === "warehouse" && <AdminWarehouse />}
+            {activeSection === "workshops" && <AdminWorkshops />}
+            {activeSection === "pinkpages" && <AdminPinkPages />}
+            {activeSection === "content" && <AdminContent />}
+            {activeSection === "engagement" && <AdminEngagement />}
+            {activeSection === "analytics" && <AdminAnalytics />}
+          </ErrorBoundary>
         </div>
       </main>
     </div>

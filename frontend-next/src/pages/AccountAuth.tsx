@@ -89,7 +89,7 @@ const AccountAuth = () => {
         throw new Error(data.message || "Could not request password reset");
       }
       toast.success(data.message || "If that account exists, a reset link has been sent.");
-      if (data.reset_url) {
+      if (process.env.NODE_ENV !== "production" && data.reset_url) {
         toast.info(`Dev preview: ${data.reset_url}`);
       }
     } catch (error) {

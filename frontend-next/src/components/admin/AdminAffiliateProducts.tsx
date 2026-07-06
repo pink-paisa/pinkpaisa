@@ -23,6 +23,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   DropdownMenu,
@@ -202,6 +203,14 @@ type AffiliateBulkResponse = {
   succeeded: number;
   failed: number;
   results: AffiliateBulkResult[];
+};
+
+type PendingBulkConfirmation = {
+  action: AffiliateBulkAction;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  destructive?: boolean;
 };
 
 type AffiliateDataSettings = {
@@ -420,6 +429,8 @@ export default function AdminAffiliateProducts() {
   const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
   const [uploadPreview, setUploadPreview] = useState<AffiliatePreviewResponse | null>(null);
   const [confirmingUpload, setConfirmingUpload] = useState(false);
+  const [pendingBulkConfirmation, setPendingBulkConfirmation] = useState<PendingBulkConfirmation | null>(null);
+  const [productPendingDelete, setProductPendingDelete] = useState<PhysicalProduct | null>(null);
 
   const { data: affiliateProducts, isLoading } = useQuery({
     queryKey: ["affiliate_products"],
@@ -659,7 +670,7 @@ export default function AdminAffiliateProducts() {
     }
   };
 
-  const runBulkAction = async (action: AffiliateBulkAction, options: { payload?: Record<string, unknown>; confirmMessage?: string } = {}) => {
+  const runBulkAction = async (action: AffiliateBulkAction, options: { payload?: Record<string, unknown> } = {}) => {
     if (selectedIds.length === 0) {
       toast.error("Select at least one affiliate product");
       return false;
@@ -668,7 +679,6 @@ export default function AdminAffiliateProducts() {
       toast.error("Creators API refresh is not ready");
       return false;
     }
-    if (options.confirmMessage && !window.confirm(options.confirmMessage)) return false;
 
     const actedIds = new Set(selectedIds);
     try {
@@ -801,9 +811,45 @@ export default function AdminAffiliateProducts() {
     }
   };
 
-  const handleDelete = async (product: PhysicalProduct) => {
-    if (!window.confirm(`Delete ${product.title}?`)) return;
+  const requestBulkPause = () => {
+    if (selectedIds.length === 0) {
+      toast.error("Select at least one affiliate product");
+      return;
+    }
+    setPendingBulkConfirmation({
+      action: "pause",
+      title: "Pause selected affiliate products",
+      description: `Pause ${selectedIds.length} selected affiliate product(s)? They will be hidden from buyer pages until republished.`,
+      confirmLabel: "Pause products",
+    });
+  };
+
+  const requestBulkDelete = () => {
+    if (selectedIds.length === 0) {
+      toast.error("Select at least one affiliate product");
+      return;
+    }
+    setPendingBulkConfirmation({
+      action: "delete",
+      title: "Delete selected affiliate products",
+      description: `Delete safe drafts from ${selectedIds.length} selected affiliate product(s)? Published products will be blocked by the server and must be unpublished first.`,
+      confirmLabel: "Delete safe drafts",
+      destructive: true,
+    });
+  };
+
+  const confirmBulkAction = async () => {
+    if (!pendingBulkConfirmation) return;
+    const { action } = pendingBulkConfirmation;
+    const ok = await runBulkAction(action);
+    if (ok) setPendingBulkConfirmation(null);
+  };
+
+  const confirmDeleteProduct = async () => {
+    if (!productPendingDelete) return;
+    const product = productPendingDelete;
     await runAction(`/affiliate-products/${product.id}`, "Affiliate product deleted", { method: "DELETE" });
+    setProductPendingDelete(null);
   };
 
   const renderBulkActionsMenu = (triggerLabel = "More", includePrimaryActions = false) => (
@@ -827,7 +873,7 @@ export default function AdminAffiliateProducts() {
               <XCircle className="mr-2 h-4 w-4" />
               Unpublish selected
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => void runBulkAction("pause", { confirmMessage: `Pause ${selectedIds.length} selected affiliate product(s)?` })} disabled={bulkActionLoading !== null}>
+            <DropdownMenuItem onSelect={requestBulkPause} disabled={bulkActionLoading !== null}>
               <PauseCircle className="mr-2 h-4 w-4" />
               Pause selected
             </DropdownMenuItem>
@@ -870,7 +916,7 @@ export default function AdminAffiliateProducts() {
         <DropdownMenuSeparator />
         <DropdownMenuItem
           className="text-destructive focus:text-destructive"
-          onSelect={() => void runBulkAction("delete", { confirmMessage: `Delete ${selectedIds.length} selected affiliate product(s)? Published products will be blocked.` })}
+          onSelect={requestBulkDelete}
           disabled={bulkActionLoading !== null}
         >
           <Trash2 className="mr-2 h-4 w-4" />
@@ -1305,6 +1351,35 @@ export default function AdminAffiliateProducts() {
         </DialogContent>
       </Dialog>
 
+      <ConfirmActionDialog
+        open={Boolean(pendingBulkConfirmation)}
+        onOpenChange={(open) => {
+          if (!open && bulkActionLoading !== pendingBulkConfirmation?.action) setPendingBulkConfirmation(null);
+        }}
+        title={pendingBulkConfirmation?.title || "Confirm bulk action"}
+        description={pendingBulkConfirmation?.description}
+        confirmLabel={pendingBulkConfirmation?.confirmLabel || "Confirm"}
+        destructive={Boolean(pendingBulkConfirmation?.destructive)}
+        pending={bulkActionLoading === pendingBulkConfirmation?.action}
+        onConfirm={confirmBulkAction}
+      />
+
+      <ConfirmActionDialog
+        open={Boolean(productPendingDelete)}
+        onOpenChange={(open) => {
+          if (!open) setProductPendingDelete(null);
+        }}
+        title="Delete affiliate product"
+        description={
+          productPendingDelete
+            ? `Delete "${productPendingDelete.title}"? This cannot be undone. Published products should be unpublished first.`
+            : undefined
+        }
+        confirmLabel="Delete product"
+        destructive
+        onConfirm={confirmDeleteProduct}
+      />
+
       <div className="rounded-2xl border border-border bg-card p-5 space-y-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div className="relative flex-1 max-w-md">
@@ -1379,7 +1454,7 @@ export default function AdminAffiliateProducts() {
                 <XCircle className="h-4 w-4" />
                 Unpublish
               </Button>
-              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runBulkAction("pause", { confirmMessage: `Pause ${selectedIds.length} selected affiliate product(s)?` })} disabled={bulkActionLoading !== null}>
+              <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={requestBulkPause} disabled={bulkActionLoading !== null}>
                 <PauseCircle className="h-4 w-4" />
                 Pause
               </Button>
@@ -1545,7 +1620,7 @@ export default function AdminAffiliateProducts() {
                           </DropdownMenuItem>
                         ) : null}
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => void handleDelete(product)}>
+                        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setProductPendingDelete(product)}>
                           <Trash2 className="mr-2 h-4 w-4" />
                           Delete
                         </DropdownMenuItem>
