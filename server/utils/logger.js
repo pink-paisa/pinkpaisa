@@ -8,6 +8,10 @@ function redactValue(key, value) {
     return value.map((item) => redactValue(key, item));
   }
 
+  if (value instanceof Error) {
+    return serializeError(value);
+  }
+
   if (value && typeof value === "object") {
     return Object.entries(value).reduce((acc, [childKey, childValue]) => {
       acc[childKey] = redactValue(childKey, childValue);

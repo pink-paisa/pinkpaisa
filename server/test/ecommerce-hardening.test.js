@@ -33,6 +33,7 @@ const productController = require("../controllers/productController");
 const orderController = require("../controllers/orderController");
 const vendorOrderController = require("../controllers/vendorOrderController");
 const emailUtils = require("../utils/email");
+const logger = require("../utils/logger");
 const dailyBatchScheduler = require("../services/dailyBatchScheduler");
 const { _private: amazonReportPrivate } = require("../controllers/adminAmazonReportController");
 const { checkAffiliateProductLink } = require("../services/affiliateLinkChecker");
@@ -1749,6 +1750,28 @@ test("email log metadata redacts reset and verification URLs", () => {
     verificationToken: "[redacted]",
     flow: "admin-reset",
   });
+});
+
+test("logger omits enumerable request bodies from nested errors", () => {
+  const originalConsoleError = console.error;
+  let output = "";
+  console.error = (value) => {
+    output = String(value || "");
+  };
+
+  try {
+    const error = new SyntaxError("Malformed JSON");
+    error.body = '{"email":"admin@example.com","password":"do-not-log"}';
+    logger.error({ err: error }, "request failed");
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  const payload = JSON.parse(output);
+  assert.equal(payload.err.name, "SyntaxError");
+  assert.equal(payload.err.message, "Malformed JSON");
+  assert.equal(Object.hasOwn(payload.err, "body"), false);
+  assert.doesNotMatch(output, /do-not-log|admin@example\.com/);
 });
 
 test("affiliate link sweep scheduler runs only at the configured IST minute", () => {
