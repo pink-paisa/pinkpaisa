@@ -936,6 +936,89 @@ async function markRunFailed(runId, agentName, errorMessage) {
   await refreshBatchRun(run?.batch_run_id);
 }
 
+function buildOrphanPublishRecoveryUpdates(run = {}, attempt = null, recoveredAt = new Date()) {
+  const durableAttempt = mergeAttemptWithRunPublishState(attempt, run);
+  if (hasDurablePublishedAttempt(durableAttempt)) {
+    return {
+      status: "published",
+      current_stage: "published",
+      publish_status: "published",
+      review_status: "approved",
+      review_stage: null,
+      last_error: null,
+      published_at: run.published_at || durableAttempt.finished_at || recoveredAt,
+      instagram_creation_id: durableAttempt.creation_id || run.instagram_creation_id || null,
+      instagram_child_creation_ids: durableAttempt.child_creation_ids || run.instagram_child_creation_ids || [],
+      instagram_media_id: durableAttempt.media_id,
+      instagram_permalink: durableAttempt.permalink || run.instagram_permalink || null,
+    };
+  }
+
+  const approved = run.review_status === "approved";
+  return {
+    status: approved ? "approved_for_publish" : "waiting_review",
+    current_stage: approved ? "approved_for_publish" : "ready_for_review",
+    publish_status: approved ? "ready" : "draft",
+    review_stage: approved ? null : (run.review_stage || "draft"),
+    scheduled_for: null,
+    last_error: "Recovered an interrupted publish request before Instagram accepted any media.",
+  };
+}
+
+async function recoverOrphanedPublishingRuns({
+  olderThanMs = STALE_TASK_THRESHOLD_MS,
+  limit = 20,
+} = {}) {
+  const recoveredAt = new Date();
+  const cutoff = new Date(recoveredAt.getTime() - Math.max(Number(olderThanMs || 0), 60 * 1000));
+  const runs = await MarketingCampaignRun.find({
+    instagram_media_id: null,
+    archived_at: null,
+    $or: [{ status: "publishing" }, { publish_status: "publishing" }],
+    publish_attempted_at: { $lte: cutoff },
+  }).sort({ publish_attempted_at: 1 }).limit(Math.max(Number(limit || 1), 1));
+
+  const recoveredRunIds = [];
+  for (const run of runs) {
+    const activeTask = await AgentTask.exists({
+      ...buildPublishTaskMembershipQuery(run._id),
+      status: { $in: ["queued", "running"] },
+    });
+    if (activeTask) continue;
+
+    const attempt = await MarketingPublishAttempt.findOne({
+      $or: [{ campaign_run_id: run._id }, { group_run_ids: run._id }],
+    }).sort({ updated_at: -1 });
+    if (isUnresolvedPublishAttempt(attempt)) continue;
+
+    const updates = buildOrphanPublishRecoveryUpdates(run, attempt, recoveredAt);
+    const recovered = await MarketingCampaignRun.findOneAndUpdate(
+      {
+        _id: run._id,
+        instagram_media_id: null,
+        archived_at: null,
+        $or: [{ status: "publishing" }, { publish_status: "publishing" }],
+        publish_attempted_at: { $lte: cutoff },
+      },
+      { $set: updates },
+      { new: true }
+    );
+    if (!recovered) continue;
+    recoveredRunIds.push(String(recovered._id));
+    await recordPublishEvent(recovered, {
+      actionType: "reset",
+      status: "success",
+      metadata: { automatic_orphan_recovery: true },
+    });
+    await refreshBatchRun(recovered.batch_run_id);
+  }
+
+  if (recoveredRunIds.length) {
+    logger.warn({ recoveredRunIds }, "recovered orphaned campaign publish states");
+  }
+  return { recovered_count: recoveredRunIds.length, campaign_run_ids: recoveredRunIds };
+}
+
 async function recoverStaleRunningTasks({
   campaignRunId = null,
   force = false,
@@ -1629,6 +1712,9 @@ async function processQueueLane(lane, limit = TASK_LANES[lane]?.concurrency || 1
 async function processQueuedTasks(maxTasks = 5) {
   await recoverStaleRunningTasks().catch((error) => {
     logger.error({ err: error }, "failed to recover stale marketing tasks");
+  });
+  await recoverOrphanedPublishingRuns().catch((error) => {
+    logger.error({ err: error }, "failed to recover orphaned campaign publish states");
   });
   const lanes = Object.keys(TASK_LANES);
   const results = await Promise.all(lanes.map((lane) => processQueueLane(
@@ -3193,6 +3279,7 @@ module.exports = {
   publishCampaignRunsAsCarousel,
   publishCampaignRunNow,
   purgeCampaignRun,
+  recoverOrphanedPublishingRuns,
   recoverStaleRunningTasks,
   regenerateCampaignRun,
   resetStuckCampaignRun,
@@ -3222,6 +3309,7 @@ module.exports = {
     getActiveLeaseFilter,
     buildRunPublishReadinessSnapshot,
     buildLaneClaimQuery,
+    buildOrphanPublishRecoveryUpdates,
     getQueueLane,
     getRunNextAction,
     getRunPublishAssetUrls,

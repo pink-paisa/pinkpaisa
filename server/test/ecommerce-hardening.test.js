@@ -299,6 +299,30 @@ test("archive membership includes queued grouped carousel tasks", () => {
   ]);
 });
 
+test("orphaned publish recovery never republishes and returns unaccepted requests to review", () => {
+  const recoveredAt = new Date("2026-07-14T12:00:00.000Z");
+  assert.deepEqual(marketingPrivate.buildOrphanPublishRecoveryUpdates({
+    review_status: "approved",
+    instagram_media_id: null,
+  }, null, recoveredAt), {
+    status: "approved_for_publish",
+    current_stage: "approved_for_publish",
+    publish_status: "ready",
+    review_stage: null,
+    scheduled_for: null,
+    last_error: "Recovered an interrupted publish request before Instagram accepted any media.",
+  });
+
+  const published = marketingPrivate.buildOrphanPublishRecoveryUpdates({
+    review_status: "approved",
+    instagram_media_id: "media-from-run",
+    instagram_permalink: "https://www.instagram.com/p/recovered/",
+  }, null, recoveredAt);
+  assert.equal(published.status, "published");
+  assert.equal(published.instagram_media_id, "media-from-run");
+  assert.equal(published.published_at, recoveredAt);
+});
+
 test("campaign asset purge checks every persisted campaign asset reference", () => {
   const query = marketingPrivate.buildCampaignAssetReferenceQuery("https://pinkpaisa.in/uploads/generated/campaigns/a.png", "run-1");
   assert.deepEqual(query._id, { $ne: "run-1" });
