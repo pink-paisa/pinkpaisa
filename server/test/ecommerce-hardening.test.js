@@ -7,10 +7,15 @@ const PendingPayment = require("../models/PendingPayment");
 const Order = require("../models/Order");
 const OrderItem = require("../models/OrderItem");
 const AmazonReportRow = require("../models/AmazonReportRow");
+const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
+const marketingAgentOrchestrator = require("../services/marketingAgentOrchestrator");
+const marketingAgents = require("../services/marketingAgents");
 const {
   validateAffiliateProductForCampaign,
-} = require("../services/marketingAgentOrchestrator");
+} = marketingAgentOrchestrator;
+const marketingPrivate = marketingAgentOrchestrator._private;
+const marketingAgentsPrivate = marketingAgents._private;
 const {
   parseCookieHeader,
   getCustomerSessionToken,
@@ -30,6 +35,7 @@ const { checkAffiliateProductLink } = require("../services/affiliateLinkChecker"
 const { getCreatorsApiEnvStatus } = require("../utils/affiliateDataSettings");
 const creatorsApiService = require("../services/amazonCreatorsApiService");
 const affiliateProductController = require("../controllers/affiliateProductController");
+const wishlistController = require("../controllers/wishlistController");
 const authPrivate = authRoute._private;
 const productPrivate = productController._private;
 const orderPrivate = orderController._private;
@@ -37,6 +43,9 @@ const vendorOrderPrivate = vendorOrderController._private;
 const emailPrivate = emailUtils._private;
 const creatorsApiPrivate = creatorsApiService._private;
 const affiliateProductPrivate = affiliateProductController._private;
+const wishlistPrivate = wishlistController._private;
+const openaiImageProviderPrivate = require("../services/imageProviders/openaiProvider")._private;
+const { getImageProviderRegistry } = require("../services/imageProviders/registry");
 
 test("pending payment schema supports processing lifecycle and ttl cleanup", () => {
   const statusPath = PendingPayment.schema.path("status");
@@ -128,12 +137,47 @@ test("marketing campaign schema supports affiliate product source events", () =>
   ]);
 });
 
+test("marketing publish event schema records audit fields", () => {
+  const actionPath = MarketingCampaignPublishEvent.schema.path("action_type");
+  const statusPath = MarketingCampaignPublishEvent.schema.path("status");
+
+  assert.ok(actionPath.enumValues.includes("publish"));
+  assert.ok(actionPath.enumValues.includes("schedule"));
+  assert.ok(actionPath.enumValues.includes("carousel_publish"));
+  assert.ok(actionPath.enumValues.includes("failed_publish"));
+  assert.deepEqual(statusPath.enumValues, ["started", "success", "failed", "skipped"]);
+
+  const indexes = MarketingCampaignPublishEvent.schema.indexes().map(([index]) => JSON.stringify(index));
+  assert.ok(indexes.includes(JSON.stringify({ campaign_run_id: 1, created_at: -1 })));
+});
+
+test("OpenAI image provider omits unsupported input fidelity for gpt-image-2", () => {
+  assert.equal(openaiImageProviderPrivate.supportsInputFidelity("gpt-image-2"), false);
+  assert.equal(openaiImageProviderPrivate.supportsInputFidelity("gpt-image-1"), true);
+});
+
+test("OpenAI image provider registry includes current GPT Image API models", () => {
+  const openaiProvider = getImageProviderRegistry().find((provider) => provider.key === "openai");
+  assert.ok(openaiProvider, "OpenAI provider should be registered");
+  assert.deepEqual(openaiProvider.models.map((model) => model.id), [
+    "gpt-image-1-mini",
+    "gpt-image-1",
+    "gpt-image-1.5",
+    "gpt-image-2",
+  ]);
+});
+
 test("affiliate campaign validation accepts active assigned affiliate products", () => {
+  process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa07-21";
   assert.equal(validateAffiliateProductForCampaign({
     _id: "affiliate-product-id",
     source_type: "admin",
     is_affiliate: true,
-    affiliate_url: "https://partner.example/product",
+    affiliate_url: "https://www.amazon.in/example/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+    affiliate_marketplace: "amazon_in",
+    affiliate_tag: "pinkpaisa07-21",
+    affiliate_compliance_status: "compliant",
+    affiliate_link_check_status: "ok",
     status: "active",
     is_visible: true,
     category: "Beauty",
@@ -142,11 +186,16 @@ test("affiliate campaign validation accepts active assigned affiliate products",
 });
 
 test("affiliate campaign validation rejects hidden uncategorized or url-less products", () => {
+  process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa07-21";
   const validProduct = {
     _id: "affiliate-product-id",
     source_type: "admin",
     is_affiliate: true,
-    affiliate_url: "https://partner.example/product",
+    affiliate_url: "https://www.amazon.in/example/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+    affiliate_marketplace: "amazon_in",
+    affiliate_tag: "pinkpaisa07-21",
+    affiliate_compliance_status: "compliant",
+    affiliate_link_check_status: "ok",
     status: "active",
     is_visible: true,
     category: "Beauty",
@@ -165,6 +214,212 @@ test("affiliate campaign validation rejects hidden uncategorized or url-less pro
     () => validateAffiliateProductForCampaign({ ...validProduct, affiliate_url: "" }),
     /affiliate URL/,
   );
+  assert.throws(
+    () => validateAffiliateProductForCampaign({ ...validProduct, affiliate_tag: "" }),
+    /stored Amazon Associate tag/,
+  );
+  assert.throws(
+    () => validateAffiliateProductForCampaign({ ...validProduct, affiliate_link_check_status: "failed", affiliate_link_failure_reason: "Amazon returned an error" }),
+    /Amazon returned an error/,
+  );
+});
+
+test("campaign catalog product serializer exposes readiness without affiliate prices", () => {
+  const serialized = marketingAgentOrchestrator.serialiseCatalogProduct({
+    _id: "product-id",
+    title: "Affiliate Pick",
+    slug: "affiliate-pick",
+    source_type: "admin",
+    status: "active",
+    is_visible: true,
+    is_affiliate: true,
+    featured_image: "https://cdn.example.com/product.jpg",
+    price: 999,
+    sale_price: 799,
+    category: "Beauty",
+    subcategory: "Haircare",
+    affiliate_compliance_status: "needs_review",
+    affiliate_link_check_status: "unchecked",
+    affiliate_tag: "",
+    affiliate_url: "",
+  });
+
+  assert.equal(serialized.is_affiliate, true);
+  assert.equal(serialized.price, null);
+  assert.equal(serialized.sale_price, null);
+  assert.equal(serialized.readiness_status, "blocked");
+  assert.ok(serialized.readiness.blockers.some((blocker) => blocker.code === "affiliate_non_compliant"));
+  assert.ok(serialized.readiness.blockers.some((blocker) => blocker.code === "affiliate_tag_missing"));
+});
+
+test("daily batch helper lets new or empty running batches claim queued runs", () => {
+  assert.equal(marketingPrivate.shouldReturnExistingRunningBatch({ status: "running", run_ids: ["run-id"] }, false), true);
+  assert.equal(marketingPrivate.shouldReturnExistingRunningBatch({ status: "running", total_runs: 1 }, false), true);
+  assert.equal(marketingPrivate.shouldReturnExistingRunningBatch({ status: "running", run_ids: [] }, false), false);
+  assert.equal(marketingPrivate.shouldReturnExistingRunningBatch({ status: "running", run_ids: ["run-id"] }, true), false);
+  assert.equal(marketingPrivate.shouldReturnExistingRunningBatch({ status: "completed", run_ids: ["run-id"] }, false), false);
+});
+
+test("affiliate campaign captions include disclosure and avoid manual Amazon price claims", async () => {
+  const affiliateRun = {
+    source_event: "affiliate_product.published",
+    campaign_id: "cmp-test",
+    brief_json: {
+      title: "Haircare Pick",
+      slug: "haircare-pick",
+      is_affiliate: true,
+      product_url: "https://pinkpaisa.in/product/haircare-pick",
+      affiliate_url: "https://www.amazon.in/example/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+      category: "Beauty",
+      subcategory: "Haircare",
+      pricing: { price: 0, sale_price: null, currency: "INR" },
+      descriptions: { short: "A curated haircare pick.", full: "" },
+      constraints: { status: "active", stock_quantity: 0 },
+      tags: ["Affiliate"],
+      images: ["https://cdn.example.com/product.jpg"],
+      affiliate: { source_label: "Amazon.in" },
+    },
+    strategy_json: {
+      angle: "editorial partner pick discovery",
+      audience: "Women looking for premium self-care",
+      cta: "View partner pick",
+    },
+    creative_json: {
+      cta_text: "View partner pick",
+      content_type: "single_image",
+      primary_asset_url: "https://cdn.example.com/creative.jpg",
+      asset_urls: ["https://cdn.example.com/creative.jpg"],
+    },
+  };
+
+  const caption = await marketingAgents.runCaptionAgent(affiliateRun);
+  assert.match(caption.instagram.long_caption, /^Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned/);
+  assert.doesNotMatch(caption.instagram.long_caption, /₹0|Core price|Partner-listed/i);
+
+  const tracking = await marketingAgents.runTrackingAgent({
+    ...affiliateRun,
+    caption_json: caption,
+    compliance_json: { status: "approved" },
+  });
+  assert.match(tracking.publish_payload.caption, /^Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned/);
+
+  const nonAffiliateCaption = await marketingAgents.runCaptionAgent({
+    ...affiliateRun,
+    source_event: "admin_product.published",
+    brief_json: {
+      ...affiliateRun.brief_json,
+      is_affiliate: false,
+      pricing: { price: 999, sale_price: null, currency: "INR" },
+    },
+  });
+  assert.equal(marketingAgentsPrivate.hasAffiliateInstagramDisclosure(nonAffiliateCaption.instagram.long_caption), false);
+});
+
+test("publish readiness blocks unsafe affiliate products and non-HTTPS media", () => {
+  process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa07-21";
+  const run = {
+    _id: "run-id",
+    campaign_id: "cmp-test",
+    source_event: "affiliate_product.published",
+    public_product_id: "product-id",
+    review_status: "approved",
+    publish_status: "ready",
+    status: "approved_for_publish",
+    tracking_json: {
+      publish_payload: {
+        asset_urls: ["https://cdn.example.com/creative.jpg"],
+        caption: marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE,
+      },
+    },
+  };
+  const product = {
+    _id: "product-id",
+    title: "Compliant Affiliate",
+    source_type: "admin",
+    is_affiliate: true,
+    status: "active",
+    is_visible: true,
+    category: "Beauty",
+    subcategory: "Haircare",
+    affiliate_url: "https://www.amazon.in/example/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+    affiliate_marketplace: "amazon_in",
+    affiliate_tag: "pinkpaisa07-21",
+    affiliate_compliance_status: "compliant",
+    affiliate_link_check_status: "ok",
+  };
+
+  assert.equal(marketingPrivate.buildRunPublishReadinessSnapshot(run, product, { productWasFetched: true }).can_publish, true);
+
+  const cases = [
+    [{ ...product, is_visible: false }, "product_hidden"],
+    [{ ...product, status: "inactive" }, "product_inactive"],
+    [{ ...product, category: "Uncategorized" }, "product_uncategorized"],
+    [{ ...product, affiliate_compliance_status: "needs_review" }, "affiliate_not_compliant"],
+    [{ ...product, affiliate_compliance_status: "paused" }, "affiliate_paused"],
+    [{ ...product, affiliate_tag: "" }, "affiliate_tag_missing"],
+    [{ ...product, affiliate_url: "https://www.amazon.in/example/dp/B0ABCDEFGH" }, "amazon_affiliate_tag_missing"],
+    [{ ...product, affiliate_link_check_status: "failed", affiliate_link_failure_reason: "Link failed" }, "affiliate_link_failed"],
+  ];
+
+  for (const [unsafeProduct, code] of cases) {
+    const readiness = marketingPrivate.buildRunPublishReadinessSnapshot(run, unsafeProduct, { productWasFetched: true });
+    assert.equal(readiness.can_publish, false, code);
+    assert.ok(readiness.blockers.some((blocker) => blocker.code === code), code);
+  }
+
+  const nonHttps = marketingPrivate.buildRunPublishReadinessSnapshot({
+    ...run,
+    tracking_json: { publish_payload: { asset_urls: ["http://cdn.example.com/creative.jpg"] } },
+  }, product, { productWasFetched: true });
+  assert.equal(nonHttps.can_publish, false);
+  assert.ok(nonHttps.blockers.some((blocker) => blocker.code === "non_https_media_url"));
+});
+
+test("carousel readiness reports unsafe selected affiliate runs before publishing", () => {
+  process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa07-21";
+  const makeRun = (id, productId) => ({
+    _id: id,
+    campaign_id: `cmp-${id}`,
+    product_title: `Product ${id}`,
+    source_event: "affiliate_product.published",
+    public_product_id: productId,
+    review_status: "approved",
+    publish_status: "ready",
+    status: "approved_for_publish",
+    tracking_json: {
+      publish_payload: {
+        asset_urls: ["https://cdn.example.com/creative.jpg"],
+        caption: marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE,
+      },
+    },
+  });
+  const compliantProduct = {
+    _id: "product-1",
+    source_type: "admin",
+    is_affiliate: true,
+    status: "active",
+    is_visible: true,
+    category: "Beauty",
+    subcategory: "Haircare",
+    affiliate_url: "https://www.amazon.in/example/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+    affiliate_marketplace: "amazon_in",
+    affiliate_tag: "pinkpaisa07-21",
+    affiliate_compliance_status: "compliant",
+    affiliate_link_check_status: "ok",
+  };
+  const hiddenProduct = { ...compliantProduct, _id: "product-2", is_visible: false };
+  const blockers = marketingPrivate.buildCarouselReadinessBlockers(
+    [makeRun("1", "product-1"), makeRun("2", "product-2")],
+    new Map([
+      ["product-1", compliantProduct],
+      ["product-2", hiddenProduct],
+    ]),
+  );
+
+  assert.equal(blockers.length, 1);
+  assert.equal(blockers[0].product_title, "Product 2");
+  assert.equal(blockers[0].code, "product_hidden");
+  assert.match(marketingPrivate.buildBulkCarouselCaption([makeRun("1", "product-1")]), /^Affiliate disclosure: As an Amazon Associate/);
 });
 
 test("customer session helpers prefer session cookie and fall back to bearer auth", () => {
@@ -490,6 +745,46 @@ test("public affiliate serialization requires fresh API expiry before showing Am
   }, { publicView: true });
   assert.equal(expired.featured_image, null);
   assert.equal(expired.price, 0);
+});
+
+test("wishlist serialization hides affiliate prices without fresh API-approved data", () => {
+  const manualAffiliate = wishlistPrivate.serializeProduct({
+    _id: "affiliate-product-id",
+    slug: "affiliate-pick",
+    title: "Affiliate Pick",
+    featured_image: "https://cdn.example.com/product.jpg",
+    price: 999,
+    sale_price: 799,
+    stock_quantity: 25,
+    is_affiliate: true,
+    affiliate_url: "https://www.amazon.in/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+    affiliate_data_source: "manual",
+    affiliate_compliance_status: "compliant",
+  });
+
+  assert.equal(manualAffiliate.is_affiliate, true);
+  assert.equal(manualAffiliate.price, 0);
+  assert.equal(manualAffiliate.sale_price, null);
+  assert.equal(manualAffiliate.stock_quantity, 0);
+
+  const freshApiAffiliate = wishlistPrivate.serializeProduct({
+    _id: "affiliate-product-id",
+    slug: "affiliate-pick",
+    title: "Affiliate Pick",
+    featured_image: "https://cdn.example.com/product.jpg",
+    price: 999,
+    sale_price: 799,
+    stock_quantity: 25,
+    is_affiliate: true,
+    affiliate_url: "https://www.amazon.in/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+    affiliate_data_source: "creators_api",
+    affiliate_data_expires_at: new Date(Date.now() + 60_000).toISOString(),
+    affiliate_compliance_status: "compliant",
+  });
+
+  assert.equal(freshApiAffiliate.price, 999);
+  assert.equal(freshApiAffiliate.sale_price, 799);
+  assert.equal(freshApiAffiliate.stock_quantity, 0);
 });
 
 test("admin affiliate CRUD cannot promote manual submissions into API-sourced content", () => {

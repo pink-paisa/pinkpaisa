@@ -11,6 +11,8 @@ const { generateAiInstagramCreative } = require("./instagramAiCreativeService");
 
 const DEFAULT_FRONTEND_URL = "https://www.pinkpaisa.in";
 const BLOCKED_CLAIMS = ["cure", "guaranteed", "instant results", "100% safe", "risk-free", "miracle", "clinically proven"];
+const AFFILIATE_INSTAGRAM_DISCLOSURE = "Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases. #CommissionsEarned";
+const AFFILIATE_DISCLOSURE_RE = /as an amazon associate i earn from qualifying purchases/i;
 
 function trimText(value) {
   return String(value || "").trim();
@@ -51,6 +53,16 @@ function getAffiliateSourceLabel(brief) {
   );
 }
 
+function hasAffiliateInstagramDisclosure(value) {
+  return AFFILIATE_DISCLOSURE_RE.test(String(value || ""));
+}
+
+function ensureAffiliateInstagramDisclosure(value, isAffiliate = false) {
+  const caption = trimText(value);
+  if (!isAffiliate || !caption || hasAffiliateInstagramDisclosure(caption)) return caption;
+  return `${AFFILIATE_INSTAGRAM_DISCLOSURE}\n\n${caption}`;
+}
+
 function buildAudience(category, tags) {
   const source = `${trimText(category)} ${Array.isArray(tags) ? tags.join(" ") : ""}`.toLowerCase();
   if (source.includes("nutrition") || source.includes("supplement")) return "Women building healthier daily routines with a nutrition focus";
@@ -68,13 +80,16 @@ function buildAngle(brief) {
 }
 
 function buildHooks(brief, strategy) {
-  const priceLine = brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)
+  const hasSalePrice = brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price);
+  const priceLine = brief.is_affiliate
+    ? "Check current price on Amazon from the Pink Paisa product page"
+    : hasSalePrice
     ? `Now at ${formatPrice(brief.pricing.sale_price)}`
     : `Explore it at ${formatPrice(brief.pricing.price)}`;
   return [
     `A softer way to upgrade your ${trimText(brief.category || "wellness")} routine.`,
     `${trimText(brief.title)} is built for everyday use, not just special occasions.`,
-    brief.is_affiliate ? `${priceLine} through a partner pick.` : `${priceLine} on Pink Paisa.`,
+    brief.is_affiliate ? `${priceLine}.` : `${priceLine} on Pink Paisa.`,
     `Best for: ${strategy.audience}.`,
   ];
 }
@@ -97,14 +112,13 @@ function createIssue(severity, code, message) {
 }
 
 function buildShortOfferLine(brief) {
-  if (brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)) {
-    return brief.is_affiliate
-      ? `Partner-listed from ${formatPrice(brief.pricing.sale_price)}.`
-      : `Was ${formatPrice(brief.pricing.price)}, now ${formatPrice(brief.pricing.sale_price)}.`;
+  if (brief.is_affiliate) {
+    return "Check current price on Amazon from the Pink Paisa product page.";
   }
-  return brief.is_affiliate
-    ? `Partner-listed at ${formatPrice(brief.pricing.price)}.`
-    : `Available now at ${formatPrice(brief.pricing.price)}.`;
+  if (brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)) {
+    return `Was ${formatPrice(brief.pricing.price)}, now ${formatPrice(brief.pricing.sale_price)}.`;
+  }
+  return `Available now at ${formatPrice(brief.pricing.price)}.`;
 }
 
 async function runIntakeAgent(run) {
@@ -241,7 +255,7 @@ async function runStrategyAgent(run) {
   const brief = run.brief_json;
   if (!brief) throw new Error("Product brief missing for strategy agent");
 
-  const hasOffer = brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price);
+  const hasOffer = !brief.is_affiliate && brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price);
   const lowStock = !brief.is_affiliate && Number(brief.constraints.stock_quantity || 0) <= 10;
   const goal = hasOffer || lowStock ? "sales" : "awareness";
   const audience = buildAudience(brief.category, brief.tags);
@@ -258,7 +272,9 @@ async function runStrategyAgent(run) {
     angle,
     cta,
     hooks: buildHooks(brief, { audience }),
-    offer_summary: hasOffer
+    offer_summary: brief.is_affiliate
+      ? "Affiliate partner pick. Current Amazon price is checked on Amazon."
+      : hasOffer
       ? `${formatPrice(brief.pricing.price)} down to ${formatPrice(brief.pricing.sale_price)}`
       : `Core price ${formatPrice(brief.pricing.price)}`,
     content_pieces: ["instagram_creative", "instagram_caption"],
@@ -306,18 +322,21 @@ async function runCaptionAgent(run) {
     : `${brief.title} is here for a more intentional ${String(brief.category || "wellness").toLowerCase()} ritual.`;
   const sourceLine = brief.is_affiliate ? `Partner source: ${getAffiliateSourceLabel(brief)}.` : null;
 
+  const shortCaption = `${captionLead} ${priceLine} ${creative.cta_text || strategy.cta}.`;
+  const longCaption = [
+    brief.title,
+    coreDescription,
+    `Why we like it: ${strategy.angle}.`,
+    priceLine,
+    sourceLine,
+    `Made for ${strategy.audience.toLowerCase()}.`,
+    `${creative.cta_text || strategy.cta}.`,
+  ].filter(Boolean).join("\n\n");
+
   return {
     instagram: {
-      short_caption: `${captionLead} ${priceLine} ${creative.cta_text || strategy.cta}.`,
-      long_caption: [
-        brief.title,
-        coreDescription,
-        `Why we like it: ${strategy.angle}.`,
-        priceLine,
-        sourceLine,
-        `Made for ${strategy.audience.toLowerCase()}.`,
-        `${creative.cta_text || strategy.cta}.`,
-      ].filter(Boolean).join("\n\n"),
+      short_caption: ensureAffiliateInstagramDisclosure(shortCaption, brief.is_affiliate),
+      long_caption: ensureAffiliateInstagramDisclosure(longCaption, brief.is_affiliate),
       hashtags: buildHashtags(brief),
       cta: creative.cta_text || strategy.cta,
     },
@@ -340,9 +359,15 @@ async function runComplianceAgent(run) {
   if (brief.is_affiliate && !brief.affiliate_url) {
     issues.push(createIssue("blocking", "missing_affiliate_url", "Affiliate campaigns require a partner affiliate URL in campaign metadata."));
   }
+  if (brief.is_affiliate && !hasAffiliateInstagramDisclosure([
+    captions.instagram?.short_caption,
+    captions.instagram?.long_caption,
+  ].filter(Boolean).join("\n\n"))) {
+    issues.push(createIssue("blocking", "missing_affiliate_disclosure", "Affiliate Instagram captions must include the Amazon Associate disclosure."));
+  }
   if (!Array.isArray(brief.images) || brief.images.length === 0) issues.push(createIssue("blocking", "missing_images", "At least one product image is required."));
   if (!Array.isArray(creative.asset_urls) || creative.asset_urls.length === 0) issues.push(createIssue("blocking", "missing_creative_assets", "The Instagram creative did not generate any publishable image assets."));
-  if (brief.pricing.sale_price != null && Number(brief.pricing.sale_price) >= Number(brief.pricing.price)) {
+  if (!brief.is_affiliate && brief.pricing.sale_price != null && Number(brief.pricing.sale_price) >= Number(brief.pricing.price)) {
     issues.push(createIssue("blocking", "invalid_sale_price", "Sale price must be lower than the base price."));
   }
   if (!trimText(brief.descriptions.short) && !trimText(brief.descriptions.full)) {
@@ -416,7 +441,10 @@ async function runTrackingAgent(run) {
       channel: "instagram",
       content_type: creative.content_type,
       asset_urls: (creative.asset_urls || []).map((url) => resolvePublicUrl(url)),
-      caption: `${captions.instagram?.long_caption || captions.instagram?.short_caption || ""}\n\n${instagramFeedLink}\n\n${(captions.instagram?.hashtags || []).join(" ")}`.trim(),
+      caption: ensureAffiliateInstagramDisclosure(
+        `${captions.instagram?.long_caption || captions.instagram?.short_caption || ""}\n\n${instagramFeedLink}\n\n${(captions.instagram?.hashtags || []).join(" ")}`.trim(),
+        brief.is_affiliate,
+      ),
       tracked_url: instagramFeedLink,
       cta: captions.instagram?.cta || strategy.cta,
     },
@@ -432,13 +460,19 @@ async function runPublishPreparationAgent(run) {
     channel: "instagram",
     content_type: creative.content_type,
     asset_urls: tracking.publish_payload.asset_urls || [],
-    caption: tracking.publish_payload.caption,
+    caption: ensureAffiliateInstagramDisclosure(
+      tracking.publish_payload.caption,
+      Boolean(run.brief_json?.is_affiliate || run.source_event === "affiliate_product.published"),
+    ),
     tracked_url: tracking.publish_payload.tracked_url,
     cta: tracking.publish_payload.cta,
   };
 }
 
 module.exports = {
+  AFFILIATE_INSTAGRAM_DISCLOSURE,
+  ensureAffiliateInstagramDisclosure,
+  hasAffiliateInstagramDisclosure,
   runIntakeAgent,
   runStrategyAgent,
   runCreativeAgent,
@@ -446,4 +480,9 @@ module.exports = {
   runComplianceAgent,
   runTrackingAgent,
   runPublishPreparationAgent,
+  _private: {
+    buildShortOfferLine,
+    ensureAffiliateInstagramDisclosure,
+    hasAffiliateInstagramDisclosure,
+  },
 };

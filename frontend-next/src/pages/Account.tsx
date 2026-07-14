@@ -14,6 +14,8 @@ import { Heart, Package2, Wallet, ShoppingBag, MapPin } from "lucide-react";
 import TextActionDialog from "@/components/ui/text-action-dialog";
 import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 import { useWishlist } from "@/hooks/useWishlist";
+import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
+import { hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
 
 const formatPrice = (n: number) => `${String.fromCharCode(8377)}${Number(n || 0).toLocaleString("en-IN")}`;
 type AccountTab = "profile" | "orders" | "wishlist" | "wallet";
@@ -165,6 +167,12 @@ const Account = () => {
         price: item.product.price,
         sale_price: item.product.sale_price,
         stock_quantity: item.product.stock_quantity,
+        is_affiliate: item.product.is_affiliate,
+        affiliate_url: item.product.affiliate_url,
+        affiliate_data_source: item.product.affiliate_data_source,
+        affiliate_data_last_refreshed_at: item.product.affiliate_data_last_refreshed_at,
+        affiliate_data_expires_at: item.product.affiliate_data_expires_at,
+        affiliate_compliance_status: item.product.affiliate_compliance_status,
       });
       toast.success("Removed from wishlist");
     } catch (error) {
@@ -277,42 +285,58 @@ const Account = () => {
 
           {tab === "wishlist" && (
             <div className="space-y-4">
-              {wishlistItems.length === 0 ? <div className="rounded-2xl border border-dashed border-border p-10 text-center text-muted-foreground">Your wishlist is empty.</div> : wishlistItems.map((item) => (
-                <div key={item.id} className="flex flex-col gap-4 rounded-2xl border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="h-16 w-16 overflow-hidden rounded-2xl bg-accent">{item.product.featured_image ? <img src={item.product.featured_image} alt={item.product.title} className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center text-primary"><ShoppingBag className="h-5 w-5" /></div>}</div>
-                    <div>
-                      <p className="font-medium">{item.product.title}</p>
-                      <p className="text-sm text-muted-foreground">{formatPrice(item.product.sale_price ?? item.product.price)}</p>
+              {wishlistItems.length === 0 ? <div className="rounded-2xl border border-dashed border-border p-10 text-center text-muted-foreground">Your wishlist is empty.</div> : wishlistItems.map((item) => {
+                const isAffiliate = Boolean(item.product.is_affiliate && item.product.affiliate_url);
+                const showAffiliatePrice = hasVisibleAffiliatePrice(item.product);
+                return (
+                  <div key={item.id} className="flex flex-col gap-4 rounded-2xl border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className="h-16 w-16 overflow-hidden rounded-2xl bg-accent">{item.product.featured_image ? <img src={item.product.featured_image} alt={item.product.title} className="h-full w-full object-cover" /> : <div className="flex h-full w-full items-center justify-center text-primary"><ShoppingBag className="h-5 w-5" /></div>}</div>
+                      <div>
+                        <p className="font-medium">{item.product.title}</p>
+                        {isAffiliate ? (
+                          <p className="text-sm text-muted-foreground">
+                            {showAffiliatePrice ? `${formatPrice(item.product.sale_price ?? item.product.price)} - confirm on Amazon` : "Check price on Amazon"}
+                          </p>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">{formatPrice(item.product.sale_price ?? item.product.price)}</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" className="rounded-2xl" asChild><Link href={`/product/${item.product.slug}`}>View</Link></Button>
+                      {isAffiliate ? (
+                        item.product.affiliate_compliance_status === "compliant" ? (
+                          <AffiliateCta product={item.product} size="sm" variant="secondary" className="rounded-2xl" />
+                        ) : null
+                      ) : (
+                        <Button
+                          variant="outline"
+                          className="rounded-2xl"
+                          onClick={() =>
+                            addItem(
+                              {
+                                id: item.product.id,
+                                title: item.product.title,
+                                price: item.product.sale_price ?? item.product.price,
+                                priceMax: item.product.price,
+                                format: "Physical Product",
+                                image_url: item.product.featured_image,
+                                slug: item.product.slug,
+                                stock_quantity_at_add: item.product.stock_quantity,
+                              },
+                              1,
+                            )
+                          }
+                        >
+                          Add to cart
+                        </Button>
+                      )}
+                      <Button variant="ghost" className="rounded-2xl text-rose-500" onClick={() => removeWishlist(item)}>Remove</Button>
                     </div>
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" className="rounded-2xl" asChild><Link href={`/product/${item.product.slug}`}>View</Link></Button>
-                    <Button
-                      variant="outline"
-                      className="rounded-2xl"
-                      onClick={() =>
-                        addItem(
-                          {
-                            id: item.product.id,
-                            title: item.product.title,
-                            price: item.product.sale_price ?? item.product.price,
-                            priceMax: item.product.price,
-                            format: "Physical Product",
-                            image_url: item.product.featured_image,
-                            slug: item.product.slug,
-                            stock_quantity_at_add: item.product.stock_quantity,
-                          },
-                          1,
-                        )
-                      }
-                    >
-                      Add to cart
-                    </Button>
-                    <Button variant="ghost" className="rounded-2xl text-rose-500" onClick={() => removeWishlist(item)}>Remove</Button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 

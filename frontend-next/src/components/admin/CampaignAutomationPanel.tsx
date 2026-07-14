@@ -102,6 +102,13 @@ export const DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY: CampaignImageProviderRegi
           cost_tier: "medium",
         },
         {
+          id: "gpt-image-1.5",
+          label: "GPT Image 1.5",
+          supports_reference_image: true,
+          supports_text_to_image: true,
+          cost_tier: "medium",
+        },
+        {
           id: "gpt-image-2",
           label: "GPT Image 2",
           supports_reference_image: true,
@@ -189,7 +196,7 @@ const CampaignAutomationPanel = ({
           <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Campaign automation</p>
           <h3 className="mt-2 font-serif text-2xl">Manual or automatic posting mode</h3>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-            Manual mode keeps today&apos;s approval flow. Automatic mode runs the morning batch in IST, approves successful drafts, and publishes them without admin review.
+            Manual mode keeps every draft in review. Automatic mode can publish non-affiliate drafts after generation, but Amazon affiliate campaigns always stop for admin review.
           </p>
         </div>
         <Button className="rounded-2xl" onClick={onSave} disabled={loading || saving}>
@@ -233,7 +240,7 @@ const CampaignAutomationPanel = ({
                 <p className="font-medium">Automatic posting</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Process queued products at the scheduled time and auto-publish successful runs.
+                Process queued products at the scheduled time. Non-affiliate runs may auto-publish; affiliate runs still require admin approval.
               </p>
             </button>
           </div>

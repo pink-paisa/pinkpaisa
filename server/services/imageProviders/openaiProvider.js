@@ -12,7 +12,7 @@ function trimText(value) {
 }
 
 function supportsInputFidelity(model) {
-  return /^gpt-image-2$/i.test(trimText(model));
+  return /^gpt-image-1$/i.test(trimText(model));
 }
 
 async function parseGeneratedImageBuffer(responseJson) {
@@ -99,4 +99,7 @@ async function generateImage({ model, prompt, sourceImageBuffer, size, quality }
 
 module.exports = {
   generateImage,
+  _private: {
+    supportsInputFidelity,
+  },
 };

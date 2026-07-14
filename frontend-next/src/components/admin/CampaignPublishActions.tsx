@@ -7,6 +7,12 @@ type CampaignRunLite = {
   status: string;
   review_status?: string | null;
   publish_status?: string | null;
+  publish_readiness?: {
+    can_publish: boolean;
+    blockers: Array<{ code: string; message: string }>;
+    warnings: Array<{ code: string; message: string }>;
+    checked_at?: string | null;
+  } | null;
 };
 
 const CampaignPublishActions = ({
@@ -22,6 +28,8 @@ const CampaignPublishActions = ({
   onPostNow,
   onSchedule,
   canResetStuck = false,
+  instagramConnected = true,
+  instagramConnectionWarning = null,
 }: {
   run: CampaignRunLite;
   lastError?: string | null;
@@ -35,9 +43,20 @@ const CampaignPublishActions = ({
   onPostNow: () => void;
   onSchedule: (scheduledFor: string) => void;
   canResetStuck?: boolean;
+  instagramConnected?: boolean;
+  instagramConnectionWarning?: string | null;
 }) => {
   const [scheduledFor, setScheduledFor] = useState("");
-  const canPublish = run.review_status === "approved" && ["ready", "failed", "scheduled", "draft"].includes(run.publish_status || "");
+  const readinessBlockers = run.publish_readiness?.blockers || [];
+  const readinessWarnings = run.publish_readiness?.warnings || [];
+  const publishBlockers = [
+    ...readinessBlockers,
+    ...(!instagramConnected ? [{ code: "instagram_not_connected", message: "Instagram must be connected before publishing." }] : []),
+  ];
+  const canPublish = run.review_status === "approved"
+    && ["ready", "failed", "scheduled", "draft"].includes(run.publish_status || "")
+    && run.publish_readiness?.can_publish === true
+    && publishBlockers.length === 0;
   const showRetry = run.status === "failed" || run.publish_status === "failed";
   const minimumScheduleValue = new Date(Date.now() + (5 * 60 * 1000)).toISOString().slice(0, 16);
   const publishFailed = run.publish_status === "failed";
@@ -95,6 +114,34 @@ const CampaignPublishActions = ({
         </div>
       )}
 
+      {(publishBlockers.length > 0 || readinessWarnings.length > 0 || instagramConnectionWarning) && (
+        <div className="mt-5 rounded-2xl border border-border/70 bg-muted/20 p-4">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className={`mt-0.5 h-4 w-4 shrink-0 ${publishBlockers.length ? "text-rose-600" : "text-amber-600"}`} />
+            <div className="min-w-0">
+              <p className="font-medium text-foreground">Why can&apos;t I post?</p>
+              {publishBlockers.length ? (
+                <ul className="mt-2 space-y-1 text-sm text-rose-700">
+                  {publishBlockers.map((blocker) => (
+                    <li key={blocker.code}>{blocker.message}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-sm text-muted-foreground">No hard blockers. Review the warnings below before posting.</p>
+              )}
+              {readinessWarnings.length || instagramConnectionWarning ? (
+                <div className="mt-3 space-y-1 text-sm text-amber-700">
+                  {readinessWarnings.map((warning) => (
+                    <p key={warning.code}>{warning.message}</p>
+                  ))}
+                  {instagramConnectionWarning ? <p>{instagramConnectionWarning}</p> : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      )}
+
       {canPublish && (
         <div className="mt-5 space-y-4 rounded-2xl border border-[#f0d3de] bg-[#fff8fa] p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -144,9 +191,9 @@ const CampaignPublishActions = ({
         <div className="mt-5 rounded-2xl border border-dashed border-border/70 bg-muted/20 p-4 text-sm text-muted-foreground">
           <div className="flex items-center gap-2 text-foreground">
             <ShieldCheck className="h-4 w-4" />
-            <p className="font-medium">Publishing unlocks after review approval</p>
+            <p className="font-medium">Publishing is blocked until readiness passes</p>
           </div>
-          <p className="mt-1">Use the workflow tools above, then approve the draft when it is ready to go live.</p>
+          <p className="mt-1">Fix the blocking messages above, then refresh this campaign before posting or scheduling.</p>
         </div>
       )}
     </div>

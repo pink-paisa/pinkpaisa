@@ -10,6 +10,12 @@ export type WishlistProductSummary = {
   price: number;
   sale_price: number | null;
   stock_quantity: number;
+  is_affiliate?: boolean;
+  affiliate_url?: string | null;
+  affiliate_data_source?: string | null;
+  affiliate_data_last_refreshed_at?: string | null;
+  affiliate_data_expires_at?: string | null;
+  affiliate_compliance_status?: "needs_review" | "compliant" | "non_compliant" | "paused" | null;
 };
 
 export type WishlistItem = {

@@ -25,6 +25,13 @@ const IMAGE_PROVIDER_REGISTRY = [
         cost_tier: "medium",
       },
       {
+        id: "gpt-image-1.5",
+        label: "GPT Image 1.5",
+        supports_reference_image: true,
+        supports_text_to_image: true,
+        cost_tier: "medium",
+      },
+      {
         id: "gpt-image-2",
         label: "GPT Image 2",
         supports_reference_image: true,

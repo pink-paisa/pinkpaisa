@@ -30,9 +30,23 @@ function describeInstagramApiError(error) {
 function isPublicMediaUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
-    if (!/^https?:$/i.test(parsed.protocol)) return false;
+    if (parsed.protocol !== "https:") return false;
     const host = parsed.hostname.toLowerCase();
-    return !["localhost", "127.0.0.1", "0.0.0.0"].includes(host);
+    if (!host || ["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"].includes(host)) return false;
+    if (host.endsWith(".localhost") || host.endsWith(".local")) return false;
+
+    const ipv4Match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (ipv4Match) {
+      const parts = ipv4Match.slice(1).map((part) => Number(part));
+      if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+      const [first, second] = parts;
+      if (first === 0 || first === 10 || first === 127 || (first === 169 && second === 254)) return false;
+      if (first === 172 && second >= 16 && second <= 31) return false;
+      if (first === 192 && second === 168) return false;
+    }
+
+    if (host === "::" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80")) return false;
+    return true;
   } catch (_error) {
     return false;
   }
@@ -250,6 +264,7 @@ module.exports = {
   getContainerStatus,
   getMediaInfo,
   getInstagramConnectionSummary,
+  isPublicMediaUrl,
   pollPublishStatus,
   publishCarousel,
   publishContainer,

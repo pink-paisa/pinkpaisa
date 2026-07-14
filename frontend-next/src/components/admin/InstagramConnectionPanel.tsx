@@ -16,10 +16,10 @@ type InstagramConnection = {
 };
 
 const formatDateTime = (value: string | null | undefined) => {
-  if (!value) return "—";
+  if (!value) return "-";
   const date = new Date(value);
   return Number.isNaN(date.getTime())
-    ? "—"
+    ? "-"
     : date.toLocaleString("en-IN", {
       day: "numeric",
       month: "short",
@@ -82,7 +82,7 @@ const InstagramConnectionPanel = ({
             )}
             <div>
               <p className="font-medium">{connection?.instagram_name || "Not connected"}</p>
-              <p className="text-sm text-muted-foreground">{connection?.instagram_username ? `@${connection.instagram_username}` : "—"}</p>
+              <p className="text-sm text-muted-foreground">{connection?.instagram_username ? `@${connection.instagram_username}` : "-"}</p>
             </div>
           </div>
         </div>
@@ -92,7 +92,7 @@ const InstagramConnectionPanel = ({
           <p className="mt-3 font-medium">
             {connection?.login_type === "instagram_business_login"
               ? "Business Login for Instagram"
-              : (connection?.facebook_page_name || "—")}
+              : (connection?.facebook_page_name || "-")}
           </p>
           <p className="mt-1 text-sm text-muted-foreground">{connection?.account_type || "Instagram professional"}</p>
         </div>

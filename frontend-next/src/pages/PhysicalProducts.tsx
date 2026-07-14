@@ -64,6 +64,12 @@ const toWishlistProduct = (product: CatalogProduct): WishlistProductSummary => (
   price: product.price,
   sale_price: product.sale_price,
   stock_quantity: product.stock_quantity,
+  is_affiliate: product.is_affiliate,
+  affiliate_url: product.affiliate_url,
+  affiliate_data_source: product.affiliate_data_source,
+  affiliate_data_last_refreshed_at: product.affiliate_data_last_refreshed_at,
+  affiliate_data_expires_at: product.affiliate_data_expires_at,
+  affiliate_compliance_status: product.affiliate_compliance_status,
 });
 
 const ProductCard = ({

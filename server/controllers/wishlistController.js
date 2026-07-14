@@ -1,7 +1,34 @@
 const Wishlist = require("../models/Wishlist");
 const Product = require("../models/Product");
 
-const serializeProduct = (product) => ({ ...product, id: product._id.toString() });
+const APPROVED_AFFILIATE_DATA_SOURCES = new Set(["creators_api", "pa_api"]);
+
+const canShowAffiliatePrice = (product = {}) => {
+  if (!product.is_affiliate) return true;
+  if (!APPROVED_AFFILIATE_DATA_SOURCES.has(String(product.affiliate_data_source || ""))) return false;
+  if (!product.affiliate_data_expires_at) return false;
+  const expiresAt = new Date(product.affiliate_data_expires_at).getTime();
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+};
+
+const serializeProduct = (product) => {
+  const showAffiliatePrice = canShowAffiliatePrice(product);
+  return {
+    id: product._id.toString(),
+    slug: product.slug,
+    title: product.title,
+    featured_image: product.featured_image || null,
+    price: product.is_affiliate && !showAffiliatePrice ? 0 : Number(product.price || 0),
+    sale_price: product.is_affiliate && !showAffiliatePrice ? null : product.sale_price ?? null,
+    stock_quantity: product.is_affiliate ? 0 : Number(product.stock_quantity || 0),
+    is_affiliate: Boolean(product.is_affiliate),
+    affiliate_url: product.affiliate_url || null,
+    affiliate_data_source: product.affiliate_data_source || null,
+    affiliate_data_last_refreshed_at: product.affiliate_data_last_refreshed_at || null,
+    affiliate_data_expires_at: product.affiliate_data_expires_at || null,
+    affiliate_compliance_status: product.affiliate_compliance_status || null,
+  };
+};
 
 const getWishlist = async (req, res) => {
   try {
@@ -43,4 +70,11 @@ const removeWishlistItem = async (req, res) => {
   }
 };
 
-module.exports = { getWishlist, addWishlistItem, removeWishlistItem };
+module.exports = {
+  getWishlist,
+  addWishlistItem,
+  removeWishlistItem,
+  _private: {
+    serializeProduct,
+  },
+};

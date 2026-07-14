@@ -4,8 +4,11 @@ const { protect, adminOnly } = require("../middleware/auth");
 const {
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
+  getMarketingBatchDetail,
+  getMarketingCampaignCalendar,
   getLatestMarketingBatch,
   getMarketingCampaignRun,
+  listMarketingCampaignCatalogProducts,
   listMarketingCampaignRuns,
   publishMarketingCarouselController,
   publishMarketingCampaignController,
@@ -13,14 +16,21 @@ const {
   regenerateMarketingCampaign,
   resetStuckMarketingCampaignController,
   reviewMarketingCampaignRun,
+  retryFailedMarketingBatchItems,
   retryMarketingCampaign,
   runDailyMarketingBatchController,
+  scanMarketingCampaignReadiness,
   scheduleMarketingCampaignController,
   updateMarketingCampaignDraftController,
 } = require("../controllers/marketingCampaignController");
 
 router.get("/admin", protect, adminOnly, listMarketingCampaignRuns);
 router.get("/admin/batches/latest", protect, adminOnly, getLatestMarketingBatch);
+router.get("/admin/batches/:id", protect, adminOnly, getMarketingBatchDetail);
+router.post("/admin/batches/:id/retry-failed", protect, adminOnly, retryFailedMarketingBatchItems);
+router.get("/admin/calendar", protect, adminOnly, getMarketingCampaignCalendar);
+router.get("/admin/catalog-products", protect, adminOnly, listMarketingCampaignCatalogProducts);
+router.post("/admin/readiness-scan", protect, adminOnly, scanMarketingCampaignReadiness);
 router.post("/admin/run-daily-batch", protect, adminOnly, runDailyMarketingBatchController);
 router.post("/admin/recover-stale-tasks", protect, adminOnly, recoverStaleMarketingTasksController);
 router.post("/admin/post-carousel", protect, adminOnly, publishMarketingCarouselController);

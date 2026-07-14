@@ -122,15 +122,19 @@ function buildHeadline(brief, strategy) {
 
 function buildSupportingLine(brief) {
   if (brief?.is_affiliate) {
-    if (brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)) {
-      return `Partner-listed from ${formatPrice(brief.pricing.sale_price)}`;
-    }
-    return `Partner-listed at ${formatPrice(brief?.pricing?.price || 0)}`;
+    return "Check current price on Amazon from Pink Paisa";
   }
   if (brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)) {
     return `Now at ${formatPrice(brief.pricing.sale_price)} instead of ${formatPrice(brief.pricing.price)}`;
   }
   return `Available now at ${formatPrice(brief?.pricing?.price || 0)}`;
+}
+
+function buildPriceLabel(brief) {
+  if (brief?.is_affiliate) return "Check price";
+  return brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)
+    ? formatPrice(brief.pricing.sale_price)
+    : formatPrice(brief?.pricing?.price || 0);
 }
 
 function chooseCtaText(brief) {
@@ -293,9 +297,7 @@ async function renderSingleImage({ campaignId, brief, strategy, productBuffer })
   const ctaText = chooseCtaText(brief);
   const supportingLine = buildSupportingLine(brief);
   const headlineLines = wrapHeadline(headline);
-  const priceLabel = brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)
-    ? formatPrice(brief.pricing.sale_price)
-    : formatPrice(brief?.pricing?.price || 0);
+  const priceLabel = buildPriceLabel(brief);
 
   const overlaySvg = buildBackgroundSvg({
     headlineLines,
@@ -331,9 +333,7 @@ async function renderSingleImage({ campaignId, brief, strategy, productBuffer })
 async function renderCarousel({ campaignId, brief, strategy, productBuffer }) {
   const headline = buildHeadline(brief, strategy);
   const ctaText = chooseCtaText(brief);
-  const priceLabel = brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)
-    ? formatPrice(brief.pricing.sale_price)
-    : formatPrice(brief?.pricing?.price || 0);
+  const priceLabel = buildPriceLabel(brief);
   const supportingLine = buildSupportingLine(brief);
   const headlineLines = wrapHeadline(headline);
   const bullets = pickFeatureBullets(brief);

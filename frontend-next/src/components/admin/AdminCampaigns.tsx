@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { EmptyState, LoadingSpinner, StatusBadge } from "./AdminShared";
-import { AlertTriangle, Copy, Eye, Search, Sparkles, Wand2 } from "lucide-react";
+import { AlertTriangle, CalendarDays, CheckCircle2, Copy, Eye, Link as LinkIcon, Search, Sparkles, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import InstagramConnectionPanel from "./InstagramConnectionPanel";
 import CampaignAutomationPanel, {
@@ -20,6 +20,13 @@ import CampaignCreativePreview from "./CampaignCreativePreview";
 import CampaignPublishActions from "./CampaignPublishActions";
 
 type TaskCounts = { queued?: number; running?: number; completed?: number; failed?: number; cancelled?: number };
+type PublishReadinessIssue = { code: string; message: string };
+type PublishReadiness = {
+  can_publish: boolean;
+  blockers: PublishReadinessIssue[];
+  warnings: PublishReadinessIssue[];
+  checked_at?: string | null;
+};
 type CampaignRun = {
   id: string;
   campaign_id: string;
@@ -50,6 +57,7 @@ type CampaignRun = {
   instagram_media_id?: string | null;
   instagram_permalink?: string | null;
   last_error: string | null;
+  publish_readiness?: PublishReadiness | null;
   brief_json?: {
     primary_image?: string | null;
     images?: string[] | null;
@@ -71,7 +79,7 @@ type CampaignRun = {
   compliance_json?: { status?: string } | null;
   tracking_json?: {
     links?: { instagram_feed?: string };
-    publish_payload?: { tracked_url?: string };
+    publish_payload?: { tracked_url?: string; asset_urls?: string[]; caption?: string };
   } | null;
   task_counts?: TaskCounts;
 };
@@ -123,6 +131,16 @@ type CatalogProduct = {
   sale_price?: number | null;
   category?: string | null;
   subcategory?: string | null;
+  affiliate_is_instagram_pick?: boolean;
+  affiliate_compliance_status?: string | null;
+  affiliate_link_check_status?: string | null;
+  readiness_status?: "ready" | "warning" | "blocked" | string;
+  readiness?: {
+    can_queue: boolean;
+    status: string;
+    blockers: PublishReadinessIssue[];
+    warnings: PublishReadinessIssue[];
+  };
 };
 
 const DEFAULT_CAMPAIGN_SETTINGS: CampaignAutomationSettings = {
@@ -147,9 +165,24 @@ type CampaignListResponse = {
     published: number;
     failed: number;
     rejected: number;
+    ready_to_post?: number;
+    blocked?: number;
+    affiliate?: number;
   };
   latest_batch: BatchRun | null;
   pagination: { page: number; limit: number; total: number; total_pages: number };
+};
+type PublishEvent = {
+  id: string;
+  action_type: string;
+  status: string;
+  product_title?: string | null;
+  instagram_media_id?: string | null;
+  instagram_permalink?: string | null;
+  error_message?: string | null;
+  readiness_snapshot?: PublishReadiness | null;
+  metadata_json?: Record<string, unknown> | null;
+  created_at: string | null;
 };
 type CampaignDetailResponse = {
   run: CampaignRun & {
@@ -177,11 +210,32 @@ type CampaignDetailResponse = {
     compliance_json?: unknown;
     tracking_json?: {
       links?: { instagram_feed?: string };
-      publish_payload?: { tracked_url?: string };
+      publish_payload?: { tracked_url?: string; asset_urls?: string[]; caption?: string };
     } | null;
   };
   batch: BatchRun | null;
   tasks: CampaignTask[];
+  publish_events?: PublishEvent[];
+};
+type CatalogProductListResponse = {
+  items: CatalogProduct[];
+  pagination: { page: number; limit: number; total: number; total_pages: number };
+};
+type CalendarEntry = {
+  date: string;
+  run: CampaignRun;
+  warnings: PublishReadinessIssue[];
+};
+type CampaignCalendarResponse = {
+  from: string;
+  to: string;
+  entries: CalendarEntry[];
+  grouped: Record<string, CalendarEntry[]>;
+};
+type BatchDetailResponse = {
+  batch: BatchRun;
+  summary: { queued: number; running: number; completed: number; failed: number; stuck: number };
+  runs: CampaignRun[];
 };
 
 const JsonBlock = ({ value }: { value: unknown }) => (
@@ -199,11 +253,12 @@ const formatDateTime = (value: string | null | undefined) => {
 };
 
 const canBulkPublishRun = (run: CampaignRun) => (
-  run.review_status === "approved"
+  run.publish_readiness?.can_publish === true
+  && run.review_status === "approved"
   && ["ready", "draft", "failed", "scheduled"].includes(run.publish_status || "")
-  && Array.isArray(run.asset_urls)
-  && run.asset_urls.length > 0
 );
+
+const getReadinessBlockers = (run: CampaignRun | null | undefined) => run?.publish_readiness?.blockers || [];
 
 const getProductImageUrl = (run: CampaignRun) => {
   const images = Array.isArray(run.brief_json?.images) ? run.brief_json?.images : [];
@@ -240,6 +295,37 @@ const truncateText = (value: string | null | undefined, maxLength = 140) => {
   return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 };
 
+const hasAffiliateDisclosureText = (value: string | null | undefined) => (
+  /affiliate disclosure/i.test(value || "")
+  || /amazon associate/i.test(value || "")
+  || /#commissions?earned/i.test(value || "")
+);
+
+const getHashtagCount = (value: string | null | undefined) => {
+  const matches = String(value || "").match(/#[\w]+/g);
+  return matches?.length || 0;
+};
+
+const isPublicHttpsUrl = (value: string | null | undefined) => {
+  if (!value) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const getQuickFilterParams = (quickFilter: string): Record<string, string> => {
+  if (quickFilter === "needs_review") return { status: "waiting_review" };
+  if (quickFilter === "ready") return { readiness: "ready" };
+  if (quickFilter === "blocked") return { readiness: "blocked" };
+  if (quickFilter === "scheduled") return { status: "scheduled" };
+  if (quickFilter === "published") return { status: "published" };
+  if (quickFilter === "failed") return { status: "failed" };
+  if (quickFilter === "affiliate") return { affiliate_only: "true" };
+  return {};
+};
+
 const AdminCampaigns = () => {
   const [data, setData] = useState<CampaignListResponse>({
     items: [],
@@ -253,6 +339,9 @@ const AdminCampaigns = () => {
       published: 0,
       failed: 0,
       rejected: 0,
+      ready_to_post: 0,
+      blocked: 0,
+      affiliate: 0,
     },
     latest_batch: null,
     pagination: { page: 1, limit: 10, total: 0, total_pages: 1 },
@@ -266,6 +355,7 @@ const AdminCampaigns = () => {
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [status, setStatus] = useState("all");
+  const [quickFilter, setQuickFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
@@ -273,6 +363,11 @@ const AdminCampaigns = () => {
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogProducts, setCatalogProducts] = useState<CatalogProduct[]>([]);
   const [catalogSearch, setCatalogSearch] = useState("");
+  const [catalogDebouncedSearch, setCatalogDebouncedSearch] = useState("");
+  const [catalogSource, setCatalogSource] = useState("all");
+  const [catalogReadiness, setCatalogReadiness] = useState("all");
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [catalogPagination, setCatalogPagination] = useState({ page: 1, limit: 24, total: 0, total_pages: 1 });
   const [selectedCatalogProductIds, setSelectedCatalogProductIds] = useState<string[]>([]);
   const [detail, setDetail] = useState<CampaignDetailResponse | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -285,14 +380,25 @@ const AdminCampaigns = () => {
   const [draftShortCaption, setDraftShortCaption] = useState("");
   const [draftHashtags, setDraftHashtags] = useState("");
   const [draftCta, setDraftCta] = useState("");
+  const [regenerateStage, setRegenerateStage] = useState("creative");
+  const [calendar, setCalendar] = useState<CampaignCalendarResponse | null>(null);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const [batchDetail, setBatchDetail] = useState<BatchDetailResponse | null>(null);
+  const [batchDetailLoading, setBatchDetailLoading] = useState(false);
 
   const loadCatalogProducts = async () => {
     try {
       setCatalogLoading(true);
-      const response = await apiFetch<CatalogProduct[]>("/products?status=active&_limit=500");
-      setCatalogProducts(
-        response.filter((product) => product.status === "active" && product.is_visible !== false),
-      );
+      const params = new URLSearchParams({
+        search: catalogDebouncedSearch,
+        page: String(catalogPage),
+        limit: "24",
+        source: catalogSource,
+        readiness: catalogReadiness,
+      });
+      const response = await apiFetch<CatalogProductListResponse>(`/marketing-campaigns/admin/catalog-products?${params.toString()}`);
+      setCatalogProducts(response.items || []);
+      setCatalogPagination(response.pagination || { page: 1, limit: 24, total: 0, total_pages: 1 });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load catalog products");
     } finally {
@@ -303,7 +409,16 @@ const AdminCampaigns = () => {
   const loadCampaigns = async () => {
     try {
       setLoading(true);
-      const response = await apiFetch<CampaignListResponse>(`/marketing-campaigns/admin?search=${encodeURIComponent(debouncedSearch)}&status=${status}&page=${page}&limit=10`);
+      const quickParams = getQuickFilterParams(quickFilter);
+      const params = new URLSearchParams({
+        search: debouncedSearch,
+        status: quickParams.status || status,
+        page: String(page),
+        limit: "10",
+      });
+      if (quickParams.readiness) params.set("readiness", quickParams.readiness);
+      if (quickParams.affiliate_only) params.set("affiliate_only", quickParams.affiliate_only);
+      const response = await apiFetch<CampaignListResponse>(`/marketing-campaigns/admin?${params.toString()}`);
       setData(response);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load campaign runs");
@@ -355,6 +470,42 @@ const AdminCampaigns = () => {
     }
   };
 
+  const loadCalendar = async () => {
+    try {
+      setCalendarLoading(true);
+      const to = new Date();
+      to.setDate(to.getDate() + 21);
+      const from = new Date();
+      from.setDate(from.getDate() - 7);
+      const params = new URLSearchParams({
+        from: from.toISOString(),
+        to: to.toISOString(),
+      });
+      const response = await apiFetch<CampaignCalendarResponse>(`/marketing-campaigns/admin/calendar?${params.toString()}`);
+      setCalendar(response);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not load campaign calendar");
+    } finally {
+      setCalendarLoading(false);
+    }
+  };
+
+  const loadBatchDetail = async () => {
+    if (!data.latest_batch?.id) {
+      toast.info("No daily batch is available yet");
+      return;
+    }
+    try {
+      setBatchDetailLoading(true);
+      const response = await apiFetch<BatchDetailResponse>(`/marketing-campaigns/admin/batches/${data.latest_batch.id}`);
+      setBatchDetail(response);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not load batch detail");
+    } finally {
+      setBatchDetailLoading(false);
+    }
+  };
+
   const loadDetail = async (id: string) => {
     try {
       setDetailLoading(true);
@@ -380,12 +531,21 @@ const AdminCampaigns = () => {
 
   useEffect(() => {
     loadCampaigns();
-  }, [debouncedSearch, status, page]);
+  }, [debouncedSearch, status, quickFilter, page]);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setCatalogDebouncedSearch(catalogSearch);
+      setCatalogPage(1);
+    }, 350);
+    return () => clearTimeout(timeout);
+  }, [catalogSearch]);
 
   useEffect(() => {
     loadConnection();
     loadCampaignSettings();
     loadImageRegistry();
+    loadCalendar();
     const params = new URLSearchParams(window.location.search);
     const instagramStatus = params.get("instagram");
     const message = params.get("message");
@@ -415,19 +575,23 @@ const AdminCampaigns = () => {
   useEffect(() => {
     if (!catalogOpen) return;
     loadCatalogProducts();
-  }, [catalogOpen]);
+  }, [catalogOpen, catalogDebouncedSearch, catalogSource, catalogReadiness, catalogPage]);
 
   const eligibleVisibleRuns = useMemo(() => data.items.filter(canBulkPublishRun), [data.items]);
+  const selectedVisibleRuns = useMemo(
+    () => data.items.filter((run) => selectedRunIds.includes(run.id)),
+    [data.items, selectedRunIds],
+  );
+  const selectedRunBlockers = useMemo(() => (
+    selectedVisibleRuns.flatMap((run) => getReadinessBlockers(run).map((blocker) => ({
+      run,
+      blocker,
+    })))
+  ), [selectedVisibleRuns]);
   const allEligibleVisibleSelected = eligibleVisibleRuns.length > 0 && eligibleVisibleRuns.every((run) => selectedRunIds.includes(run.id));
   const filteredCatalogProducts = useMemo(() => {
-    const query = catalogSearch.trim().toLowerCase();
-    if (!query) return catalogProducts;
-    return catalogProducts.filter((product) => (
-      [product.title, product.slug, product.category, product.subcategory, product.source_type, getCatalogSourceLabel(product)]
-        .filter(Boolean)
-        .some((value) => String(value).toLowerCase().includes(query))
-    ));
-  }, [catalogProducts, catalogSearch]);
+    return catalogProducts;
+  }, [catalogProducts]);
   const allFilteredCatalogSelected = filteredCatalogProducts.length > 0 && filteredCatalogProducts.every((product) => selectedCatalogProductIds.includes(product.id));
 
   const refreshDetail = async () => {
@@ -436,7 +600,7 @@ const AdminCampaigns = () => {
   };
 
   const refreshAll = async () => {
-    await Promise.all([loadCampaigns(), loadConnection(), loadCampaignSettings(), loadImageRegistry(), selectedId ? refreshDetail() : Promise.resolve()]);
+    await Promise.all([loadCampaigns(), loadConnection(), loadCampaignSettings(), loadImageRegistry(), loadCalendar(), selectedId ? refreshDetail() : Promise.resolve()]);
   };
 
   const handleConnectInstagram = async () => {
@@ -591,18 +755,64 @@ const AdminCampaigns = () => {
     }
   };
 
-  const regenerateRun = async () => {
+  const regenerateRun = async (stage = regenerateStage) => {
     if (!selectedId) return;
     try {
       setActionLoading(true);
       await apiFetch(`/marketing-campaigns/admin/${selectedId}/regenerate`, {
         method: "POST",
-        body: JSON.stringify({ stage: "creative" }),
+        body: JSON.stringify({ stage }),
       });
-      toast.success("Creative regeneration started");
+      toast.success(`${stage.replace(/_/g, " ")} regeneration started`);
       await refreshAll();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not regenerate campaign");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const scanSelectedReadiness = async () => {
+    if (!selectedRunIds.length) {
+      toast.error("Select one or more campaign runs to scan");
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{ results: Array<{ ok: boolean; message?: string; run?: CampaignRun }> }>("/marketing-campaigns/admin/readiness-scan", {
+        method: "POST",
+        body: JSON.stringify({ run_ids: selectedRunIds }),
+      });
+      const blocked = response.results.filter((result) => !result.ok);
+      if (blocked.length) {
+        toast.error(`${blocked.length} selected run${blocked.length === 1 ? "" : "s"} blocked. ${blocked[0].message || "Open details to review blockers."}`);
+      } else {
+        toast.success("Selected runs passed readiness scan");
+      }
+      await loadCampaigns();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not scan readiness");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const retryFailedBatchItems = async () => {
+    if (!data.latest_batch?.id) {
+      toast.info("No batch available to retry");
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{ message?: string }>(`/marketing-campaigns/admin/batches/${data.latest_batch.id}/retry-failed`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      toast.success(response.message || "Failed batch items checked");
+      await refreshAll();
+      await loadBatchDetail();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not retry failed batch items");
     } finally {
       setActionLoading(false);
     }
@@ -674,8 +884,17 @@ const AdminCampaigns = () => {
   };
 
   const publishSelectedCarousel = async () => {
+    if (!connection?.is_connected) {
+      toast.error("Connect Instagram before publishing a carousel");
+      return;
+    }
     if (selectedRunIds.length < 2) {
       toast.error("Select at least 2 reviewed drafts to publish one carousel");
+      return;
+    }
+    if (selectedRunBlockers.length) {
+      const first = selectedRunBlockers[0];
+      toast.error(`${first.run.product_title || first.run.campaign_id}: ${first.blocker.message}`);
       return;
     }
 
@@ -795,16 +1014,26 @@ const AdminCampaigns = () => {
     return detail?.run.tracking_json?.links?.instagram_feed || detail?.run.tracking_json?.publish_payload?.tracked_url || null;
   }, [detail]);
 
+  const quickFilterOptions = useMemo(() => ([
+    { id: "all", label: "All" },
+    { id: "needs_review", label: "Needs review" },
+    { id: "ready", label: "Ready to post" },
+    { id: "blocked", label: "Blocked" },
+    { id: "scheduled", label: "Scheduled" },
+    { id: "published", label: "Published" },
+    { id: "failed", label: "Failed" },
+    { id: "affiliate", label: "Affiliate only" },
+  ]), []);
+
   const statusCards = useMemo(() => ([
-    { label: "Queued", value: data.counts.queued, tone: "text-amber-600" },
-    { label: "Generating", value: data.counts.batch_running, tone: "text-sky-600" },
-    { label: "Review", value: data.counts.waiting_review, tone: "text-orange-600" },
-    { label: "Approved", value: data.counts.approved_for_publish, tone: "text-emerald-600" },
+    { label: "Queued today", value: data.counts.queued, tone: "text-amber-600" },
+    { label: "Waiting review", value: data.counts.waiting_review, tone: "text-orange-600" },
+    { label: "Ready to post", value: data.counts.ready_to_post ?? data.counts.approved_for_publish, tone: "text-emerald-600" },
+    { label: "Blocked", value: data.counts.blocked ?? 0, tone: "text-rose-600" },
     { label: "Scheduled", value: data.counts.scheduled, tone: "text-indigo-600" },
-    { label: "Publishing", value: data.counts.publishing, tone: "text-fuchsia-600" },
-    { label: "Published", value: data.counts.published, tone: "text-emerald-700" },
-    { label: "Failed", value: data.counts.failed, tone: "text-rose-600" },
-    { label: "Rejected", value: data.counts.rejected, tone: "text-muted-foreground" },
+    { label: "Published this week", value: data.counts.published, tone: "text-emerald-700" },
+    { label: "Failed publishes", value: data.counts.failed, tone: "text-rose-600" },
+    { label: "Affiliate runs", value: data.counts.affiliate ?? 0, tone: "text-amber-700" },
   ]), [data.counts]);
 
   const connectionSummary = useMemo(() => {
@@ -897,6 +1126,22 @@ const AdminCampaigns = () => {
     }
     await navigator.clipboard.writeText(trackedUrl);
     toast.success("Tracked link copied");
+  };
+
+  const finalCaptionPreview = useMemo(() => {
+    if (!detail) return "";
+    const hashtags = draftHashtags.split(",").map((item) => item.trim()).filter(Boolean).join(" ");
+    return detail.run.tracking_json?.publish_payload?.caption
+      || [draftLongCaption || draftShortCaption, trackedUrl, hashtags].filter(Boolean).join("\n\n");
+  }, [detail, draftHashtags, draftLongCaption, draftShortCaption, trackedUrl]);
+
+  const copyCaption = async () => {
+    if (!finalCaptionPreview.trim()) {
+      toast.error("No caption available yet");
+      return;
+    }
+    await navigator.clipboard.writeText(finalCaptionPreview);
+    toast.success("Caption copied");
   };
 
   return (
@@ -1019,7 +1264,7 @@ const AdminCampaigns = () => {
               <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input className="pl-11" placeholder="Search campaign, product, or vendor" value={search} onChange={(e) => setSearch(e.target.value)} />
             </div>
-            <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className="h-10 rounded-xl border border-border bg-background px-3 text-sm">
+            <select value={status} onChange={(e) => { setStatus(e.target.value); setQuickFilter("all"); setPage(1); }} className="h-10 rounded-xl border border-border bg-background px-3 text-sm">
               <option value="all">All statuses</option>
               <option value="queued">Queued</option>
               <option value="batch_running">Generating</option>
@@ -1040,10 +1285,37 @@ const AdminCampaigns = () => {
           <p className="mt-3 text-xs text-muted-foreground">
             Use the product ID field for direct queueing, or open the catalog picker to select live admin, vendor-backed, and affiliate products visually.
           </p>
+          <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+            {quickFilterOptions.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => {
+                  setQuickFilter(option.id);
+                  setStatus("all");
+                  setPage(1);
+                }}
+                className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium transition-all ${
+                  quickFilter === option.id
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
           <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-dashed border-border/70 bg-muted/20 p-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <p className="text-sm font-medium">Bulk carousel publishing</p>
               <p className="text-xs text-muted-foreground">Select up to 10 review-approved drafts with ready creatives, then publish them as one Instagram carousel post.</p>
+              {!connection?.is_connected ? (
+                <p className="mt-1 text-xs font-medium text-amber-700">Instagram must be connected before carousel publishing.</p>
+              ) : selectedRunBlockers.length ? (
+                <p className="mt-1 text-xs font-medium text-rose-700">
+                  {selectedRunBlockers[0].run.product_title || selectedRunBlockers[0].run.campaign_id}: {selectedRunBlockers[0].blocker.message}
+                </p>
+              ) : null}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <label className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-muted-foreground">
@@ -1062,7 +1334,10 @@ const AdminCampaigns = () => {
               <Button variant="outline" className="rounded-xl" onClick={() => setSelectedRunIds([])} disabled={!selectedRunIds.length || actionLoading}>
                 Clear
               </Button>
-              <Button className="rounded-xl" onClick={publishSelectedCarousel} disabled={actionLoading || selectedRunIds.length < 2}>
+              <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length}>
+                Scan readiness
+              </Button>
+              <Button className="rounded-xl" onClick={publishSelectedCarousel} disabled={actionLoading || selectedRunIds.length < 2 || !connection?.is_connected || selectedRunBlockers.length > 0}>
                 Post selected carousel
               </Button>
             </div>
@@ -1076,9 +1351,17 @@ const AdminCampaigns = () => {
               <h3 className="mt-2 font-serif text-xl">Draft generation run</h3>
               <p className="mt-1 text-sm text-muted-foreground">Launch today&apos;s Instagram draft generation immediately or monitor the latest IST batch.</p>
             </div>
-            <Button className="rounded-2xl" onClick={runDailyBatch} disabled={actionLoading}>
-              <Wand2 className="mr-2 h-4 w-4" /> Run daily batch now
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" className="rounded-2xl" onClick={loadBatchDetail} disabled={batchDetailLoading || !data.latest_batch?.id}>
+                {batchDetailLoading ? "Loading..." : "View batch details"}
+              </Button>
+              <Button variant="outline" className="rounded-2xl" onClick={retryFailedBatchItems} disabled={actionLoading || !data.latest_batch?.id}>
+                Retry failed items
+              </Button>
+              <Button className="rounded-2xl" onClick={runDailyBatch} disabled={actionLoading}>
+                <Wand2 className="mr-2 h-4 w-4" /> Run daily batch now
+              </Button>
+            </div>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-4">
             <div className="rounded-2xl bg-background/50 p-3">
@@ -1098,6 +1381,72 @@ const AdminCampaigns = () => {
               <p className="mt-2 font-medium">{data.latest_batch?.success_count ?? 0}</p>
             </div>
           </div>
+          {batchDetail ? (
+            <div className="mt-4 rounded-2xl border border-border/70 bg-background/50 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm font-medium">Batch progress</p>
+                <p className="text-xs text-muted-foreground">{batchDetail.runs.length} run{batchDetail.runs.length === 1 ? "" : "s"} assigned</p>
+              </div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-5">
+                {Object.entries(batchDetail.summary).map(([key, value]) => (
+                  <div key={key} className="rounded-xl bg-card px-3 py-2">
+                    <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">{key}</p>
+                    <p className="mt-1 font-semibold">{value}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 max-h-44 space-y-2 overflow-y-auto pr-1">
+                {batchDetail.runs.slice(0, 8).map((run) => (
+                  <div key={run.id} className="flex items-center justify-between gap-3 rounded-xl bg-card px-3 py-2 text-xs">
+                    <span className="min-w-0 truncate">{run.product_title || run.campaign_id}</span>
+                    <StatusBadge status={run.status} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="rounded-3xl border border-border bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Schedule calendar</p>
+            <h3 className="mt-2 font-serif text-xl">Scheduled and published posts</h3>
+            <p className="mt-1 text-sm text-muted-foreground">Watch for crowded days and scheduled posts that became blocked after product changes.</p>
+          </div>
+          <Button variant="outline" className="rounded-2xl" onClick={loadCalendar} disabled={calendarLoading}>
+            <CalendarDays className="mr-2 h-4 w-4" /> {calendarLoading ? "Loading..." : "Refresh calendar"}
+          </Button>
+        </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {calendarLoading ? (
+            <div className="md:col-span-2 xl:col-span-4"><LoadingSpinner /></div>
+          ) : !calendar?.entries?.length ? (
+            <div className="md:col-span-2 xl:col-span-4"><EmptyState icon={CalendarDays} text="No scheduled or published campaign posts in the next window." /></div>
+          ) : (
+            Object.entries(calendar.grouped).slice(0, 8).map(([date, entries]) => (
+              <div key={date} className="rounded-2xl border border-border/70 bg-background/50 p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{date}</p>
+                <div className="mt-3 space-y-2">
+                  {entries.map((entry) => (
+                    <button
+                      key={entry.run.id}
+                      type="button"
+                      onClick={() => loadDetail(entry.run.id)}
+                      className="w-full rounded-xl bg-card px-3 py-2 text-left text-xs transition-colors hover:bg-accent"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-medium">{entry.run.product_title || entry.run.campaign_id}</span>
+                        <StatusBadge status={entry.run.status} />
+                      </div>
+                      {entry.warnings.length ? <p className="mt-1 text-amber-700">{entry.warnings[0].message}</p> : null}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -1203,6 +1552,13 @@ const AdminCampaigns = () => {
                     <div className="min-w-[9rem] space-y-2">
                       {run.publish_status ? <StatusBadge status={run.publish_status} /> : EMPTY_PLACEHOLDER}
                       {run.instagram_media_id ? <p className="text-xs text-muted-foreground">Media ID saved</p> : null}
+                      {getReadinessBlockers(run).length ? (
+                        <p className="text-xs text-rose-600">{truncateText(getReadinessBlockers(run)[0].message, 110)}</p>
+                      ) : run.publish_readiness?.warnings?.length ? (
+                        <p className="text-xs text-amber-700">{truncateText(run.publish_readiness.warnings[0].message, 110)}</p>
+                      ) : run.publish_readiness?.can_publish ? (
+                        <p className="text-xs text-emerald-700">Ready to post</p>
+                      ) : null}
                     </div>
                   </td>
                   <td className="px-4 py-4">{formatDateTime(run.updated_at)}</td>
@@ -1248,6 +1604,26 @@ const AdminCampaigns = () => {
                       onChange={(e) => setCatalogSearch(e.target.value)}
                     />
                   </div>
+                  <select
+                    value={catalogSource}
+                    onChange={(event) => { setCatalogSource(event.target.value); setCatalogPage(1); setSelectedCatalogProductIds([]); }}
+                    className="h-10 rounded-xl border border-border bg-background px-3 text-sm"
+                  >
+                    <option value="all">All sources</option>
+                    <option value="affiliate">Affiliate</option>
+                    <option value="admin">Admin products</option>
+                    <option value="vendor">Vendor-backed</option>
+                  </select>
+                  <select
+                    value={catalogReadiness}
+                    onChange={(event) => { setCatalogReadiness(event.target.value); setCatalogPage(1); setSelectedCatalogProductIds([]); }}
+                    className="h-10 rounded-xl border border-border bg-background px-3 text-sm"
+                  >
+                    <option value="all">Any readiness</option>
+                    <option value="ready">Ready/warnings</option>
+                    <option value="blocked">Blocked</option>
+                    <option value="warning">Warnings</option>
+                  </select>
                   <Button variant="outline" className="rounded-xl" onClick={loadCatalogProducts} disabled={catalogLoading || actionLoading}>
                     Refresh
                   </Button>
@@ -1328,19 +1704,51 @@ const AdminCampaigns = () => {
                                     {product.subcategory}
                                   </span>
                                 ) : null}
+                                <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                                  product.readiness_status === "blocked"
+                                    ? "bg-rose-100 text-rose-800"
+                                    : product.readiness_status === "warning"
+                                      ? "bg-amber-100 text-amber-800"
+                                      : "bg-emerald-100 text-emerald-800"
+                                }`}
+                                >
+                                  {product.readiness_status || "ready"}
+                                </span>
                               </div>
                               <div className="flex items-center justify-between gap-3 text-sm">
                                 <p className="font-medium text-foreground">
-                                  {String.fromCharCode(8377)}{Number(product.sale_price ?? product.price ?? 0).toLocaleString("en-IN")}
+                                  {product.is_affiliate || product.price == null
+                                    ? "Instagram campaign"
+                                    : `${String.fromCharCode(8377)}${Number(product.sale_price ?? product.price ?? 0).toLocaleString("en-IN")}`}
                                 </p>
                                 <p className="text-xs text-muted-foreground">{product.status || "active"}</p>
                               </div>
+                              {product.readiness?.blockers?.length ? (
+                                <p className="text-xs text-rose-700">{truncateText(product.readiness.blockers[0].message, 120)}</p>
+                              ) : product.readiness?.warnings?.length ? (
+                                <p className="text-xs text-amber-700">{truncateText(product.readiness.warnings[0].message, 120)}</p>
+                              ) : (
+                                <p className="text-xs text-emerald-700">Ready to queue</p>
+                              )}
                             </div>
                           </div>
                         );
                       })}
                     </div>
                   )}
+                </div>
+              </div>
+              <div className="mt-4 flex items-center justify-between rounded-2xl border border-border/70 bg-background/60 px-4 py-3 text-sm">
+                <p className="text-muted-foreground">
+                  Page {catalogPagination.page} of {catalogPagination.total_pages}. {catalogPagination.total} product{catalogPagination.total === 1 ? "" : "s"}
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" className="rounded-xl" disabled={catalogPagination.page <= 1 || catalogLoading} onClick={() => setCatalogPage((prev) => Math.max(1, prev - 1))}>
+                    Previous
+                  </Button>
+                  <Button variant="outline" className="rounded-xl" disabled={catalogPagination.page >= catalogPagination.total_pages || catalogLoading} onClick={() => setCatalogPage((prev) => Math.min(catalogPagination.total_pages, prev + 1))}>
+                    Next
+                  </Button>
                 </div>
               </div>
             </div>
@@ -1472,6 +1880,121 @@ const AdminCampaigns = () => {
                 </div>
               )}
 
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr),minmax(0,1fr)]">
+                <div className="rounded-2xl border border-border bg-card p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Readiness checklist</p>
+                      <h3 className="mt-1 font-serif text-xl">Can this campaign post?</h3>
+                    </div>
+                    <StatusBadge status={detail.run.publish_readiness?.can_publish ? "ready" : "blocked"} />
+                  </div>
+                  <div className="mt-4 space-y-2 text-sm">
+                    {[
+                      {
+                        label: "Product active and visible",
+                        ok: !detail.run.publish_readiness?.blockers?.some((issue) => ["product_inactive", "product_hidden", "product_not_found"].includes(issue.code)),
+                      },
+                      {
+                        label: "Affiliate compliance and Amazon tag valid",
+                        ok: !(detail.run.is_affiliate || detail.run.source_event === "affiliate_product.published")
+                          || !detail.run.publish_readiness?.blockers?.some((issue) => issue.code.startsWith("affiliate") || issue.code.startsWith("amazon")),
+                      },
+                      {
+                        label: "Category and subcategory present",
+                        ok: !detail.run.publish_readiness?.blockers?.some((issue) => issue.code === "product_uncategorized"),
+                      },
+                      {
+                        label: "Creative media uses public HTTPS",
+                        ok: (detail.run.tracking_json?.publish_payload?.asset_urls || detail.run.asset_urls || []).some(isPublicHttpsUrl),
+                      },
+                      {
+                        label: "Caption includes affiliate disclosure when needed",
+                        ok: !(detail.run.is_affiliate || detail.run.source_event === "affiliate_product.published") || hasAffiliateDisclosureText(finalCaptionPreview),
+                      },
+                      {
+                        label: "Instagram account connected",
+                        ok: connection?.is_connected === true,
+                      },
+                    ].map((item) => (
+                      <div key={item.label} className="flex items-center gap-2 rounded-xl bg-background/60 px-3 py-2">
+                        {item.ok ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <AlertTriangle className="h-4 w-4 text-rose-600" />}
+                        <span className={item.ok ? "text-foreground" : "text-rose-700"}>{item.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {detail.run.publish_readiness?.blockers?.length ? (
+                    <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
+                      <p className="font-medium">Why can&apos;t I post?</p>
+                      <ul className="mt-2 space-y-1">
+                        {detail.run.publish_readiness.blockers.map((blocker) => (
+                          <li key={`${blocker.code}-${blocker.message}`}>{blocker.message}</li>
+                        ))}
+                      </ul>
+                      {(detail.run.is_affiliate || detail.run.source_event === "affiliate_product.published") && (
+                        <a
+                          href={`/admin?section=affiliate_products&search=${encodeURIComponent(getAffiliateExternalId(detail.run) || detail.run.product_title || "")}`}
+                          className="mt-3 inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+                        >
+                          <LinkIcon className="h-3.5 w-3.5" /> Fix product
+                        </a>
+                      )}
+                    </div>
+                  ) : detail.run.publish_readiness?.warnings?.length ? (
+                    <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                      <p className="font-medium">Warnings</p>
+                      <ul className="mt-2 space-y-1">
+                        {detail.run.publish_readiness.warnings.map((warning) => (
+                          <li key={`${warning.code}-${warning.message}`}>{warning.message}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="rounded-2xl border border-border bg-card p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Caption preview</p>
+                      <h3 className="mt-1 font-serif text-xl">Final Instagram caption</h3>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" className="rounded-2xl" onClick={copyCaption}>
+                        <Copy className="mr-2 h-4 w-4" /> Copy caption
+                      </Button>
+                      <Button variant="outline" className="rounded-2xl" onClick={copyTrackedUrl}>
+                        <Copy className="mr-2 h-4 w-4" /> Copy link
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-2 sm:grid-cols-4">
+                    <div className="rounded-xl bg-background/60 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Length</p>
+                      <p className="mt-1 font-semibold">{finalCaptionPreview.length}</p>
+                    </div>
+                    <div className="rounded-xl bg-background/60 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Hashtags</p>
+                      <p className="mt-1 font-semibold">{getHashtagCount(finalCaptionPreview)}</p>
+                    </div>
+                    <div className="rounded-xl bg-background/60 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Disclosure</p>
+                      <p className={`mt-1 font-semibold ${hasAffiliateDisclosureText(finalCaptionPreview) ? "text-emerald-700" : "text-rose-700"}`}>
+                        {hasAffiliateDisclosureText(finalCaptionPreview) ? "Present" : "Missing"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-background/60 px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Tracked link</p>
+                      <p className={`mt-1 font-semibold ${trackedUrl ? "text-emerald-700" : "text-rose-700"}`}>
+                        {trackedUrl ? "Present" : "Missing"}
+                      </p>
+                    </div>
+                  </div>
+                  <pre className="mt-4 max-h-48 overflow-auto whitespace-pre-wrap rounded-2xl bg-[#fff8fa] p-4 text-xs leading-5 text-[#6b4b57]">
+                    {finalCaptionPreview || "Caption is not generated yet."}
+                  </pre>
+                </div>
+              </div>
+
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr),380px]">
                 <div className="min-w-0 space-y-6">
                   <CampaignCreativePreview
@@ -1546,6 +2069,27 @@ const AdminCampaigns = () => {
 
                 <div className="min-w-0">
                   <div className="space-y-4 xl:sticky xl:top-6">
+                  <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Regenerate</p>
+                      <p className="mt-1 text-sm text-muted-foreground">Restart only the stage that needs repair. Intake resets the whole downstream pipeline.</p>
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <select
+                        value={regenerateStage}
+                        onChange={(event) => setRegenerateStage(event.target.value)}
+                        className="h-10 flex-1 rounded-xl border border-border bg-background px-3 text-sm"
+                      >
+                        <option value="creative">Creative only</option>
+                        <option value="caption">Caption only</option>
+                        <option value="tracking">Tracking only</option>
+                        <option value="intake">Regenerate from intake</option>
+                      </select>
+                      <Button variant="outline" className="rounded-xl" onClick={() => regenerateRun(regenerateStage)} disabled={actionLoading}>
+                        Start
+                      </Button>
+                    </div>
+                  </div>
                   <CampaignPublishActions
                     run={detail.run}
                     lastError={detail.run.last_error || null}
@@ -1553,12 +2097,14 @@ const AdminCampaigns = () => {
                     onRefresh={refreshDetail}
                     onRetry={retryRun}
                     onResetStuckTask={resetStuckTask}
-                    onRegenerate={regenerateRun}
+                    onRegenerate={() => regenerateRun("creative")}
                     onApproveReview={() => openReviewDialog("approve")}
                     onRejectReview={() => openReviewDialog("reject")}
                     onPostNow={publishNow}
                     onSchedule={schedulePost}
                     canResetStuck={selectedRunHasRunningTask}
+                    instagramConnected={connection?.is_connected === true}
+                    instagramConnectionWarning={connection?.last_error || null}
                   />
 
                   <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
@@ -1597,6 +2143,34 @@ const AdminCampaigns = () => {
                           <p className="mt-2 text-sm text-rose-800">{detail.run.last_error}</p>
                         </div>
                       ) : null}
+                    </div>
+                  </div>
+
+                  <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Publish history</p>
+                      <p className="mt-1 text-sm text-muted-foreground">Audit trail for schedules, retries, carousel posts, and Instagram publish attempts.</p>
+                    </div>
+                    <div className="mt-4 max-h-72 space-y-3 overflow-y-auto pr-1">
+                      {!detail.publish_events?.length ? (
+                        <p className="rounded-2xl bg-background/50 p-3 text-sm text-muted-foreground">No publish events recorded yet.</p>
+                      ) : detail.publish_events.map((event) => (
+                        <div key={event.id} className="rounded-2xl border border-border/70 bg-background/50 p-3 text-sm">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={event.status} />
+                              <span className="font-medium">{event.action_type.replace(/_/g, " ")}</span>
+                            </div>
+                            <span className="text-xs text-muted-foreground">{formatDateTime(event.created_at)}</span>
+                          </div>
+                          {event.instagram_permalink ? (
+                            <a href={event.instagram_permalink} target="_blank" rel="noreferrer" className="mt-2 block break-all text-xs text-primary underline-offset-4 hover:underline">
+                              {event.instagram_permalink}
+                            </a>
+                          ) : null}
+                          {event.error_message ? <p className="mt-2 text-xs text-rose-700">{event.error_message}</p> : null}
+                        </div>
+                      ))}
                     </div>
                   </div>
 

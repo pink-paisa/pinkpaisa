@@ -2,8 +2,11 @@ const {
   enqueueAffiliateProductCampaign,
   enqueueAdminProductCampaign,
   enqueueApprovedProductCampaign,
+  getDailyBatchRunDetail,
   getCampaignRunDetail,
   getLatestDailyBatchRun,
+  listCampaignCalendar,
+  listCampaignCatalogProducts,
   listCampaignRuns,
   publishCampaignRunsAsCarousel,
   publishCampaignRunNow,
@@ -12,7 +15,9 @@ const {
   resetStuckCampaignRun,
   reviewCampaignRun,
   retryCampaignRun,
+  retryFailedBatchRuns,
   runDailyBatch,
+  scanCampaignReadiness,
   scheduleCampaignRun,
   updateCampaignDraft,
 } = require("../services/marketingAgentOrchestrator");
@@ -26,6 +31,29 @@ const listMarketingCampaignRuns = async (req, res) => {
       status: req.query.status || "all",
       page: req.query.page || 1,
       limit: req.query.limit || 10,
+      source_event: req.query.source_event || "",
+      readiness: req.query.readiness || "all",
+      date_from: req.query.date_from || "",
+      date_to: req.query.date_to || "",
+      affiliate_only: req.query.affiliate_only || false,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const listMarketingCampaignCatalogProducts = async (req, res) => {
+  try {
+    const result = await listCampaignCatalogProducts({
+      search: req.query.search || "",
+      page: req.query.page || 1,
+      limit: req.query.limit || 24,
+      source: req.query.source || "all",
+      readiness: req.query.readiness || "all",
+      category: req.query.category || "",
+      affiliate_only: req.query.affiliate_only || false,
+      instagram_pick: req.query.instagram_pick || false,
     });
     res.json(result);
   } catch (error) {
@@ -51,6 +79,52 @@ const getLatestMarketingBatch = async (_req, res) => {
   }
 };
 
+const scanMarketingCampaignReadiness = async (req, res) => {
+  try {
+    const result = await scanCampaignReadiness(req.body.run_ids || []);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+const getMarketingCampaignCalendar = async (req, res) => {
+  try {
+    const result = await listCampaignCalendar({
+      from: req.query.from || "",
+      to: req.query.to || "",
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getMarketingBatchDetail = async (req, res) => {
+  try {
+    const result = await getDailyBatchRunDetail(req.params.id);
+    res.json(result);
+  } catch (error) {
+    res.status(error.message === "Daily batch not found" ? 404 : 500).json({ message: error.message });
+  }
+};
+
+const retryFailedMarketingBatchItems = async (req, res) => {
+  try {
+    const result = await retryFailedBatchRuns(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.json({
+      message: result.succeeded
+        ? `Retried ${result.succeeded} failed campaign item${result.succeeded === 1 ? "" : "s"}`
+        : "No failed campaign items were retried",
+      ...result,
+    });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
 const reviewMarketingCampaignRun = async (req, res) => {
   try {
     const updated = await reviewCampaignRun(req.params.id, req.body.action, req.body.notes || "");
@@ -62,7 +136,9 @@ const reviewMarketingCampaignRun = async (req, res) => {
 
 const retryMarketingCampaign = async (req, res) => {
   try {
-    const updated = await retryCampaignRun(req.params.id);
+    const updated = await retryCampaignRun(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({ message: "Campaign task re-queued", run: updated });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -85,7 +161,9 @@ const recoverStaleMarketingTasksController = async (_req, res) => {
 
 const resetStuckMarketingCampaignController = async (req, res) => {
   try {
-    const updated = await resetStuckCampaignRun(req.params.id);
+    const updated = await resetStuckCampaignRun(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({ message: "Stuck campaign task reset", ...updated });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -94,7 +172,9 @@ const resetStuckMarketingCampaignController = async (req, res) => {
 
 const regenerateMarketingCampaign = async (req, res) => {
   try {
-    const updated = await regenerateCampaignRun(req.params.id, req.body.stage || "creative");
+    const updated = await regenerateCampaignRun(req.params.id, req.body.stage || "creative", {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({ message: "Campaign draft regeneration started", ...updated });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -112,7 +192,9 @@ const updateMarketingCampaignDraftController = async (req, res) => {
 
 const publishMarketingCampaignController = async (req, res) => {
   try {
-    const updated = await publishCampaignRunNow(req.params.id);
+    const updated = await publishCampaignRunNow(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({ message: "Instagram publish completed", ...updated });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -121,7 +203,9 @@ const publishMarketingCampaignController = async (req, res) => {
 
 const publishMarketingCarouselController = async (req, res) => {
   try {
-    const result = await publishCampaignRunsAsCarousel(req.body.run_ids || []);
+    const result = await publishCampaignRunsAsCarousel(req.body.run_ids || [], {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({
       message: `Instagram carousel published for ${result.runs.length} reviewed product${result.runs.length === 1 ? "" : "s"}`,
       ...result,
@@ -133,7 +217,9 @@ const publishMarketingCarouselController = async (req, res) => {
 
 const scheduleMarketingCampaignController = async (req, res) => {
   try {
-    const run = await scheduleCampaignRun(req.params.id, req.body.scheduled_for);
+    const run = await scheduleCampaignRun(req.params.id, req.body.scheduled_for, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({ message: "Campaign scheduled for Instagram publishing", run });
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -218,6 +304,9 @@ const createMarketingCampaignFromProductSource = async (req, res) => {
 module.exports = {
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
+  getMarketingBatchDetail,
+  getMarketingCampaignCalendar,
+  listMarketingCampaignCatalogProducts,
   getLatestMarketingBatch,
   getMarketingCampaignRun,
   listMarketingCampaignRuns,
@@ -227,8 +316,10 @@ module.exports = {
   regenerateMarketingCampaign,
   resetStuckMarketingCampaignController,
   reviewMarketingCampaignRun,
+  retryFailedMarketingBatchItems,
   retryMarketingCampaign,
   runDailyMarketingBatchController,
+  scanMarketingCampaignReadiness,
   scheduleMarketingCampaignController,
   updateMarketingCampaignDraftController,
 };

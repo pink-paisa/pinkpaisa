@@ -1,5 +1,6 @@
 const AgentTask = require("../models/AgentTask");
 const DailyBatchRun = require("../models/DailyBatchRun");
+const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
 const Product = require("../models/Product");
 const Vendor = require("../models/Vendor");
@@ -7,6 +8,8 @@ const VendorProduct = require("../models/VendorProduct");
 const { getCampaignSettings } = require("../utils/campaignSettings");
 const logger = require("../utils/logger");
 const {
+  ensureAffiliateInstagramDisclosure,
+  hasAffiliateInstagramDisclosure,
   runCaptionAgent,
   runComplianceAgent,
   runCreativeAgent,
@@ -15,7 +18,8 @@ const {
   runStrategyAgent,
   runTrackingAgent,
 } = require("./marketingAgents");
-const { publishInstagramDraft } = require("./instagramPublishService");
+const { validateAmazonAffiliateUrl } = require("./amazonAffiliateCompliance");
+const { isPublicMediaUrl, publishInstagramDraft } = require("./instagramPublishService");
 
 const AUTO_SEQUENCE = ["intake", "strategy", "creative", "caption", "compliance", "tracking"];
 const ALL_SEQUENCE = [...AUTO_SEQUENCE, "publish"];
@@ -23,7 +27,12 @@ const WORKER_INTERVAL_MS = Math.max(parseInt(process.env.MARKETING_AGENT_POLL_MS
 const STALE_TASK_THRESHOLD_MS = Math.max(parseInt(process.env.MARKETING_STALE_TASK_MS || String(30 * 60 * 1000), 10), 60 * 1000);
 const MIN_SCHEDULE_DELAY_MS = Math.max(parseInt(process.env.MARKETING_MIN_SCHEDULE_DELAY_MS || String(5 * 60 * 1000), 10), 60 * 1000);
 const CAMPAIGN_OPEN_STATUSES = ["queued", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing"];
-const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = "title slug status is_visible category subcategory featured_image images is_affiliate affiliate_url affiliate_external_id affiliate_source_platform brand_name source_type";
+const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = [
+  "title slug status is_visible category subcategory category_id subcategory_id featured_image images",
+  "is_affiliate affiliate_url affiliate_external_id affiliate_source_platform brand_name source_type",
+  "affiliate_asin affiliate_marketplace affiliate_tag affiliate_compliance_status affiliate_compliance_flags",
+  "affiliate_link_check_status affiliate_link_failure_reason",
+].join(" ");
 
 let workerStarted = false;
 let processing = false;
@@ -58,6 +67,188 @@ function isUncategorizedValue(value) {
   return !value || String(value).trim().toLowerCase() === "uncategorized";
 }
 
+function readinessIssue(code, message) {
+  return { code, message };
+}
+
+function getObjectIdString(value) {
+  return value?._id?.toString?.() || value?.toString?.() || (value ? String(value) : null);
+}
+
+function isPopulatedProductSnapshot(product) {
+  return Boolean(product && typeof product === "object" && (product._id || product.title || product.slug));
+}
+
+function isAffiliateCampaignRun(run = {}, product = null) {
+  return Boolean(
+    product?.is_affiliate
+    || run.brief_json?.is_affiliate
+    || run.source_event === "affiliate_product.published"
+  );
+}
+
+function getRunPublishAssetUrls(run = {}) {
+  const publishAssets = run?.tracking_json?.publish_payload?.asset_urls;
+  if (Array.isArray(publishAssets) && publishAssets.length) return publishAssets.filter(Boolean);
+  if (Array.isArray(run?.asset_urls) && run.asset_urls.length) return run.asset_urls.filter(Boolean);
+  return [];
+}
+
+function getRunPublishCaption(run = {}) {
+  return run?.tracking_json?.publish_payload?.caption
+    || run?.caption_json?.instagram?.long_caption
+    || run?.caption_json?.instagram?.short_caption
+    || "";
+}
+
+function describeAmazonValidationFlag(flag) {
+  const messages = {
+    affiliate_url_invalid: "Amazon affiliate URL is invalid.",
+    amazon_short_link_rejected: "Amazon short links are not allowed for campaign publishing.",
+    amazon_marketplace_unsupported: "Amazon affiliate URL marketplace is not supported.",
+    amazon_marketplace_mismatch: "Amazon affiliate URL marketplace does not match the product marketplace.",
+    amazon_asin_missing: "Amazon affiliate URL is missing a valid ASIN.",
+    amazon_affiliate_tag_missing: "Amazon affiliate URL is missing the Associate tag.",
+    amazon_affiliate_tag_not_configured: "The Associate tag for this marketplace is not configured.",
+    amazon_affiliate_tag_mismatch: "Amazon affiliate URL tag does not match the configured Associate tag.",
+  };
+  return messages[flag] || `Amazon affiliate URL failed validation: ${flag}.`;
+}
+
+function buildRunPublishReadinessSnapshot(run = {}, product = null, {
+  productWasFetched = false,
+  requireApproval = true,
+  allowPublishingState = false,
+} = {}) {
+  const blockers = [];
+  const warnings = [];
+  const isProductSnapshot = isPopulatedProductSnapshot(product);
+  const productId = getObjectIdString(run.public_product_id);
+  const isAffiliate = isAffiliateCampaignRun(run, product);
+  const assetUrls = getRunPublishAssetUrls(run);
+
+  if (run.instagram_media_id || run.publish_status === "published" || run.status === "published") {
+    blockers.push(readinessIssue("already_published", "This campaign run is already published."));
+  }
+  if (!allowPublishingState && (run.publish_status === "publishing" || run.status === "publishing")) {
+    blockers.push(readinessIssue("already_publishing", "This campaign run is already publishing."));
+  }
+  if (requireApproval && run.review_status !== "approved") {
+    blockers.push(readinessIssue("review_not_approved", "Admin review approval is required before Instagram publishing."));
+  }
+  if (!assetUrls.length) {
+    blockers.push(readinessIssue("missing_assets", "No publish-ready Instagram creative image is available."));
+  } else {
+    const invalidMediaUrls = assetUrls.filter((url) => !isPublicMediaUrl(url));
+    if (invalidMediaUrls.length) {
+      blockers.push(readinessIssue("non_https_media_url", "Instagram creative media must be public HTTPS URLs."));
+    }
+  }
+
+  if (productWasFetched && productId && !isProductSnapshot) {
+    blockers.push(readinessIssue("product_missing", "The source product no longer exists."));
+  }
+
+  if (isProductSnapshot) {
+    if (product.status !== "active") {
+      blockers.push(readinessIssue("product_inactive", "The source product is not active."));
+    }
+    if (product.is_visible !== true) {
+      blockers.push(readinessIssue("product_hidden", "The source product is hidden from the public catalog."));
+    }
+    if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) {
+      blockers.push(readinessIssue("product_uncategorized", "The source product must have a category and subcategory."));
+    }
+  }
+
+  if (isAffiliate) {
+    if (!isProductSnapshot && productWasFetched) {
+      blockers.push(readinessIssue("affiliate_product_missing", "Affiliate source product could not be revalidated."));
+    }
+    if (isProductSnapshot) {
+      if ((product.source_type || "admin") !== "admin" || !product.is_affiliate) {
+        blockers.push(readinessIssue("affiliate_source_invalid", "Campaign source must be an admin Amazon affiliate product."));
+      }
+      if (product.affiliate_compliance_status === "paused") {
+        blockers.push(readinessIssue("affiliate_paused", "Affiliate product is paused and cannot be posted."));
+      } else if (product.affiliate_compliance_status !== "compliant") {
+        blockers.push(readinessIssue("affiliate_not_compliant", "Affiliate product compliance status is not compliant."));
+      }
+      if ((product.affiliate_compliance_flags || []).includes("admin_paused")) {
+        blockers.push(readinessIssue("affiliate_paused", "Affiliate product was manually paused by admin."));
+      }
+
+      const validation = validateAmazonAffiliateUrl(product.affiliate_url, {
+        marketplace: product.affiliate_marketplace || null,
+        requireConfiguredTag: true,
+      });
+      if (!validation.isValid) {
+        validation.flags.forEach((flag) => blockers.push(readinessIssue(flag, describeAmazonValidationFlag(flag))));
+      }
+      if (!product.affiliate_tag) {
+        blockers.push(readinessIssue("affiliate_tag_missing", "Affiliate product is missing the stored Amazon Associate tag."));
+      } else if (validation.affiliateTag && product.affiliate_tag !== validation.affiliateTag) {
+        blockers.push(readinessIssue("affiliate_tag_mismatch", "Stored affiliate tag does not match the Amazon URL tag."));
+      }
+
+      const linkStatus = String(product.affiliate_link_check_status || "unchecked").toLowerCase();
+      if (linkStatus === "failed" || linkStatus === "paused") {
+        blockers.push(readinessIssue("affiliate_link_failed", product.affiliate_link_failure_reason || "Affiliate product link check failed."));
+      } else if (linkStatus === "unchecked") {
+        warnings.push(readinessIssue("affiliate_link_unchecked", "Affiliate link has not been checked recently."));
+      }
+    }
+
+    if (!hasAffiliateInstagramDisclosure(getRunPublishCaption(run))) {
+      warnings.push(readinessIssue("affiliate_disclosure_will_be_added", "Affiliate disclosure will be added automatically before publishing."));
+    }
+  }
+
+  const uniqueBlockers = Array.from(new Map(blockers.map((item) => [item.code, item])).values());
+  const uniqueWarnings = Array.from(new Map(warnings.map((item) => [item.code, item])).values());
+  return {
+    can_publish: uniqueBlockers.length === 0,
+    blockers: uniqueBlockers,
+    warnings: uniqueWarnings,
+    checked_at: new Date().toISOString(),
+  };
+}
+
+async function buildCurrentRunPublishReadiness(run, options = {}) {
+  const productId = getObjectIdString(run.public_product_id);
+  const product = productId ? await Product.findById(productId).lean() : null;
+  return buildRunPublishReadinessSnapshot(run, product, {
+    ...options,
+    productWasFetched: Boolean(productId),
+  });
+}
+
+function formatReadinessBlockers(readiness, fallback = "Campaign is not ready to publish") {
+  const messages = (readiness?.blockers || []).map((item) => item.message).filter(Boolean);
+  return messages.length ? messages.join(" ") : fallback;
+}
+
+function assertPublishReadiness(readiness, fallback) {
+  if (readiness?.can_publish) return;
+  throw new Error(formatReadinessBlockers(readiness, fallback));
+}
+
+function buildCarouselReadinessBlockers(runs = [], productMap = new Map()) {
+  return runs.flatMap((run) => {
+    const productId = getObjectIdString(run.public_product_id);
+    const product = productId ? productMap.get(productId) || null : null;
+    const readiness = buildRunPublishReadinessSnapshot(run, product, {
+      productWasFetched: Boolean(productId),
+      requireApproval: true,
+    });
+    return readiness.blockers.map((blocker) => ({
+      run_id: String(run._id),
+      product_title: run.product_title || run.campaign_id,
+      ...blocker,
+    }));
+  });
+}
+
 function validateAffiliateProductForCampaign(product = {}) {
   if (!product || !product._id) throw new Error("Affiliate product not found for campaign enqueue");
   if ((product.source_type || "admin") !== "admin") throw new Error("Only admin affiliate products can use this campaign queue");
@@ -67,6 +258,15 @@ function validateAffiliateProductForCampaign(product = {}) {
   if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) {
     throw new Error("Affiliate product must be assigned to a category before campaign enqueue");
   }
+  const readiness = buildRunPublishReadinessSnapshot({
+    source_event: "affiliate_product.published",
+    public_product_id: product._id,
+    review_status: "approved",
+    publish_status: "ready",
+    asset_urls: ["https://pinkpaisa.in/placeholder-campaign-readiness.jpg"],
+  }, product, { productWasFetched: true, requireApproval: true });
+  const blockers = readiness.blockers.filter((blocker) => !["missing_assets", "non_https_media_url"].includes(blocker.code));
+  if (blockers.length) throw new Error(blockers.map((blocker) => blocker.message).join(" "));
   return true;
 }
 
@@ -186,6 +386,10 @@ function serialiseRun(run, taskCounts = null) {
     instagram_permalink: run.instagram_permalink || null,
     created_at: run.created_at || null,
     updated_at: run.updated_at || null,
+    publish_readiness: buildRunPublishReadinessSnapshot(run, publicProduct, {
+      productWasFetched: isPopulatedProductSnapshot(publicProduct),
+      requireApproval: true,
+    }),
     task_counts: taskCounts || undefined,
   };
 }
@@ -207,6 +411,127 @@ function serialiseBatchRun(batch) {
     created_at: batch.created_at || null,
     updated_at: batch.updated_at || null,
   };
+}
+
+function serialisePublishEvent(event) {
+  if (!event) return null;
+  return {
+    id: String(event._id),
+    campaign_run_id: event.campaign_run_id?.toString?.() || event.campaign_run_id || null,
+    campaign_id: event.campaign_id || null,
+    batch_run_id: event.batch_run_id?.toString?.() || event.batch_run_id || null,
+    action_type: event.action_type,
+    status: event.status,
+    actor_admin_id: event.actor_admin_id?.toString?.() || event.actor_admin_id || null,
+    source_event: event.source_event || null,
+    product_title: event.product_title || null,
+    content_type: event.content_type || null,
+    instagram_creation_id: event.instagram_creation_id || null,
+    instagram_media_id: event.instagram_media_id || null,
+    instagram_permalink: event.instagram_permalink || null,
+    error_message: event.error_message || null,
+    readiness_snapshot: event.readiness_snapshot || null,
+    metadata_json: event.metadata_json || null,
+    created_at: event.created_at || null,
+    updated_at: event.updated_at || null,
+  };
+}
+
+async function recordPublishEvent(run, {
+  actionType,
+  status,
+  actorAdminId = null,
+  readinessSnapshot = null,
+  publishResult = null,
+  errorMessage = null,
+  metadata = null,
+} = {}) {
+  if (!run?._id || !actionType || !status) return null;
+  try {
+    const event = await MarketingCampaignPublishEvent.create({
+      campaign_run_id: run._id,
+      campaign_id: run.campaign_id || null,
+      batch_run_id: getObjectIdString(run.batch_run_id),
+      action_type: actionType,
+      status,
+      actor_admin_id: actorAdminId || null,
+      source_event: run.source_event || null,
+      product_title: run.product_title || null,
+      content_type: run.content_type || publishResult?.publish_payload?.content_type || null,
+      instagram_creation_id: publishResult?.creation_id || run.instagram_creation_id || null,
+      instagram_media_id: publishResult?.media_id || run.instagram_media_id || null,
+      instagram_permalink: publishResult?.permalink || run.instagram_permalink || null,
+      error_message: errorMessage || null,
+      readiness_snapshot: readinessSnapshot || null,
+      metadata_json: metadata || null,
+    });
+    return event;
+  } catch (error) {
+    logger.error({ err: error, campaignId: run.campaign_id }, "failed to record marketing campaign publish event");
+    return null;
+  }
+}
+
+function getCatalogProductReadiness(product = {}) {
+  const blockers = [];
+  const warnings = [];
+  const status = product.status || "active";
+
+  if (status !== "active") blockers.push(readinessIssue("product_inactive", "Product is not active."));
+  if (product.is_visible === false) blockers.push(readinessIssue("product_hidden", "Product is hidden from public pages."));
+  if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) {
+    blockers.push(readinessIssue("product_uncategorized", "Product category and subcategory are required."));
+  }
+
+  if (product.is_affiliate) {
+    if (product.affiliate_compliance_status !== "compliant") {
+      blockers.push(readinessIssue("affiliate_non_compliant", "Affiliate product is not compliant yet."));
+    }
+    if (!product.affiliate_tag) blockers.push(readinessIssue("affiliate_tag_missing", "Amazon Associate tag is missing."));
+    if (!product.affiliate_url) blockers.push(readinessIssue("affiliate_url_missing", "Amazon affiliate URL is missing."));
+    if (["failed", "paused"].includes(product.affiliate_link_check_status)) {
+      blockers.push(readinessIssue("affiliate_link_failed", "Amazon affiliate link check failed or is paused."));
+    }
+    if (product.affiliate_link_check_status === "unchecked") {
+      warnings.push(readinessIssue("affiliate_link_unchecked", "Amazon affiliate link has not been checked yet."));
+    }
+  }
+
+  return {
+    can_queue: blockers.length === 0,
+    status: blockers.length ? "blocked" : warnings.length ? "warning" : "ready",
+    blockers,
+    warnings,
+  };
+}
+
+function serialiseCatalogProduct(product) {
+  const readiness = getCatalogProductReadiness(product);
+  return {
+    id: String(product._id),
+    title: product.title,
+    slug: product.slug || null,
+    source_type: product.source_type || "admin",
+    status: product.status || "active",
+    is_visible: product.is_visible !== false,
+    is_affiliate: Boolean(product.is_affiliate),
+    affiliate_is_instagram_pick: Boolean(product.affiliate_is_instagram_pick),
+    affiliate_compliance_status: product.affiliate_compliance_status || null,
+    affiliate_link_check_status: product.affiliate_link_check_status || null,
+    featured_image: product.featured_image || product.images?.find?.(Boolean) || null,
+    price: product.is_affiliate ? null : product.price,
+    sale_price: product.is_affiliate ? null : product.sale_price,
+    category: product.category || null,
+    subcategory: product.subcategory || null,
+    readiness_status: readiness.status,
+    readiness,
+  };
+}
+
+function shouldReturnExistingRunningBatch(batch, createdBatch = false) {
+  if (!batch || batch.status !== "running" || createdBatch) return false;
+  const assignedRuns = Array.isArray(batch.run_ids) ? batch.run_ids.length : 0;
+  return assignedRuns > 0 || Number(batch.total_runs || 0) > 0;
 }
 
 function buildTaskInput(run, agentName) {
@@ -247,6 +572,7 @@ function getRunTrackedUrl(run) {
 }
 
 function buildBulkCarouselCaption(runs) {
+  const hasAffiliateRun = runs.some((run) => isAffiliateCampaignRun(run));
   const intro = runs.length > 1
     ? "Featured wellness picks from Pink Paisa:"
     : "Featured pick from Pink Paisa:";
@@ -261,12 +587,13 @@ function buildBulkCarouselCaption(runs) {
     runs.flatMap((run) => run.caption_json?.instagram?.hashtags || [])
   )).filter(Boolean).slice(0, 12);
 
-  return [
+  const caption = [
     intro,
     ...productLines,
     "Shop more on Pink Paisa.",
     hashtags.join(" "),
   ].filter(Boolean).join("\n\n").trim();
+  return ensureAffiliateInstagramDisclosure(caption, hasAffiliateRun);
 }
 
 async function markPublishTaskRunning(run, startedAt) {
@@ -555,7 +882,8 @@ async function advanceRun(run, agentName, output) {
   const nextAgent = getNextAutoAgent(agentName);
   if (!nextAgent) {
     const campaignSettings = await getCampaignSettings();
-    if (campaignSettings.campaign_mode === "automatic") {
+    const requiresManualReview = isAffiliateCampaignRun(run);
+    if (campaignSettings.campaign_mode === "automatic" && !requiresManualReview) {
       const autoApproved = await MarketingCampaignRun.findByIdAndUpdate(run._id, {
         $set: {
           status: "approved_for_publish",
@@ -580,7 +908,9 @@ async function advanceRun(run, agentName, output) {
         current_stage: "ready_for_review",
         review_stage: "draft",
         review_status: "pending",
-        review_notes: output?.review_reason || run.compliance_json?.review_reason || "Draft ready. Review the creative and then click Post when you are satisfied.",
+        review_notes: requiresManualReview
+          ? "Affiliate campaigns always require admin review before Instagram publishing."
+          : output?.review_reason || run.compliance_json?.review_reason || "Draft ready. Review the creative and then click Post when you are satisfied.",
         publish_status: "draft",
         last_error: null,
       },
@@ -633,6 +963,8 @@ async function executeTask(task) {
           skipped_duplicate_publish: true,
         };
       } else {
+        const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: true, allowPublishingState: true });
+        assertPublishReadiness(readiness, "Campaign is not ready for Instagram publishing");
         const publishResult = await publishInstagramDraft({
           contentType: publishPayload.content_type,
           assetUrls: publishPayload.asset_urls,
@@ -658,6 +990,18 @@ async function executeTask(task) {
     await applyOutputToRun(run, task.agent_name, output);
     if (task.agent_name === "publish") {
       const latestRun = await MarketingCampaignRun.findById(run._id);
+      await recordPublishEvent(latestRun || run, {
+        actionType: "publish",
+        status: output?.skipped_duplicate_publish ? "skipped" : "success",
+        publishResult: output,
+        readinessSnapshot: latestRun
+          ? await buildCurrentRunPublishReadiness(latestRun, { requireApproval: true, allowPublishingState: true }).catch(() => null)
+          : null,
+        metadata: {
+          task_id: String(task._id),
+          automatic: task.input_json?.automatic || false,
+        },
+      });
       await refreshBatchRun(latestRun?.batch_run_id);
       return;
     }
@@ -673,6 +1017,18 @@ async function executeTask(task) {
       },
     });
     await markRunFailed(run._id, task.agent_name, message);
+    if (task.agent_name === "publish") {
+      const failedRun = await MarketingCampaignRun.findById(run._id);
+      await recordPublishEvent(failedRun || run, {
+        actionType: "failed_publish",
+        status: "failed",
+        errorMessage: message,
+        readinessSnapshot: failedRun
+          ? await buildCurrentRunPublishReadiness(failedRun, { requireApproval: true, allowPublishingState: true }).catch(() => null)
+          : null,
+        metadata: { task_id: String(task._id) },
+      });
+    }
   }
 }
 
@@ -853,6 +1209,7 @@ async function runDailyBatch({ triggerType = "manual", date = new Date() } = {})
   const batchDateIst = `${parts.year}-${parts.month}-${parts.day}`;
   const batchKey = buildBatchKey(date);
   let batch = await DailyBatchRun.findOne({ batch_key: batchKey });
+  let createdBatch = false;
   if (!batch) {
     try {
       batch = await DailyBatchRun.create({
@@ -862,6 +1219,7 @@ async function runDailyBatch({ triggerType = "manual", date = new Date() } = {})
         status: "running",
         started_at: new Date(),
       });
+      createdBatch = true;
     } catch (error) {
       if (error?.code === 11000) {
         batch = await DailyBatchRun.findOne({ batch_key: batchKey });
@@ -871,7 +1229,7 @@ async function runDailyBatch({ triggerType = "manual", date = new Date() } = {})
     }
   }
 
-  if (batch?.status === "running") {
+  if (shouldReturnExistingRunningBatch(batch, createdBatch)) {
     return serialiseBatchRun(batch);
   }
 
@@ -972,7 +1330,7 @@ async function reviewCampaignRun(runId, action, notes = "") {
   return serialiseRun(run);
 }
 
-async function retryCampaignRun(runId) {
+async function retryCampaignRun(runId, { actorAdminId = null } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
   const failedTask = await AgentTask.findOne({ campaign_run_id: runId, status: "failed" }).sort({ updated_at: -1 });
@@ -984,6 +1342,12 @@ async function retryCampaignRun(runId) {
   run.last_error = null;
   run.publish_status = failedTask.agent_name === "publish" ? "publishing" : "not_ready";
   await run.save();
+  await recordPublishEvent(run, {
+    actionType: "retry",
+    status: "started",
+    actorAdminId,
+    metadata: { agent_name: failedTask.agent_name },
+  });
 
   if (failedTask.agent_name === "publish") {
     return queueAndRunTaskImmediately(runId, "publish");
@@ -994,7 +1358,7 @@ async function retryCampaignRun(runId) {
   return serialiseRun(run);
 }
 
-async function resetStuckCampaignRun(runId) {
+async function resetStuckCampaignRun(runId, { actorAdminId = null } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
 
@@ -1008,11 +1372,18 @@ async function resetStuckCampaignRun(runId) {
     throw new Error("No running task found for this campaign");
   }
 
+  await recordPublishEvent(run, {
+    actionType: "reset",
+    status: "success",
+    actorAdminId,
+    metadata: recovery,
+  });
+
   return getCampaignRunDetail(runId);
 }
 
-async function regenerateCampaignRun(runId, stage = "creative") {
-  const validStages = ["strategy", "creative", "caption", "compliance", "tracking"];
+async function regenerateCampaignRun(runId, stage = "creative", { actorAdminId = null } = {}) {
+  const validStages = ["intake", "strategy", "creative", "caption", "compliance", "tracking"];
   if (!validStages.includes(stage)) throw new Error("Unsupported regenerate stage");
 
   const run = await MarketingCampaignRun.findById(runId);
@@ -1029,16 +1400,17 @@ async function regenerateCampaignRun(runId, stage = "creative") {
     ...clearPublishState(),
   };
 
-  if (["strategy"].includes(stage)) reset.strategy_json = null;
-  if (["strategy", "creative"].includes(stage)) {
+  if (["intake"].includes(stage)) reset.brief_json = null;
+  if (["intake", "strategy"].includes(stage)) reset.strategy_json = null;
+  if (["intake", "strategy", "creative"].includes(stage)) {
     reset.creative_json = null;
     reset.asset_urls = [];
     reset.cta_text = null;
     reset.content_type = "single_image";
   }
-  if (["strategy", "creative", "caption"].includes(stage)) reset.caption_json = null;
-  if (["strategy", "creative", "caption", "compliance"].includes(stage)) reset.compliance_json = null;
-  if (["strategy", "creative", "caption", "compliance", "tracking"].includes(stage)) reset.tracking_json = null;
+  if (["intake", "strategy", "creative", "caption"].includes(stage)) reset.caption_json = null;
+  if (["intake", "strategy", "creative", "caption", "compliance"].includes(stage)) reset.compliance_json = null;
+  if (["intake", "strategy", "creative", "caption", "compliance", "tracking"].includes(stage)) reset.tracking_json = null;
 
   Object.assign(run, reset);
   await run.save();
@@ -1049,13 +1421,22 @@ async function regenerateCampaignRun(runId, stage = "creative") {
     agent_name: { $in: affectedAgents.filter((agent) => agent !== stage) },
   });
   await upsertTask(run, stage, "queued");
+  await recordPublishEvent(run, {
+    actionType: "regenerate",
+    status: "started",
+    actorAdminId,
+    metadata: { stage },
+  });
 
   void processQueuedTasks().catch((error) => logger.error({ err: error }, "marketing worker execution failed"));
   return getCampaignRunDetail(runId);
 }
 
-function buildDraftCaption(longCaption, hashtags, trackedUrl) {
-  return `${String(longCaption || "").trim()}\n\n${String(trackedUrl || "").trim()}\n\n${(hashtags || []).join(" ")}`.trim();
+function buildDraftCaption(longCaption, hashtags, trackedUrl, isAffiliate = false) {
+  return ensureAffiliateInstagramDisclosure(
+    `${String(longCaption || "").trim()}\n\n${String(trackedUrl || "").trim()}\n\n${(hashtags || []).join(" ")}`.trim(),
+    isAffiliate,
+  );
 }
 
 async function updateCampaignDraft(runId, payload = {}) {
@@ -1069,6 +1450,11 @@ async function updateCampaignDraft(runId, payload = {}) {
   if (payload.short_caption != null) instagram.short_caption = String(payload.short_caption).trim();
   if (payload.cta_text != null) instagram.cta = String(payload.cta_text).trim();
   if (Array.isArray(payload.hashtags)) instagram.hashtags = payload.hashtags.map((item) => String(item).trim()).filter(Boolean);
+  const isAffiliate = isAffiliateCampaignRun(run);
+  if (isAffiliate) {
+    if (instagram.long_caption) instagram.long_caption = ensureAffiliateInstagramDisclosure(instagram.long_caption, true);
+    if (instagram.short_caption) instagram.short_caption = ensureAffiliateInstagramDisclosure(instagram.short_caption, true);
+  }
   nextCaption.instagram = instagram;
 
   const trackedUrl = run.tracking_json?.links?.instagram_feed || run.tracking_json?.publish_payload?.tracked_url || "";
@@ -1080,7 +1466,7 @@ async function updateCampaignDraft(runId, payload = {}) {
       asset_urls: run.asset_urls || [],
       tracked_url: trackedUrl,
       cta: payload.cta_text != null ? String(payload.cta_text).trim() : (instagram.cta || run.cta_text || ""),
-      caption: buildDraftCaption(instagram.long_caption || instagram.short_caption || "", instagram.hashtags || [], trackedUrl),
+      caption: buildDraftCaption(instagram.long_caption || instagram.short_caption || "", instagram.hashtags || [], trackedUrl, isAffiliate),
     },
   };
 
@@ -1096,7 +1482,7 @@ async function updateCampaignDraft(runId, payload = {}) {
   return getCampaignRunDetail(runId);
 }
 
-async function scheduleCampaignRun(runId, scheduledFor) {
+async function scheduleCampaignRun(runId, scheduledFor, { actorAdminId = null } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
   if (run.review_status !== "approved" || !["ready", "failed", "draft", "scheduled"].includes(run.publish_status)) {
@@ -1109,16 +1495,27 @@ async function scheduleCampaignRun(runId, scheduledFor) {
     throw new Error(`Schedule time must be at least ${Math.round(MIN_SCHEDULE_DELAY_MS / 60000)} minutes in the future`);
   }
 
+  const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: true });
+  assertPublishReadiness(readiness, "Campaign is not ready to schedule for Instagram publishing");
+
   run.status = "scheduled";
   run.current_stage = "scheduled_for_publish";
   run.publish_status = "scheduled";
   run.scheduled_for = scheduleDate;
   run.last_error = null;
   await run.save();
-  return serialiseRun(run);
+  await recordPublishEvent(run, {
+    actionType: "schedule",
+    status: "success",
+    actorAdminId,
+    readinessSnapshot: readiness,
+    metadata: { scheduled_for: scheduleDate.toISOString() },
+  });
+  const detail = await getCampaignRunDetail(runId);
+  return detail.run;
 }
 
-async function publishCampaignRunNow(runId) {
+async function publishCampaignRunNow(runId, { actorAdminId = null } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
   if (run.instagram_media_id || run.publish_status === "published" || run.status === "published") {
@@ -1138,10 +1535,8 @@ async function publishCampaignRunNow(runId) {
   if (run.publish_status === "publishing" || run.status === "publishing") {
     throw new Error("Campaign is already publishing");
   }
-  if (run.review_status !== "approved") throw new Error("Review approval is required before publishing");
-  if (!run.tracking_json?.publish_payload?.asset_urls?.length && !(run.asset_urls || []).length) {
-    throw new Error("No publish-ready Instagram assets are available");
-  }
+  const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: true });
+  assertPublishReadiness(readiness, "Campaign is not ready for Instagram publishing");
 
   run.status = "publishing";
   run.current_stage = "publish";
@@ -1150,11 +1545,17 @@ async function publishCampaignRunNow(runId) {
   run.last_error = null;
   run.publish_attempted_at = new Date();
   await run.save();
+  await recordPublishEvent(run, {
+    actionType: "publish",
+    status: "started",
+    actorAdminId,
+    readinessSnapshot: readiness,
+  });
 
   return queueAndRunTaskImmediately(runId, "publish");
 }
 
-async function publishCampaignRunsAsCarousel(runIds = []) {
+async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null } = {}) {
   const uniqueRunIds = Array.from(new Set(
     (Array.isArray(runIds) ? runIds : []).map((id) => String(id || "").trim()).filter(Boolean)
   ));
@@ -1174,6 +1575,18 @@ async function publishCampaignRunsAsCarousel(runIds = []) {
   if (orderedRuns.length !== uniqueRunIds.length) {
     const missingIds = uniqueRunIds.filter((id) => !runMap.has(id));
     throw new Error(`Some selected campaign runs were not found: ${missingIds.join(", ")}`);
+  }
+
+  const productIds = Array.from(new Set(orderedRuns.map((run) => getObjectIdString(run.public_product_id)).filter(Boolean)));
+  const products = productIds.length ? await Product.find({ _id: { $in: productIds } }).lean() : [];
+  const productMap = new Map(products.map((product) => [String(product._id), product]));
+  const readinessBlockers = buildCarouselReadinessBlockers(orderedRuns, productMap);
+  if (readinessBlockers.length) {
+    const message = readinessBlockers
+      .slice(0, 8)
+      .map((blocker) => `${blocker.product_title}: ${blocker.message}`)
+      .join(" ");
+    throw new Error(`Carousel publish blocked. ${message}`);
   }
 
   for (const run of orderedRuns) {
@@ -1254,6 +1667,18 @@ async function publishCampaignRunsAsCarousel(runIds = []) {
           },
         },
       });
+      await recordPublishEvent(run, {
+        actionType: "carousel_publish",
+        status: "success",
+        actorAdminId,
+        publishResult,
+        readinessSnapshot: await buildCurrentRunPublishReadiness(run, { requireApproval: true, allowPublishingState: true }).catch(() => null),
+        metadata: {
+          total_items: orderedRuns.length,
+          position: index + 1,
+          selected_run_ids: uniqueRunIds,
+        },
+      });
 
       await refreshBatchRun(run.batch_run_id);
     }
@@ -1278,6 +1703,17 @@ async function publishCampaignRunsAsCarousel(runIds = []) {
         status: "failed",
         finishedAt,
         errorMessage: message,
+      });
+      await recordPublishEvent(run, {
+        actionType: "carousel_publish",
+        status: "failed",
+        actorAdminId,
+        errorMessage: message,
+        readinessSnapshot: await buildCurrentRunPublishReadiness(run, { requireApproval: true, allowPublishingState: true }).catch(() => null),
+        metadata: {
+          total_items: orderedRuns.length,
+          selected_run_ids: uniqueRunIds,
+        },
       });
       await refreshBatchRun(run.batch_run_id);
     }
@@ -1310,32 +1746,114 @@ async function processDueScheduledPublishes(limit = 3) {
   }
 }
 
-async function listCampaignRuns({ search = "", status = "all", page = 1, limit = 10 }) {
+function buildCampaignRunListQuery({
+  search = "",
+  status = "all",
+  source_event: sourceEvent = "",
+  date_from: dateFrom = "",
+  date_to: dateTo = "",
+  affiliate_only: affiliateOnly = false,
+} = {}) {
   const query = {};
   const trimmedSearch = String(search || "").trim();
   if (status !== "all") query.status = status;
-  if (trimmedSearch) {
+  if (sourceEvent && sourceEvent !== "all") query.source_event = sourceEvent;
+  if (affiliateOnly === true || affiliateOnly === "true" || affiliateOnly === "1") {
     query.$or = [
+      { source_event: "affiliate_product.published" },
+      { "brief_json.is_affiliate": true },
+    ];
+  }
+  const createdRange = {};
+  if (dateFrom) {
+    const parsed = new Date(dateFrom);
+    if (!Number.isNaN(parsed.getTime())) createdRange.$gte = parsed;
+  }
+  if (dateTo) {
+    const parsed = new Date(dateTo);
+    if (!Number.isNaN(parsed.getTime())) createdRange.$lte = parsed;
+  }
+  if (Object.keys(createdRange).length) query.created_at = createdRange;
+  if (trimmedSearch) {
+    const searchOr = [
       { campaign_id: { $regex: trimmedSearch, $options: "i" } },
       { product_title: { $regex: trimmedSearch, $options: "i" } },
       { vendor_shop_name: { $regex: trimmedSearch, $options: "i" } },
     ];
+    if (query.$or) {
+      query.$and = [{ $or: query.$or }, { $or: searchOr }];
+      delete query.$or;
+    } else {
+      query.$or = searchOr;
+    }
   }
+  return query;
+}
+
+function matchesReadinessFilter(run, readiness) {
+  if (!readiness || readiness === "all") return true;
+  const snapshot = serialiseRun(run).publish_readiness;
+  const blockers = snapshot?.blockers || [];
+  const warnings = snapshot?.warnings || [];
+  if (readiness === "ready") return snapshot?.can_publish === true;
+  if (readiness === "blocked") return blockers.length > 0;
+  if (readiness === "warnings") return blockers.length === 0 && warnings.length > 0;
+  return true;
+}
+
+async function listCampaignRuns({
+  search = "",
+  status = "all",
+  page = 1,
+  limit = 10,
+  source_event: sourceEvent = "",
+  readiness = "all",
+  date_from: dateFrom = "",
+  date_to: dateTo = "",
+  affiliate_only: affiliateOnly = false,
+} = {}) {
+  const query = buildCampaignRunListQuery({
+    search,
+    status,
+    source_event: sourceEvent,
+    date_from: dateFrom,
+    date_to: dateTo,
+    affiliate_only: affiliateOnly,
+  });
 
   const safePage = Math.max(Number(page || 1), 1);
   const safeLimit = Math.min(Math.max(Number(limit || 10), 1), 50);
-  const [items, total, groupedCounts, latestBatch] = await Promise.all([
-    MarketingCampaignRun.find(query)
+  const usesReadinessFilter = readiness && readiness !== "all";
+  const baseFind = MarketingCampaignRun.find(query)
       .sort({ updated_at: -1 })
-      .skip((safePage - 1) * safeLimit)
-      .limit(safeLimit)
       .populate("vendor_product_id", "featured_image additional_images")
       .populate("public_product_id", PUBLIC_PRODUCT_CAMPAIGN_FIELDS)
-      .lean(),
+      .lean();
+  if (!usesReadinessFilter) {
+    baseFind.skip((safePage - 1) * safeLimit).limit(safeLimit);
+  }
+
+  const countFind = usesReadinessFilter
+    ? Promise.resolve(null)
+    : MarketingCampaignRun.find(query)
+      .populate("public_product_id", PUBLIC_PRODUCT_CAMPAIGN_FIELDS)
+      .lean();
+
+  const [rawItems, totalWithoutReadiness, groupedCounts, latestBatch, countItems] = await Promise.all([
+    baseFind,
     MarketingCampaignRun.countDocuments(query),
     MarketingCampaignRun.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
     DailyBatchRun.findOne().sort({ created_at: -1 }).lean(),
+    countFind,
   ]);
+
+  const filteredItems = usesReadinessFilter
+    ? rawItems.filter((item) => matchesReadinessFilter(item, readiness))
+    : rawItems;
+  const total = usesReadinessFilter ? filteredItems.length : totalWithoutReadiness;
+  const items = usesReadinessFilter
+    ? filteredItems.slice((safePage - 1) * safeLimit, safePage * safeLimit)
+    : filteredItems;
 
   const runIds = items.map((item) => item._id);
   const taskCountRows = runIds.length
@@ -1367,6 +1885,10 @@ async function listCampaignRuns({ search = "", status = "all", page = 1, limit =
   groupedCounts.forEach((row) => {
     if (counts[row._id] != null) counts[row._id] = row.count;
   });
+  const countableItems = countItems || rawItems;
+  counts.ready_to_post = countableItems.filter((item) => matchesReadinessFilter(item, "ready")).length;
+  counts.blocked = countableItems.filter((item) => matchesReadinessFilter(item, "blocked")).length;
+  counts.affiliate = countableItems.filter((item) => serialiseRun(item).is_affiliate).length;
 
   return {
     items: items.map((item) => serialiseRun(item, taskCountMap.get(String(item._id)) || undefined)),
@@ -1381,6 +1903,257 @@ async function listCampaignRuns({ search = "", status = "all", page = 1, limit =
   };
 }
 
+async function listCampaignCatalogProducts({
+  search = "",
+  page = 1,
+  limit = 24,
+  source = "all",
+  readiness = "all",
+  category = "",
+  affiliate_only: affiliateOnly = false,
+  instagram_pick: instagramPick = false,
+} = {}) {
+  const query = {
+    status: "active",
+    is_visible: { $ne: false },
+  };
+  const trimmedSearch = String(search || "").trim();
+  if (trimmedSearch) {
+    query.$or = [
+      { title: { $regex: trimmedSearch, $options: "i" } },
+      { slug: { $regex: trimmedSearch, $options: "i" } },
+      { category: { $regex: trimmedSearch, $options: "i" } },
+      { subcategory: { $regex: trimmedSearch, $options: "i" } },
+      { affiliate_asin: { $regex: trimmedSearch, $options: "i" } },
+    ];
+  }
+  if (source === "affiliate" || affiliateOnly === true || affiliateOnly === "true" || affiliateOnly === "1") query.is_affiliate = true;
+  if (source === "admin") {
+    query.source_type = "admin";
+    query.is_affiliate = { $ne: true };
+  }
+  if (source === "vendor") query.source_type = "vendor";
+  if (instagramPick === true || instagramPick === "true" || instagramPick === "1") query.affiliate_is_instagram_pick = true;
+  if (category) query.category = { $regex: String(category).trim(), $options: "i" };
+
+  const safePage = Math.max(Number(page || 1), 1);
+  const safeLimit = Math.min(Math.max(Number(limit || 24), 1), 100);
+  const usesReadinessFilter = readiness && readiness !== "all";
+  const baseQuery = Product.find(query)
+    .select([
+      "title",
+      "slug",
+      "source_type",
+      "status",
+      "is_visible",
+      "is_affiliate",
+      "featured_image",
+      "images",
+      "price",
+      "sale_price",
+      "category",
+      "subcategory",
+      "affiliate_is_instagram_pick",
+      "affiliate_compliance_status",
+      "affiliate_link_check_status",
+      "affiliate_tag",
+      "affiliate_url",
+    ].join(" "))
+    .sort({ is_affiliate: -1, affiliate_is_instagram_pick: -1, updatedAt: -1 })
+    .lean();
+
+  if (!usesReadinessFilter) {
+    baseQuery.skip((safePage - 1) * safeLimit).limit(safeLimit);
+  }
+
+  const [rawItems, totalWithoutReadiness] = await Promise.all([
+    baseQuery,
+    Product.countDocuments(query),
+  ]);
+  const filtered = usesReadinessFilter
+    ? rawItems.filter((product) => {
+      const statusValue = getCatalogProductReadiness(product).status;
+      if (readiness === "ready") return statusValue === "ready" || statusValue === "warning";
+      if (readiness === "blocked") return statusValue === "blocked";
+      if (readiness === "warning") return statusValue === "warning";
+      return true;
+    })
+    : rawItems;
+  const total = usesReadinessFilter ? filtered.length : totalWithoutReadiness;
+  const items = usesReadinessFilter
+    ? filtered.slice((safePage - 1) * safeLimit, safePage * safeLimit)
+    : filtered;
+
+  return {
+    items: items.map(serialiseCatalogProduct),
+    pagination: {
+      page: safePage,
+      limit: safeLimit,
+      total,
+      total_pages: Math.ceil(total / safeLimit) || 1,
+    },
+  };
+}
+
+async function scanCampaignReadiness(runIds = []) {
+  const uniqueRunIds = Array.from(new Set(
+    (Array.isArray(runIds) ? runIds : []).map((id) => String(id || "").trim()).filter(Boolean)
+  ));
+  if (!uniqueRunIds.length) throw new Error("Select at least one campaign run to scan");
+
+  const runs = await MarketingCampaignRun.find({ _id: { $in: uniqueRunIds } })
+    .populate("public_product_id", PUBLIC_PRODUCT_CAMPAIGN_FIELDS)
+    .lean();
+  const runMap = new Map(runs.map((run) => [String(run._id), run]));
+  return {
+    requested: uniqueRunIds.length,
+    results: uniqueRunIds.map((id) => {
+      const run = runMap.get(id);
+      if (!run) {
+        return {
+          id,
+          ok: false,
+          message: "Campaign run not found",
+          publish_readiness: {
+            can_publish: false,
+            blockers: [readinessIssue("run_not_found", "Campaign run not found.")],
+            warnings: [],
+            checked_at: new Date().toISOString(),
+          },
+        };
+      }
+      const serialised = serialiseRun(run);
+      const blockers = serialised.publish_readiness?.blockers || [];
+      return {
+        id,
+        ok: blockers.length === 0,
+        message: blockers.length ? blockers[0].message : "Campaign can proceed to publish checks",
+        run: serialised,
+        publish_readiness: serialised.publish_readiness,
+      };
+    }),
+  };
+}
+
+async function listCampaignCalendar({ from = "", to = "" } = {}) {
+  const now = new Date();
+  const fromDate = from && !Number.isNaN(new Date(from).getTime())
+    ? new Date(from)
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+  const toDate = to && !Number.isNaN(new Date(to).getTime())
+    ? new Date(to)
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 21);
+
+  const runs = await MarketingCampaignRun.find({
+    $or: [
+      { scheduled_for: { $gte: fromDate, $lte: toDate } },
+      { published_at: { $gte: fromDate, $lte: toDate } },
+    ],
+  })
+    .sort({ scheduled_for: 1, published_at: 1, updated_at: -1 })
+    .populate("public_product_id", PUBLIC_PRODUCT_CAMPAIGN_FIELDS)
+    .lean();
+
+  const entries = runs.map((run) => {
+    const serialised = serialiseRun(run);
+    const dateValue = run.scheduled_for || run.published_at || run.updated_at;
+    const dateKey = dateValue ? new Date(dateValue).toISOString().slice(0, 10) : "unknown";
+    const dayRuns = runs.filter((candidate) => {
+      const candidateDate = candidate.scheduled_for || candidate.published_at || candidate.updated_at;
+      return candidateDate && new Date(candidateDate).toISOString().slice(0, 10) === dateKey;
+    });
+    const warnings = [];
+    if (dayRuns.filter((candidate) => candidate.status === "scheduled").length > 3) {
+      warnings.push(readinessIssue("schedule_density", "More than 3 Instagram posts are scheduled on this date."));
+    }
+    if (serialised.publish_readiness?.blockers?.length && run.status === "scheduled") {
+      warnings.push(readinessIssue("scheduled_now_blocked", "This scheduled run now has publish blockers."));
+    }
+    return {
+      date: dateKey,
+      run: serialised,
+      warnings,
+    };
+  });
+
+  const grouped = entries.reduce((acc, entry) => {
+    if (!acc[entry.date]) acc[entry.date] = [];
+    acc[entry.date].push(entry);
+    return acc;
+  }, {});
+
+  return {
+    from: fromDate.toISOString(),
+    to: toDate.toISOString(),
+    entries,
+    grouped,
+  };
+}
+
+async function getDailyBatchRunDetail(batchId) {
+  const batch = await DailyBatchRun.findById(batchId).lean();
+  if (!batch) throw new Error("Daily batch not found");
+  const runIds = Array.isArray(batch.run_ids) ? batch.run_ids : [];
+  const [runs, taskRows] = await Promise.all([
+    MarketingCampaignRun.find({ _id: { $in: runIds } })
+      .sort({ updated_at: -1 })
+      .populate("public_product_id", PUBLIC_PRODUCT_CAMPAIGN_FIELDS)
+      .lean(),
+    AgentTask.aggregate([
+      { $match: { campaign_run_id: { $in: runIds } } },
+      { $group: { _id: { campaign_run_id: "$campaign_run_id", status: "$status" }, count: { $sum: 1 } } },
+    ]),
+  ]);
+  const taskCountMap = new Map();
+  taskRows.forEach((row) => {
+    const runId = String(row._id.campaign_run_id);
+    const existing = taskCountMap.get(runId) || { queued: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    existing[row._id.status] = row.count;
+    taskCountMap.set(runId, existing);
+  });
+  const summary = {
+    queued: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    stuck: 0,
+  };
+  taskRows.forEach((row) => {
+    if (summary[row._id.status] != null) summary[row._id.status] += row.count;
+  });
+  summary.stuck = runs.filter((run) => ["batch_running", "publishing"].includes(run.status) && run.updated_at && Date.now() - new Date(run.updated_at).getTime() > STALE_TASK_THRESHOLD_MS).length;
+
+  return {
+    batch: serialiseBatchRun(batch),
+    summary,
+    runs: runs.map((run) => serialiseRun(run, taskCountMap.get(String(run._id)) || undefined)),
+  };
+}
+
+async function retryFailedBatchRuns(batchId, { actorAdminId = null } = {}) {
+  const batch = await DailyBatchRun.findById(batchId).lean();
+  if (!batch) throw new Error("Daily batch not found");
+  const failedRuns = await MarketingCampaignRun.find({
+    _id: { $in: batch.run_ids || [] },
+    status: "failed",
+  });
+  const results = [];
+  for (const run of failedRuns) {
+    try {
+      const updated = await retryCampaignRun(run._id, { actorAdminId });
+      results.push({ id: String(run._id), ok: true, run: updated });
+    } catch (error) {
+      results.push({ id: String(run._id), ok: false, message: error.message });
+    }
+  }
+  return {
+    requested: failedRuns.length,
+    succeeded: results.filter((result) => result.ok).length,
+    failed: results.filter((result) => !result.ok).length,
+    results,
+  };
+}
+
 async function getCampaignRunDetail(runId) {
   const run = await MarketingCampaignRun.findById(runId)
     .populate("vendor_product_id", "title slug price sale_price stock_quantity category subcategory featured_image short_description full_description approval_status published_product_id")
@@ -1390,11 +2163,15 @@ async function getCampaignRunDetail(runId) {
     .lean();
   if (!run) throw new Error("Campaign run not found");
 
-  const tasks = await AgentTask.find({ campaign_run_id: runId }).sort({ sequence: 1, created_at: 1 }).lean();
+  const [tasks, publishEvents] = await Promise.all([
+    AgentTask.find({ campaign_run_id: runId }).sort({ sequence: 1, created_at: 1 }).lean(),
+    MarketingCampaignPublishEvent.find({ campaign_run_id: runId }).sort({ created_at: -1 }).limit(50).lean(),
+  ]);
   return {
     run: serialiseRun(run),
     batch: serialiseBatchRun(run.batch_run_id),
     tasks: tasks.map(serialiseTask),
+    publish_events: publishEvents.map(serialisePublishEvent),
   };
 }
 
@@ -1413,8 +2190,11 @@ module.exports = {
   enqueueAffiliateProductCampaign,
   enqueueApprovedProductCampaign,
   getCampaignSettings,
+  getDailyBatchRunDetail,
   getCampaignRunDetail,
   getLatestDailyBatchRun,
+  listCampaignCalendar,
+  listCampaignCatalogProducts,
   listCampaignRuns,
   processDueScheduledPublishes,
   processQueuedTasks,
@@ -1424,12 +2204,23 @@ module.exports = {
   regenerateCampaignRun,
   resetStuckCampaignRun,
   reviewCampaignRun,
+  retryFailedBatchRuns,
   retryCampaignRun,
   runDailyBatch,
+  scanCampaignReadiness,
   scheduleCampaignRun,
   serialiseBatchRun,
+  serialiseCatalogProduct,
+  serialisePublishEvent,
   serialiseRun,
   startMarketingAgentWorker,
   updateCampaignDraft,
   validateAffiliateProductForCampaign,
+  _private: {
+    buildBulkCarouselCaption,
+    buildCarouselReadinessBlockers,
+    buildRunPublishReadinessSnapshot,
+    getRunPublishAssetUrls,
+    shouldReturnExistingRunningBatch,
+  },
 };
