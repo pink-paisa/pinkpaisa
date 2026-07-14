@@ -26,9 +26,16 @@ const {
 const { validateAmazonAffiliateUrl } = require("./amazonAffiliateCompliance");
 const { isPublicMediaUrl, publishInstagramDraft } = require("./instagramPublishService");
 const { deleteCampaignAsset } = require("./campaignAssetStorage");
+const {
+  readAndNormalizeReferenceImage,
+  resolveProductReferenceImage,
+  resolveVendorReferenceImage,
+} = require("./campaignReferenceImage");
+const { assertReferenceModelSupported } = require("./imageProviders");
 
-const AUTO_SEQUENCE = ["intake", "strategy", "creative", "caption", "compliance", "tracking"];
-const ALL_SEQUENCE = [...AUTO_SEQUENCE, "publish"];
+const AUTO_SEQUENCE = ["intake", "creative", "caption", "compliance", "tracking"];
+const LEGACY_SEQUENCE = ["intake", "strategy", "creative", "caption", "compliance", "tracking"];
+const ALL_SEQUENCE = [...LEGACY_SEQUENCE, "publish"];
 const WORKER_INTERVAL_MS = Math.max(parseInt(process.env.MARKETING_AGENT_POLL_MS || "5000", 10), 1000);
 const STALE_TASK_THRESHOLD_MS = Math.max(parseInt(process.env.MARKETING_STALE_TASK_MS || String(30 * 60 * 1000), 10), 60 * 1000);
 const TASK_LEASE_MS = Math.max(parseInt(process.env.MARKETING_TASK_LEASE_MS || String(5 * 60 * 1000), 10), 60 * 1000);
@@ -43,6 +50,7 @@ const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = [
   "affiliate_link_check_status affiliate_link_failure_reason",
   "price price_status affiliate_data_source affiliate_data_expires_at archived_at",
   "affiliate_campaign_asset_url affiliate_campaign_usage_rights affiliate_image_provenance",
+  "brand_name buying_intent pros cons short_description full_description tags campaign_label",
 ].join(" ");
 
 let workerStarted = false;
@@ -101,7 +109,7 @@ function describeExecutionError(error) {
   }
 
   if (responseData?.message) return String(responseData.message);
-  if (error.message) return String(error.message);
+  if (error.message) return error.code ? `${error.code}: ${String(error.message)}` : String(error.message);
   return "Agent execution failed";
 }
 
@@ -117,6 +125,30 @@ function isUncategorizedValue(value) {
 
 function readinessIssue(code, message) {
   return { code, message };
+}
+
+async function assertCampaignReferenceReady(referenceImageUrl) {
+  const settings = await getCampaignSettings();
+  await readAndNormalizeReferenceImage(referenceImageUrl);
+  await assertReferenceModelSupported(settings.campaign_ai_provider, settings.campaign_ai_model);
+  return true;
+}
+
+async function resolveCurrentRunReferenceImage(run = {}) {
+  const productId = getObjectIdString(run.public_product_id);
+  const vendorProductId = getObjectIdString(run.vendor_product_id);
+  const publicProduct = productId ? await Product.findById(productId).lean() : null;
+  if (vendorProductId) {
+    const vendorProduct = await VendorProduct.findById(vendorProductId).lean();
+    return resolveVendorReferenceImage(vendorProduct || {}, publicProduct || {})
+      || run.brief_json?.reference_image_url
+      || run.brief_json?.campaign_asset?.url
+      || null;
+  }
+  return resolveProductReferenceImage(publicProduct || {})
+    || run.brief_json?.reference_image_url
+    || run.brief_json?.campaign_asset?.url
+    || null;
 }
 
 function getObjectIdString(value) {
@@ -144,6 +176,7 @@ function getRunPublishAssetUrls(run = {}) {
 
 function getRunPublishCaption(run = {}) {
   return run?.tracking_json?.publish_payload?.caption
+    || run?.caption_json?.instagram?.caption
     || run?.caption_json?.instagram?.long_caption
     || run?.caption_json?.instagram?.short_caption
     || "";
@@ -190,6 +223,20 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
   }
   if (!run.tracking_json?.publish_payload) {
     blockers.push(readinessIssue("pipeline_incomplete", "Campaign generation and tracking must finish before review or publishing."));
+  }
+  if (!run.compliance_json) {
+    blockers.push(readinessIssue("compliance_pending", "Campaign compliance checks have not completed."));
+  } else if (!["approved", "approved_with_warnings"].includes(run.compliance_json.status)) {
+    blockers.push(readinessIssue("compliance_blocked", "Resolve all blocking compliance issues before approval or publishing."));
+  }
+  const referenceImageUrl = run.brief_json?.reference_image_url
+    || run.brief_json?.campaign_asset?.url
+    || resolveProductReferenceImage(product || {});
+  if (!referenceImageUrl) {
+    blockers.push(readinessIssue("reference_image_required", "Product image required."));
+  }
+  if (run.creative_json && !run.creative_json.source_image_url && !run.creative_json.creative_json?.source_image_url) {
+    blockers.push(readinessIssue("reference_image_not_used", "The generated creative is not linked to its required product reference image."));
   }
   if (!assetUrls.length) {
     blockers.push(readinessIssue("missing_assets", "No publish-ready Instagram creative image is available."));
@@ -259,12 +306,12 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
         warnings.push(readinessIssue("affiliate_link_unchecked", "Affiliate link has not been checked recently."));
       }
       if (!["admin_confirmed", "owned", "licensed", "api_permitted"].includes(String(product.affiliate_campaign_usage_rights || "unknown"))) {
-        warnings.push(readinessIssue("generic_affiliate_creative", "The product image is not rights-approved; campaign generation will use category-level artwork."));
+        warnings.push(readinessIssue("reference_rights_unconfirmed", "Product image usage rights are unconfirmed. Review this before publishing."));
       }
     }
 
     if (!hasAffiliateInstagramDisclosure(getRunPublishCaption(run))) {
-      warnings.push(readinessIssue("affiliate_disclosure_will_be_added", "Affiliate disclosure will be added automatically before publishing."));
+      blockers.push(readinessIssue("affiliate_disclosure_missing", "Affiliate disclosure is required before approval or publishing."));
     }
   }
 
@@ -295,6 +342,15 @@ function formatReadinessBlockers(readiness, fallback = "Campaign is not ready to
 function assertPublishReadiness(readiness, fallback) {
   if (readiness?.can_publish) return;
   throw new Error(formatReadinessBlockers(readiness, fallback));
+}
+
+function assertReviewApprovalReadiness(readiness) {
+  const blockers = (readiness?.blockers || []).filter((blocker) => ![
+    "review_not_approved",
+    "non_https_media_url",
+  ].includes(blocker.code));
+  if (!blockers.length) return;
+  throw new Error(blockers.map((blocker) => blocker.message).join(" "));
 }
 
 function buildCarouselReadinessBlockers(runs = [], productMap = new Map(), {
@@ -328,12 +384,27 @@ function validateAffiliateProductForCampaign(product = {}) {
   if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) {
     throw new Error("Affiliate product must be assigned to a category before campaign enqueue");
   }
+  const referenceImageUrl = resolveProductReferenceImage(product);
+  if (!referenceImageUrl) {
+    const error = new Error("Product image required.");
+    error.code = "reference_image_required";
+    throw error;
+  }
   const readiness = buildRunPublishReadinessSnapshot({
     source_event: "affiliate_product.published",
     public_product_id: product._id,
     review_status: "approved",
     publish_status: "ready",
     asset_urls: ["https://pinkpaisa.in/placeholder-campaign-readiness.jpg"],
+    brief_json: { is_affiliate: true, reference_image_url: referenceImageUrl },
+    creative_json: { source_image_url: referenceImageUrl },
+    compliance_json: { status: "approved", issues: [] },
+    tracking_json: {
+      publish_payload: {
+        asset_urls: ["https://pinkpaisa.in/placeholder-campaign-readiness.jpg"],
+        caption: ensureAffiliateInstagramDisclosure("Campaign validation", true),
+      },
+    },
   }, product, { productWasFetched: true, requireApproval: true });
   const blockers = readiness.blockers.filter((blocker) => !["missing_assets", "non_https_media_url", "pipeline_incomplete"].includes(blocker.code));
   if (blockers.length) throw new Error(blockers.map((blocker) => blocker.message).join(" "));
@@ -346,6 +417,7 @@ function getSequence(agentName) {
 }
 
 function getNextAutoAgent(agentName) {
+  if (agentName === "strategy") return "creative";
   const index = AUTO_SEQUENCE.indexOf(agentName);
   return index >= 0 ? AUTO_SEQUENCE[index + 1] || null : null;
 }
@@ -441,6 +513,19 @@ function serialiseRun(run, taskCounts = null) {
   const brief = run.brief_json || {};
   const briefAffiliate = brief.affiliate || {};
   const isAffiliate = Boolean(publicProduct.is_affiliate || brief.is_affiliate || run.source_event === "affiliate_product.published");
+  const referenceImageUrl = brief.reference_image_url
+    || brief.campaign_asset?.url
+    || resolveProductReferenceImage(publicProduct)
+    || productGalleryUrls[0]
+    || null;
+  const usedReferenceUrl = run.creative_json?.source_image_url || run.creative_json?.creative_json?.source_image_url || null;
+  const referenceImageStatus = usedReferenceUrl
+    ? "used"
+    : run.last_error?.includes?.("reference_image_unavailable")
+      ? "unavailable"
+      : referenceImageUrl
+        ? "available"
+        : "required";
   const publishReadiness = buildRunPublishReadinessSnapshot(run, publicProduct, {
     productWasFetched: isPopulatedProductSnapshot(publicProduct),
     requireApproval: true,
@@ -472,8 +557,10 @@ function serialiseRun(run, taskCounts = null) {
     content_type: run.content_type || null,
     cta_text: run.cta_text || null,
     asset_urls: run.asset_urls || [],
-    product_image_url: productGalleryUrls[0] || null,
+    product_image_url: referenceImageUrl,
     product_gallery_urls: productGalleryUrls,
+    reference_image_url: referenceImageUrl,
+    reference_image_status: referenceImageStatus,
     creative_json: run.creative_json || null,
     approved_at: run.approved_at || null,
     last_error: run.last_error || null,
@@ -600,6 +687,9 @@ function getCatalogProductReadiness(product = {}) {
   if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) {
     blockers.push(readinessIssue("product_uncategorized", "Product category and subcategory are required."));
   }
+  if (!resolveProductReferenceImage(product)) {
+    blockers.push(readinessIssue("reference_image_required", "Product image required."));
+  }
 
   if (product.is_affiliate) {
     if (product.affiliate_compliance_status !== "compliant") {
@@ -625,6 +715,7 @@ function getCatalogProductReadiness(product = {}) {
 
 function serialiseCatalogProduct(product) {
   const readiness = getCatalogProductReadiness(product);
+  const referenceImageUrl = resolveProductReferenceImage(product);
   return {
     id: String(product._id),
     title: product.title,
@@ -636,7 +727,9 @@ function serialiseCatalogProduct(product) {
     affiliate_is_instagram_pick: Boolean(product.affiliate_is_instagram_pick),
     affiliate_compliance_status: product.affiliate_compliance_status || null,
     affiliate_link_check_status: product.affiliate_link_check_status || null,
-    featured_image: product.featured_image || product.images?.find?.(Boolean) || null,
+    featured_image: referenceImageUrl,
+    reference_image_url: referenceImageUrl,
+    reference_image_status: referenceImageUrl ? "available" : "required",
     price: product.is_affiliate ? null : product.price,
     sale_price: product.is_affiliate ? null : product.sale_price,
     category: product.category || null,
@@ -661,10 +754,10 @@ function buildTaskInput(run, agentName) {
     };
   }
   if (agentName === "strategy") return { brief_json: run.brief_json || null };
-  if (agentName === "creative") return { brief_json: run.brief_json || null, strategy_json: run.strategy_json || null };
-  if (agentName === "caption") return { brief_json: run.brief_json || null, strategy_json: run.strategy_json || null, creative_json: run.creative_json || null };
+  if (agentName === "creative") return { brief_json: run.brief_json || null };
+  if (agentName === "caption") return { brief_json: run.brief_json || null, creative_json: run.creative_json || null };
   if (agentName === "compliance") return { brief_json: run.brief_json || null, caption_json: run.caption_json || null, creative_json: run.creative_json || null };
-  if (agentName === "tracking") return { brief_json: run.brief_json || null, strategy_json: run.strategy_json || null, caption_json: run.caption_json || null, compliance_json: run.compliance_json || null, creative_json: run.creative_json || null };
+  if (agentName === "tracking") return { brief_json: run.brief_json || null, caption_json: run.caption_json || null, compliance_json: run.compliance_json || null, creative_json: run.creative_json || null };
   if (agentName === "publish") return { tracking_json: run.tracking_json || null, creative_json: run.creative_json || null, caption_json: run.caption_json || null };
   if (agentName === "carousel") return { grouped_run_ids: [], actor_admin_id: null };
   return {};
@@ -860,7 +953,6 @@ async function runAgentForStage(run, agentName) {
 async function ensureRunInputs(run, agentName) {
   const prerequisites = [
     { stage: "intake", needs: ["strategy", "creative", "caption", "compliance", "tracking", "publish"], missing: () => !run.brief_json },
-    { stage: "strategy", needs: ["creative", "caption", "tracking", "publish"], missing: () => !run.strategy_json },
     { stage: "creative", needs: ["caption", "compliance", "tracking", "publish"], missing: () => !run.creative_json },
     { stage: "caption", needs: ["compliance", "tracking", "publish"], missing: () => !run.caption_json },
     { stage: "compliance", needs: ["tracking", "publish"], missing: () => !run.compliance_json },
@@ -1102,37 +1194,13 @@ async function advanceRun(run, agentName, output) {
   };
   const nextAgent = getNextAutoAgent(agentName);
   if (!nextAgent) {
-    const campaignSettings = await getCampaignSettings();
-    const requiresManualReview = isAffiliateCampaignRun(run);
-    if (campaignSettings.campaign_mode === "automatic" && !requiresManualReview) {
-      const autoApproved = await MarketingCampaignRun.findOneAndUpdate(transitionFilter, {
-        $set: {
-          status: "approved_for_publish",
-          current_stage: "approved_for_publish",
-          review_stage: null,
-          review_status: "approved",
-          review_notes: "Auto-approved in automatic campaign mode. Publish started after draft generation.",
-          publish_status: "ready",
-          last_error: null,
-        },
-      }, { new: true });
-      if (!autoApproved) return;
-
-      void publishCampaignRunNow(autoApproved._id).catch((error) => {
-        logger.error({ campaignId: autoApproved.campaign_id, err: error }, "automatic Instagram publish failed");
-      });
-      return;
-    }
-
     const updated = await MarketingCampaignRun.findOneAndUpdate(transitionFilter, {
       $set: {
         status: "waiting_review",
         current_stage: "ready_for_review",
         review_stage: "draft",
         review_status: "pending",
-        review_notes: requiresManualReview
-          ? "Affiliate campaigns always require admin review before Instagram publishing."
-          : output?.review_reason || run.compliance_json?.review_reason || "Draft ready. Review the creative and then click Post when you are satisfied.",
+        review_notes: output?.review_reason || run.compliance_json?.review_reason || "Draft ready. Review the reference, generated image, and caption before approving.",
         publish_status: "draft",
         last_error: null,
       },
@@ -1757,6 +1825,8 @@ async function enqueueApprovedProductCampaign({ vendorProductId, publicProductId
   let run = await MarketingCampaignRun.findOne({ source_event_key: sourceEventKey });
   if (run) return serialiseRun(run);
 
+  await assertCampaignReferenceReady(resolveVendorReferenceImage(vendorProduct, publicProduct));
+
   run = await MarketingCampaignRun.create({
     campaign_id: buildCampaignId(vendorProduct._id),
     source_event: "product.approved",
@@ -1790,6 +1860,8 @@ async function enqueueAdminProductCampaign({ productId, queuedAt }) {
     status: { $in: CAMPAIGN_OPEN_STATUSES },
   }).sort({ created_at: -1 });
   if (existingOpenRun) return serialiseRun(existingOpenRun);
+
+  await assertCampaignReferenceReady(resolveProductReferenceImage(product));
 
   const queuedDate = queuedAt ? new Date(queuedAt) : new Date();
   const sourceEventKey = `admin_product.published:${String(product._id)}:${queuedDate.getTime()}`;
@@ -1827,6 +1899,8 @@ async function enqueueAffiliateProductCampaign({ productId, queuedAt }) {
     status: { $in: CAMPAIGN_OPEN_STATUSES },
   }).sort({ created_at: -1 });
   if (existingOpenRun) return serialiseRun({ ...existingOpenRun.toObject(), public_product_id: product });
+
+  await assertCampaignReferenceReady(resolveProductReferenceImage(product));
 
   const queuedDate = queuedAt ? new Date(queuedAt) : new Date();
   const sourceEventKey = `affiliate_product.published:${String(product._id)}:${queuedDate.getTime()}`;
@@ -1967,6 +2041,9 @@ async function reviewCampaignRun(runId, action, notes = "") {
 
   if (action !== "approve") throw new Error("Unsupported review action");
 
+  const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: false });
+  assertReviewApprovalReadiness(readiness);
+
   run.status = "approved_for_publish";
   run.current_stage = "approved_for_publish";
   run.review_notes = notes || null;
@@ -2037,6 +2114,9 @@ async function regenerateCampaignRun(runId, stage = "creative", { actorAdminId =
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
   if (["publishing", "published"].includes(run.status)) throw new Error("Cannot regenerate a campaign that is already publishing or published");
+  if (["intake", "creative"].includes(stage)) {
+    await assertCampaignReferenceReady(await resolveCurrentRunReferenceImage(run));
+  }
 
   const reset = {
     last_error: null,
@@ -2079,13 +2159,6 @@ async function regenerateCampaignRun(runId, stage = "creative", { actorAdminId =
   return getCampaignRunDetail(runId);
 }
 
-function buildDraftCaption(longCaption, hashtags, trackedUrl, isAffiliate = false) {
-  return ensureAffiliateInstagramDisclosure(
-    `${String(longCaption || "").trim()}\n\n${String(trackedUrl || "").trim()}\n\n${(hashtags || []).join(" ")}`.trim(),
-    isAffiliate,
-  );
-}
-
 async function updateCampaignDraft(runId, payload = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
@@ -2093,38 +2166,35 @@ async function updateCampaignDraft(runId, payload = {}) {
 
   const nextCaption = { ...(run.caption_json || {}) };
   const instagram = { ...(nextCaption.instagram || {}) };
+  if (payload.caption != null) {
+    instagram.caption = String(payload.caption).trim();
+    delete instagram.long_caption;
+    delete instagram.short_caption;
+  }
   if (payload.long_caption != null) instagram.long_caption = String(payload.long_caption).trim();
   if (payload.short_caption != null) instagram.short_caption = String(payload.short_caption).trim();
   if (payload.cta_text != null) instagram.cta = String(payload.cta_text).trim();
-  if (Array.isArray(payload.hashtags)) instagram.hashtags = payload.hashtags.map((item) => String(item).trim()).filter(Boolean);
+  if (Array.isArray(payload.hashtags)) instagram.hashtags = payload.hashtags.map((item) => String(item).trim()).filter(Boolean).slice(0, 8);
   const isAffiliate = isAffiliateCampaignRun(run);
   if (isAffiliate) {
+    if (instagram.caption) instagram.caption = ensureAffiliateInstagramDisclosure(instagram.caption, true);
     if (instagram.long_caption) instagram.long_caption = ensureAffiliateInstagramDisclosure(instagram.long_caption, true);
     if (instagram.short_caption) instagram.short_caption = ensureAffiliateInstagramDisclosure(instagram.short_caption, true);
   }
   nextCaption.instagram = instagram;
 
-  const trackedUrl = run.tracking_json?.links?.instagram_feed || run.tracking_json?.publish_payload?.tracked_url || "";
-  const nextTracking = {
-    ...(run.tracking_json || {}),
-    publish_payload: {
-      ...(run.tracking_json?.publish_payload || {}),
-      content_type: payload.content_type || run.content_type || run.tracking_json?.publish_payload?.content_type || "single_image",
-      asset_urls: run.asset_urls || [],
-      tracked_url: trackedUrl,
-      cta: payload.cta_text != null ? String(payload.cta_text).trim() : (instagram.cta || run.cta_text || ""),
-      caption: buildDraftCaption(instagram.long_caption || instagram.short_caption || "", instagram.hashtags || [], trackedUrl, isAffiliate),
-    },
-  };
-
   run.caption_json = nextCaption;
   run.cta_text = payload.cta_text != null ? String(payload.cta_text).trim() : (run.cta_text || instagram.cta || null);
-  run.tracking_json = nextTracking;
-  if (payload.content_type === "single_image" || payload.content_type === "carousel") {
-    run.content_type = payload.content_type;
-    if (run.creative_json) run.creative_json.content_type = payload.content_type;
-    if (run.tracking_json?.publish_payload) run.tracking_json.publish_payload.content_type = payload.content_type;
-  }
+  run.compliance_json = await runComplianceAgent(run);
+  run.tracking_json = await runTrackingAgent(run, { overflowMode: "error" });
+  run.status = "waiting_review";
+  run.current_stage = "ready_for_review";
+  run.review_stage = "draft";
+  run.review_status = "pending";
+  run.review_notes = "Caption changed. Review the updated post before publishing.";
+  run.publish_status = "draft";
+  run.scheduled_for = null;
+  run.last_error = null;
   await run.save();
   return getCampaignRunDetail(runId);
 }
@@ -2986,6 +3056,8 @@ async function listCampaignCatalogProducts({
       "affiliate_link_check_status",
       "affiliate_tag",
       "affiliate_url",
+      "affiliate_campaign_asset_url",
+      "affiliate_campaign_usage_rights",
     ].join(" "))
     .sort({ is_affiliate: -1, affiliate_is_instagram_pick: -1, updatedAt: -1 })
     .lean();
@@ -3344,7 +3416,9 @@ module.exports = {
     buildPublishTaskMembershipQuery,
     buildStaleTaskRecoveryFilter,
     getActiveLeaseFilter,
+    getNextAutoAgent,
     buildRunPublishReadinessSnapshot,
+    assertReviewApprovalReadiness,
     buildLaneClaimQuery,
     buildOrphanPublishRecoveryUpdates,
     getQueueLane,

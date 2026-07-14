@@ -14,7 +14,6 @@ import { toast } from "sonner";
 import InstagramConnectionPanel from "./InstagramConnectionPanel";
 import CampaignAutomationPanel, {
   DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY,
-  DEFAULT_CAMPAIGN_AI_PROMPT_TEMPLATE,
   type CampaignAutomationSettings,
   type CampaignImageProviderRegistry,
 } from "./CampaignAutomationPanel";
@@ -56,6 +55,8 @@ type CampaignRun = {
   asset_urls?: string[];
   product_image_url?: string | null;
   product_gallery_urls?: string[];
+  reference_image_url?: string | null;
+  reference_image_status?: "required" | "unavailable" | "available" | "used" | string;
   approved_at: string | null;
   updated_at: string | null;
   publish_status?: string | null;
@@ -83,10 +84,22 @@ type CampaignRun = {
       source_mode?: string | null;
       source_label?: string | null;
     } | null;
+    reference_image_url?: string | null;
+    campaign_asset?: {
+      url?: string | null;
+      rights_status?: string | null;
+      provenance?: string | null;
+    } | null;
   } | null;
   creative_json?: {
     primary_asset_url?: string | null;
     asset_urls?: string[] | null;
+    source_image_url?: string | null;
+    provider?: string | null;
+    model?: string | null;
+    final_prompt?: string | null;
+    checksum_sha256?: string | null;
+    generated_at?: string | null;
   } | null;
   compliance_json?: { status?: string } | null;
   tracking_json?: {
@@ -127,6 +140,8 @@ type CatalogProduct = {
   is_visible?: boolean;
   is_affiliate?: boolean;
   featured_image?: string | null;
+  reference_image_url?: string | null;
+  reference_image_status?: string | null;
   price?: number | null;
   sale_price?: number | null;
   category?: string | null;
@@ -147,12 +162,31 @@ const DEFAULT_CAMPAIGN_SETTINGS: CampaignAutomationSettings = {
   campaign_mode: "manual",
   campaign_batch_hour_ist: 9,
   campaign_batch_minute_ist: 0,
-  campaign_creative_mode: "template",
+  campaign_creative_mode: "ai_generated",
   campaign_ai_provider: "openai",
   campaign_ai_model: "",
   campaign_ai_image_quality: "medium",
-  campaign_ai_prompt_template: DEFAULT_CAMPAIGN_AI_PROMPT_TEMPLATE,
+  campaign_ai_prompt_template: "",
+  campaign_ai_affiliate_prompt_template: "",
+  campaign_ai_catalog_prompt_template: "",
+  prompt_defaults: { affiliate: "", catalog: "" },
 };
+
+type CampaignSettingsResponse = Partial<CampaignAutomationSettings> & { message?: string };
+
+const normalizeCampaignSettingsResponse = (response: CampaignSettingsResponse): CampaignAutomationSettings => ({
+  ...DEFAULT_CAMPAIGN_SETTINGS,
+  ...response,
+  campaign_ai_affiliate_prompt_template: response.campaign_ai_affiliate_prompt_template
+    || response.campaign_ai_prompt_template
+    || "",
+  campaign_ai_catalog_prompt_template: response.campaign_ai_catalog_prompt_template || "",
+  prompt_defaults: {
+    affiliate: response.prompt_defaults?.affiliate || "",
+    catalog: response.prompt_defaults?.catalog || "",
+  },
+});
+
 type CampaignListResponse = {
   items: CampaignRun[];
   counts: {
@@ -182,14 +216,22 @@ type CampaignDetailResponse = {
       cta_text?: string;
       primary_asset_url?: string;
       asset_urls?: string[];
+      source_image_url?: string | null;
+      provider?: string | null;
+      model?: string | null;
+      generated_at?: string | null;
+      final_prompt?: string | null;
       creative_json?: {
         headline?: string;
         supporting_line?: string;
         slides?: Array<{ url?: string }>;
+        source_image_url?: string | null;
+        final_prompt?: string | null;
       };
     } | null;
     caption_json?: {
       instagram?: {
+        caption?: string;
         short_caption?: string;
         long_caption?: string;
         hashtags?: string[];
@@ -241,12 +283,6 @@ const formatDateTime = (value: string | null | undefined) => {
   return Number.isNaN(date.getTime()) ? EMPTY_PLACEHOLDER : date.toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 };
 
-const canBulkPublishRun = (run: CampaignRun) => (
-  run.publish_readiness?.can_publish === true
-  && run.review_status === "approved"
-  && ["ready", "draft", "failed", "scheduled"].includes(run.publish_status || "")
-);
-
 const canSelectCampaignRun = (run: CampaignRun) => (
   !run.archived_at
   && run.status !== "publishing"
@@ -258,7 +294,7 @@ const getReadinessBlockers = (run: CampaignRun | null | undefined) => run?.publi
 const getProductImageUrl = (run: CampaignRun) => {
   const images = Array.isArray(run.brief_json?.images) ? run.brief_json?.images : [];
   const fallbackImages = Array.isArray(run.product_gallery_urls) ? run.product_gallery_urls : [];
-  return run.brief_json?.primary_image || images?.find(Boolean) || run.product_image_url || fallbackImages.find(Boolean) || null;
+  return run.reference_image_url || run.brief_json?.reference_image_url || run.brief_json?.campaign_asset?.url || run.brief_json?.primary_image || images?.find(Boolean) || run.product_image_url || fallbackImages.find(Boolean) || null;
 };
 
 const getCreativeAssetUrls = (run: CampaignRun) => Array.from(new Set([
@@ -357,6 +393,7 @@ const AdminCampaigns = () => {
   const [queueHealth, setQueueHealth] = useState<CampaignQueueHealthData | null>(null);
   const [campaignSettings, setCampaignSettings] = useState<CampaignAutomationSettings>(DEFAULT_CAMPAIGN_SETTINGS);
   const [imageRegistry, setImageRegistry] = useState<CampaignImageProviderRegistry>(DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY);
+  const [imageRegistryError, setImageRegistryError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [connectionLoading, setConnectionLoading] = useState(true);
   const [settingsLoading, setSettingsLoading] = useState(true);
@@ -384,11 +421,9 @@ const AdminCampaigns = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [queueProductId, setQueueProductId] = useState("");
-  const [draftLongCaption, setDraftLongCaption] = useState("");
-  const [draftShortCaption, setDraftShortCaption] = useState("");
+  const [draftCaption, setDraftCaption] = useState("");
   const [draftHashtags, setDraftHashtags] = useState("");
   const [draftCta, setDraftCta] = useState("");
-  const [regenerateStage, setRegenerateStage] = useState("creative");
   const [calendar, setCalendar] = useState<CampaignCalendarResponse | null>(null);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [batchDetail, setBatchDetail] = useState<BatchDetailResponse | null>(null);
@@ -456,8 +491,10 @@ const AdminCampaigns = () => {
   const loadCampaignSettings = async () => {
     try {
       setSettingsLoading(true);
-      const response = await apiFetch<CampaignAutomationSettings>("/admin/settings/campaigns");
-      setCampaignSettings(response);
+      const response = await apiFetch<CampaignSettingsResponse>("/admin/settings/campaigns");
+      const normalized = normalizeCampaignSettingsResponse(response);
+      setCampaignSettings(normalized);
+      return normalized;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load campaign settings");
     } finally {
@@ -465,22 +502,21 @@ const AdminCampaigns = () => {
     }
   };
 
-  const loadImageRegistry = async () => {
+  const loadImageRegistry = async (savedSettings?: CampaignAutomationSettings) => {
     try {
       const response = await apiFetch<CampaignImageProviderRegistry>("/admin/settings/campaigns/image-models");
       setImageRegistry(response);
-      setCampaignSettings((current) => ({
-        ...current,
-        campaign_ai_provider: current.campaign_ai_provider || response.defaults.provider,
-        campaign_ai_model: current.campaign_ai_model || response.defaults.model,
-      }));
-    } catch {
+      const selectedSettings = savedSettings || campaignSettings;
+      const savedProvider = response.providers.find((item) => item.key === selectedSettings.campaign_ai_provider);
+      const savedModelAvailable = savedProvider?.models.some((model) => (
+        model.id === selectedSettings.campaign_ai_model && model.supports_reference_image
+      ));
+      setImageRegistryError(savedProvider?.enabled && savedModelAvailable
+        ? null
+        : savedProvider?.description || "The saved image provider or model is currently unavailable.");
+    } catch (error) {
       setImageRegistry(DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY);
-      setCampaignSettings((current) => ({
-        ...current,
-        campaign_ai_provider: current.campaign_ai_provider || DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY.defaults.provider,
-        campaign_ai_model: current.campaign_ai_model || DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY.defaults.model,
-      }));
+      setImageRegistryError(error instanceof Error ? error.message : "Image model registry is unavailable.");
     }
   };
 
@@ -567,8 +603,7 @@ const AdminCampaigns = () => {
   useEffect(() => {
     loadConnection();
     loadQueueHealth();
-    loadCampaignSettings();
-    loadImageRegistry();
+    void loadCampaignSettings().then(loadImageRegistry);
     loadCalendar();
     const params = new URLSearchParams(window.location.search);
     const instagramStatus = params.get("instagram");
@@ -586,8 +621,7 @@ const AdminCampaigns = () => {
 
   useEffect(() => {
     const instagram = detail?.run.caption_json?.instagram;
-    setDraftLongCaption(instagram?.long_caption || "");
-    setDraftShortCaption(instagram?.short_caption || "");
+    setDraftCaption(instagram?.caption || instagram?.long_caption || instagram?.short_caption || "");
     setDraftHashtags((instagram?.hashtags || []).join(", "));
     setDraftCta(detail?.run.cta_text || instagram?.cta || "");
   }, [detail]);
@@ -648,16 +682,6 @@ const AdminCampaigns = () => {
     () => data.items.filter((run) => selectedRunIds.includes(run.id)),
     [data.items, selectedRunIds],
   );
-  const selectedRunBlockers = useMemo(() => (
-    selectedVisibleRuns.flatMap((run) => getReadinessBlockers(run).map((blocker) => ({
-      run,
-      blocker,
-    })))
-  ), [selectedVisibleRuns]);
-  const selectedRunsCarouselEligible = selectedVisibleRuns.length === selectedRunIds.length
-    && selectedVisibleRuns.length >= 2
-    && selectedVisibleRuns.length <= 10
-    && selectedVisibleRuns.every(canBulkPublishRun);
   const selectedPublishedCount = selectedVisibleRuns.filter((run) => (
     run.publish_status === "published" || run.status === "published" || Boolean(run.instagram_media_id)
   )).length;
@@ -665,7 +689,11 @@ const AdminCampaigns = () => {
   const filteredCatalogProducts = useMemo(() => {
     return catalogProducts;
   }, [catalogProducts]);
-  const allFilteredCatalogSelected = filteredCatalogProducts.length > 0 && filteredCatalogProducts.every((product) => selectedCatalogProductIds.includes(product.id));
+  const queueableCatalogProducts = useMemo(
+    () => filteredCatalogProducts.filter((product) => product.readiness?.can_queue !== false),
+    [filteredCatalogProducts],
+  );
+  const allFilteredCatalogSelected = queueableCatalogProducts.length > 0 && queueableCatalogProducts.every((product) => selectedCatalogProductIds.includes(product.id));
 
   const refreshDetail = async () => {
     if (!selectedId) return;
@@ -673,7 +701,14 @@ const AdminCampaigns = () => {
   };
 
   const refreshAll = async () => {
-    await Promise.all([loadCampaigns(), loadConnection(), loadQueueHealth(), loadCampaignSettings(), loadImageRegistry(), loadCalendar(), selectedId ? refreshDetail() : Promise.resolve()]);
+    await Promise.all([
+      loadCampaigns(),
+      loadConnection(),
+      loadQueueHealth(),
+      loadCampaignSettings().then(loadImageRegistry),
+      loadCalendar(),
+      selectedId ? refreshDetail() : Promise.resolve(),
+    ]);
   };
 
   const openPostPreview = (run: CampaignRun, startIndex = 0) => {
@@ -724,20 +759,11 @@ const AdminCampaigns = () => {
   const saveCampaignSettings = async () => {
     try {
       setActionLoading(true);
-      const response = await apiFetch<CampaignAutomationSettings & { message?: string }>("/admin/settings/campaigns", {
+      const response = await apiFetch<CampaignSettingsResponse>("/admin/settings/campaigns", {
         method: "PUT",
         body: JSON.stringify(campaignSettings),
       });
-      setCampaignSettings({
-        campaign_mode: response.campaign_mode,
-        campaign_batch_hour_ist: response.campaign_batch_hour_ist,
-        campaign_batch_minute_ist: response.campaign_batch_minute_ist,
-        campaign_creative_mode: response.campaign_creative_mode,
-        campaign_ai_provider: response.campaign_ai_provider,
-        campaign_ai_model: response.campaign_ai_model,
-        campaign_ai_image_quality: response.campaign_ai_image_quality,
-        campaign_ai_prompt_template: response.campaign_ai_prompt_template,
-      });
+      setCampaignSettings(normalizeCampaignSettingsResponse(response));
       toast.success(response.message || "Campaign settings updated");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not save campaign settings");
@@ -844,15 +870,15 @@ const AdminCampaigns = () => {
     }
   };
 
-  const regenerateRun = async (stage = regenerateStage) => {
+  const regenerateRun = async () => {
     if (!selectedId) return;
     try {
       setActionLoading(true);
       await apiFetch(`/marketing-campaigns/admin/${selectedId}/regenerate`, {
         method: "POST",
-        body: JSON.stringify({ stage }),
+        body: JSON.stringify({ stage: "creative" }),
       });
-      toast.success(`${stage.replace(/_/g, " ")} regeneration started`);
+      toast.success("Image and caption regeneration started");
       await refreshAll();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not regenerate campaign");
@@ -914,9 +940,8 @@ const AdminCampaigns = () => {
       await apiFetch(`/marketing-campaigns/admin/${selectedId}/draft`, {
         method: "PATCH",
         body: JSON.stringify({
-          long_caption: draftLongCaption,
-          short_caption: draftShortCaption,
-          hashtags: draftHashtags.split(",").map((item) => item.trim()).filter(Boolean),
+          caption: draftCaption,
+          hashtags: draftHashtags.split(",").map((item) => item.trim()).filter(Boolean).slice(0, 8),
           cta_text: draftCta,
         }),
       });
@@ -963,62 +988,6 @@ const AdminCampaigns = () => {
     setSelectedRunIds(Array.from(new Set([...selectedRunIds, ...selectableVisibleRuns.map((run) => run.id)])));
   };
 
-  const publishSelectedCarousel = async () => {
-    if (!connection?.is_connected) {
-      toast.error("Connect Instagram before publishing a carousel");
-      return;
-    }
-    if (selectedRunIds.length < 2) {
-      toast.error("Select at least 2 reviewed drafts to publish one carousel");
-      return;
-    }
-    if (!selectedRunsCarouselEligible) {
-      toast.error("Carousel publishing requires 2 to 10 selected, review-approved campaigns that are ready to publish");
-      return;
-    }
-    if (selectedRunBlockers.length) {
-      const first = selectedRunBlockers[0];
-      toast.error(`${first.run.product_title || first.run.campaign_id}: ${first.blocker.message}`);
-      return;
-    }
-
-    try {
-      setActionLoading(true);
-      const response = await apiFetch<{ message?: string }>("/marketing-campaigns/admin/post-carousel", {
-        method: "POST",
-        body: JSON.stringify({ run_ids: selectedRunIds }),
-      });
-      toast.success(response.message || "Instagram carousel queued");
-      setSelectedRunIds([]);
-      await refreshAll();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not publish the selected carousel");
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const schedulePost = async (scheduledForLocal: string) => {
-    if (!selectedId) return;
-    if (!scheduledForLocal) {
-      toast.error("Choose a schedule time first");
-      return;
-    }
-    try {
-      setActionLoading(true);
-      await apiFetch(`/marketing-campaigns/admin/${selectedId}/schedule`, {
-        method: "POST",
-        body: JSON.stringify({ scheduled_for: new Date(scheduledForLocal).toISOString() }),
-      });
-      toast.success("Instagram post scheduled");
-      await refreshAll();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not schedule the Instagram post");
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
   const queueFromApprovedProduct = async () => {
     if (!queueProductId.trim()) {
       toast.error("Enter an approved vendor product ID, active admin product ID, or active affiliate product ID");
@@ -1041,6 +1010,11 @@ const AdminCampaigns = () => {
   };
 
   const toggleCatalogProductSelection = (productId: string) => {
+    const product = catalogProducts.find((item) => item.id === productId);
+    if (product?.readiness?.can_queue === false) {
+      toast.error(product.readiness.blockers[0]?.message || "This product is not ready for a campaign");
+      return;
+    }
     setSelectedCatalogProductIds((current) => (
       current.includes(productId)
         ? current.filter((id) => id !== productId)
@@ -1050,10 +1024,10 @@ const AdminCampaigns = () => {
 
   const toggleSelectAllCatalogProducts = () => {
     if (allFilteredCatalogSelected) {
-      setSelectedCatalogProductIds((current) => current.filter((id) => !filteredCatalogProducts.some((product) => product.id === id)));
+      setSelectedCatalogProductIds((current) => current.filter((id) => !queueableCatalogProducts.some((product) => product.id === id)));
       return;
     }
-    setSelectedCatalogProductIds((current) => Array.from(new Set([...current, ...filteredCatalogProducts.map((product) => product.id)])));
+    setSelectedCatalogProductIds((current) => Array.from(new Set([...current, ...queueableCatalogProducts.map((product) => product.id)])));
   };
 
   const queueSelectedCatalogProducts = async () => {
@@ -1145,8 +1119,8 @@ const AdminCampaigns = () => {
   }, [connection]);
 
   const automationSummary = useMemo(() => ({
-    mode: campaignSettings.campaign_mode === "automatic" ? "Automatic posting" : "Manual approval",
-    creativeMode: campaignSettings.campaign_creative_mode.replace(/_/g, " "),
+    mode: campaignSettings.campaign_mode === "automatic" ? "Automatic draft generation" : "Manual draft generation",
+    creativeMode: "required reference edit",
     provider: imageRegistry?.providers.find((provider) => provider.key === campaignSettings.campaign_ai_provider)?.label || campaignSettings.campaign_ai_provider,
     model: imageRegistry?.providers
       .find((provider) => provider.key === campaignSettings.campaign_ai_provider)
@@ -1181,7 +1155,7 @@ const AdminCampaigns = () => {
       {
         key: "caption",
         label: "Caption",
-        helper: "Short copy, long copy, hashtags, and CTA details.",
+        helper: "Final caption, up to eight hashtags, and CTA details.",
         value: detail.run.caption_json,
       },
       {
@@ -1209,6 +1183,7 @@ const AdminCampaigns = () => {
     || detail?.run.status === "published"
     || detail?.run.instagram_media_id
   );
+  const detailIsAffiliate = Boolean(detail?.run.is_affiliate || detail?.run.source_event === "affiliate_product.published");
 
   const copyTrackedUrl = async () => {
     if (!trackedUrl) {
@@ -1288,8 +1263,8 @@ const AdminCampaigns = () => {
     if (!detail) return "";
     const hashtags = draftHashtags.split(",").map((item) => item.trim()).filter(Boolean).join(" ");
     return detail.run.tracking_json?.publish_payload?.caption
-      || [draftLongCaption || draftShortCaption, trackedUrl, hashtags].filter(Boolean).join("\n\n");
-  }, [detail, draftHashtags, draftLongCaption, draftShortCaption, trackedUrl]);
+      || [draftCaption, trackedUrl, hashtags].filter(Boolean).join("\n\n");
+  }, [detail, draftCaption, draftHashtags, trackedUrl]);
 
   const copyCaption = async () => {
     if (!finalCaptionPreview.trim()) {
@@ -1406,6 +1381,7 @@ const AdminCampaigns = () => {
               loading={settingsLoading}
               saving={actionLoading}
               imageRegistry={imageRegistry}
+              imageRegistryError={imageRegistryError}
               onChange={(patch) => setCampaignSettings((current) => ({ ...current, ...patch }))}
               onSave={saveCampaignSettings}
             />
@@ -1467,12 +1443,6 @@ const AdminCampaigns = () => {
               <p className="text-xs text-muted-foreground">Published campaigns can be removed from Pink Paisa; their Instagram posts remain live until removed on Instagram.</p>
               {selectedPublishedCount > 0 ? (
                 <p className="mt-1 text-xs font-medium text-amber-700">{selectedPublishedCount} published campaign{selectedPublishedCount === 1 ? "" : "s"} selected.</p>
-              ) : !connection?.is_connected ? (
-                <p className="mt-1 text-xs font-medium text-amber-700">Instagram must be connected before carousel publishing.</p>
-              ) : selectedRunBlockers.length ? (
-                <p className="mt-1 text-xs font-medium text-rose-700">
-                  {selectedRunBlockers[0].run.product_title || selectedRunBlockers[0].run.campaign_id}: {selectedRunBlockers[0].blocker.message}
-                </p>
               ) : null}
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -1492,11 +1462,8 @@ const AdminCampaigns = () => {
               <Button variant="outline" className="rounded-xl" onClick={() => setSelectedRunIds([])} disabled={!selectedRunIds.length || actionLoading}>
                 Clear
               </Button>
-              <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length || !selectedVisibleRuns.every(canBulkPublishRun)}>
+              <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length}>
                 Scan readiness
-              </Button>
-              <Button className="rounded-xl" onClick={publishSelectedCarousel} disabled={actionLoading || !selectedRunsCarouselEligible || !connection?.is_connected || selectedRunBlockers.length > 0}>
-                Post selected carousel
               </Button>
               <Button variant="destructive" className="rounded-xl" onClick={() => setBulkArchiveOpen(true)} disabled={actionLoading || !selectedRunIds.length}>
                 <Trash2 className="mr-2 h-4 w-4" /> Remove selected
@@ -1814,7 +1781,7 @@ const AdminCampaigns = () => {
                     <Checkbox
                       checked={allFilteredCatalogSelected}
                       onCheckedChange={toggleSelectAllCatalogProducts}
-                      disabled={!filteredCatalogProducts.length}
+                      disabled={!queueableCatalogProducts.length}
                     />
                     Select visible results
                   </label>
@@ -1842,23 +1809,25 @@ const AdminCampaigns = () => {
                         const selected = selectedCatalogProductIds.includes(product.id);
                         const imageUrl = product.featured_image || null;
                         const sourceLabel = getCatalogSourceLabel(product);
+                        const canQueue = product.readiness?.can_queue !== false;
                         return (
                           <div
                             key={product.id}
                             role="button"
-                            tabIndex={0}
-                            onClick={() => toggleCatalogProductSelection(product.id)}
+                            tabIndex={canQueue ? 0 : -1}
+                            aria-disabled={!canQueue}
+                            onClick={() => canQueue && toggleCatalogProductSelection(product.id)}
                             onKeyDown={(event) => {
-                              if (event.key === "Enter" || event.key === " ") {
+                              if (canQueue && (event.key === "Enter" || event.key === " ")) {
                                 event.preventDefault();
                                 toggleCatalogProductSelection(product.id);
                               }
                             }}
-                            className={`overflow-hidden rounded-2xl border text-left transition-all ${selected ? "border-primary bg-primary/5 shadow-sm" : "border-border hover:border-primary/40 hover:bg-muted/30"}`}
+                            className={`overflow-hidden rounded-2xl border text-left transition-all ${!canQueue ? "cursor-not-allowed border-border bg-muted/20 opacity-70" : selected ? "border-primary bg-primary/5 shadow-sm" : "border-border hover:border-primary/40 hover:bg-muted/30"}`}
                           >
                             <div className="aspect-[4/3] bg-muted/40">
                               {imageUrl ? (
-                                <img src={imageUrl} alt={product.title} className="h-full w-full object-cover" />
+                                <img src={imageUrl} alt={product.title} className="h-full w-full object-contain" />
                               ) : (
                                 <div className="flex h-full items-center justify-center text-xs text-muted-foreground">No image</div>
                               )}
@@ -1869,7 +1838,7 @@ const AdminCampaigns = () => {
                                   <p className="truncate font-medium">{product.title}</p>
                                   <p className="truncate text-xs text-muted-foreground">{product.slug || product.id}</p>
                                 </div>
-                                <Checkbox checked={selected} className="mt-1" />
+                                <Checkbox checked={selected} disabled={!canQueue} className="mt-1" />
                               </div>
                               <div className="flex flex-wrap gap-2">
                                 <span className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${sourceLabel === "Affiliate" ? "bg-amber-100 text-amber-800" : "bg-background text-muted-foreground"}`}>
@@ -2197,8 +2166,8 @@ const AdminCampaigns = () => {
                     </div>
                     <div className="rounded-xl bg-background/60 px-3 py-2">
                       <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Disclosure</p>
-                      <p className={`mt-1 font-semibold ${hasAffiliateDisclosureText(finalCaptionPreview) ? "text-emerald-700" : "text-rose-700"}`}>
-                        {hasAffiliateDisclosureText(finalCaptionPreview) ? "Present" : "Missing"}
+                      <p className={`mt-1 font-semibold ${!detailIsAffiliate || hasAffiliateDisclosureText(finalCaptionPreview) ? "text-emerald-700" : "text-rose-700"}`}>
+                        {!detailIsAffiliate ? "Not required" : hasAffiliateDisclosureText(finalCaptionPreview) ? "Present" : "Missing"}
                       </p>
                     </div>
                     <div className="rounded-xl bg-background/60 px-3 py-2">
@@ -2218,18 +2187,24 @@ const AdminCampaigns = () => {
                 <div className="min-w-0 space-y-6">
                   <CampaignCreativePreview
                     title={detail.run.product_title || "Campaign creative"}
+                    referenceImageUrl={detail.run.reference_image_url || getProductImageUrl(detail.run)}
+                    referenceStatus={detail.run.reference_image_status}
+                    referenceRightsStatus={detail.run.brief_json?.campaign_asset?.rights_status}
                     assetUrls={getCreativeAssetUrls(detail.run)}
                     contentType={detail.run.content_type || detail.run.creative_json?.content_type}
                     ctaText={detail.run.cta_text || detail.run.creative_json?.cta_text}
                     trackedUrl={trackedUrl}
+                    provider={detail.run.creative_json?.provider}
+                    model={detail.run.creative_json?.model}
+                    generatedAt={detail.run.creative_json?.generated_at}
                     onPreview={(index) => openPostPreview(detail.run, index)}
                   />
 
                   <div className="rounded-2xl border border-border p-4">
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Draft editor</p>
-                        <p className="mt-1 text-sm text-muted-foreground">Polish the copy before you unlock publish.</p>
+                        <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Caption editor</p>
+                        <p className="mt-1 text-sm text-muted-foreground">Edit the one final caption package before approval.</p>
                       </div>
                       <Button variant="outline" className="rounded-2xl" onClick={copyTrackedUrl}>
                         <Copy className="mr-2 h-4 w-4" /> Copy tracked link
@@ -2247,16 +2222,12 @@ const AdminCampaigns = () => {
                         </div>
                       </div>
                       <div>
-                        <label className="mb-2 block text-sm font-medium">Short caption</label>
-                        <Textarea value={draftShortCaption} onChange={(e) => setDraftShortCaption(e.target.value)} rows={3} />
-                      </div>
-                      <div>
-                        <label className="mb-2 block text-sm font-medium">Long caption</label>
-                        <Textarea value={draftLongCaption} onChange={(e) => setDraftLongCaption(e.target.value)} rows={6} />
+                        <label className="mb-2 block text-sm font-medium">Instagram caption</label>
+                        <Textarea value={draftCaption} onChange={(e) => setDraftCaption(e.target.value)} rows={7} />
                       </div>
                       <div className="flex justify-end">
                         <Button className="rounded-2xl lg:min-w-[160px]" onClick={saveDraft} disabled={actionLoading}>
-                          Save draft edits
+                          Save caption
                         </Button>
                       </div>
                     </div>
@@ -2289,39 +2260,15 @@ const AdminCampaigns = () => {
 
                 <div className="min-w-0">
                   <div className="space-y-4 xl:sticky xl:top-6">
-                  <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Regenerate</p>
-                      <p className="mt-1 text-sm text-muted-foreground">Restart only the stage that needs repair. Intake resets the whole downstream pipeline.</p>
-                    </div>
-                    <div className="mt-3 flex gap-2">
-                      <select
-                        value={regenerateStage}
-                        onChange={(event) => setRegenerateStage(event.target.value)}
-                        className="h-10 flex-1 rounded-xl border border-border bg-background px-3 text-sm"
-                      >
-                        <option value="creative">Creative only</option>
-                        <option value="caption">Caption only</option>
-                        <option value="tracking">Tracking only</option>
-                        <option value="intake">Regenerate from intake</option>
-                      </select>
-                      <Button variant="outline" className="rounded-xl" onClick={() => regenerateRun(regenerateStage)} disabled={actionLoading}>
-                        Start
-                      </Button>
-                    </div>
-                  </div>
                   <CampaignPublishActions
                     run={detail.run}
                     lastError={detail.run.last_error || null}
                     actionLoading={actionLoading}
-                    onRefresh={refreshDetail}
                     onRetry={retryRun}
                     onResetStuckTask={resetStuckTask}
-                    onRegenerate={() => regenerateRun("creative")}
+                    onRegenerate={regenerateRun}
                     onApproveReview={() => openReviewDialog("approve")}
-                    onRejectReview={() => openReviewDialog("reject")}
                     onPostNow={publishNow}
-                    onSchedule={schedulePost}
                     canResetStuck={selectedRunHasRunningTask}
                     instagramConnected={connection?.is_connected === true}
                     instagramConnectionWarning={connection?.last_error || null}

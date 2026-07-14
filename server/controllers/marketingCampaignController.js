@@ -11,7 +11,6 @@ const {
   listCampaignCalendar,
   listCampaignCatalogProducts,
   listCampaignRuns,
-  publishCampaignRunsAsCarousel,
   publishCampaignRunNow,
   purgeCampaignRun,
   recoverStaleRunningTasks,
@@ -28,6 +27,11 @@ const {
 } = require("../services/marketingAgentOrchestrator");
 const Product = require("../models/Product");
 const VendorProduct = require("../models/VendorProduct");
+
+const campaignErrorResponse = (error) => ({
+  message: error.message,
+  ...(error.code ? { code: error.code } : {}),
+});
 
 const listMarketingCampaignRuns = async (req, res) => {
   try {
@@ -251,7 +255,7 @@ const updateMarketingCampaignDraftController = async (req, res) => {
     const updated = await updateCampaignDraft(req.params.id, req.body || {});
     res.json({ message: "Campaign draft updated", ...updated });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(400).json(campaignErrorResponse(error));
   }
 };
 
@@ -266,18 +270,11 @@ const publishMarketingCampaignController = async (req, res) => {
   }
 };
 
-const publishMarketingCarouselController = async (req, res) => {
-  try {
-    const result = await publishCampaignRunsAsCarousel(req.body.run_ids || [], {
-      actorAdminId: req.user?._id || req.user?.id || null,
-    });
-    res.status(202).json({
-      message: `Instagram carousel queued for ${result.runs.length} reviewed product${result.runs.length === 1 ? "" : "s"}`,
-      ...result,
-    });
-  } catch (error) {
-    res.status(400).json({ message: error.message });
-  }
+const publishMarketingCarouselController = async (_req, res) => {
+  res.status(410).json({
+    code: "carousel_creation_disabled",
+    message: "New carousel publishing is disabled. Generate and review one product post at a time.",
+  });
 };
 
 const scheduleMarketingCampaignController = async (req, res) => {
@@ -314,7 +311,7 @@ const createMarketingCampaignFromApprovedProduct = async (req, res) => {
     });
     res.status(201).json({ message: "Campaign added to the daily queue", run });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(400).json(campaignErrorResponse(error));
   }
 };
 
@@ -362,7 +359,7 @@ const createMarketingCampaignFromProductSource = async (req, res) => {
 
     return res.status(400).json({ message: "Product must be an approved vendor product, active admin product, or active assigned affiliate product" });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(400).json(campaignErrorResponse(error));
   }
 };
 

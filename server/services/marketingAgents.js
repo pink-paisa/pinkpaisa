@@ -4,15 +4,31 @@ const VendorProduct = require("../models/VendorProduct");
 const { getCampaignSettings } = require("../utils/campaignSettings");
 const {
   chooseCtaText,
-  generateInstagramCreative,
   resolvePublicUrl,
 } = require("./instagramCreativeRenderer");
 const { generateAiInstagramCreative } = require("./instagramAiCreativeService");
+const { resolveVendorReferenceImage } = require("./campaignReferenceImage");
+const {
+  generateCampaignCaption,
+  normalizeHashtagForCompliance,
+  validateCaptionPackage,
+} = require("./openAiCaptionService");
 
 const DEFAULT_FRONTEND_URL = "https://www.pinkpaisa.in";
 const BLOCKED_CLAIMS = ["cure", "guaranteed", "instant results", "100% safe", "risk-free", "miracle", "clinically proven"];
 const AFFILIATE_INSTAGRAM_DISCLOSURE = "Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases. #CommissionsEarned";
 const AFFILIATE_DISCLOSURE_RE = /as an amazon associate i earn from qualifying purchases/i;
+const AFFILIATE_DISCLOSURE_BLOCK_RE = /(?:affiliate disclosure:\s*)?as an amazon associate i earn from qualifying purchases\.?\s*#commissionsearned/ig;
+const INSTAGRAM_CAPTION_MAX_LENGTH = 2200;
+const BLOCKED_CLAIM_PATTERNS = [
+  { label: "cure", pattern: /\bcures?\b/i },
+  { label: "guaranteed", pattern: /\bguaranteed\b/i },
+  { label: "instant results", pattern: /\binstant\s*results?\b/i },
+  { label: "100% safe", pattern: /\b100\s*(?:%|percent)\s*safe\b/i },
+  { label: "risk-free", pattern: /\brisk[-\s]*free\b/i },
+  { label: "miracle", pattern: /\bmiracle\b/i },
+  { label: "clinically proven", pattern: /\bclinically\s*proven\b/i },
+];
 
 function trimText(value) {
   return String(value || "").trim();
@@ -44,31 +60,26 @@ function buildProductUrl(slug) {
   return `${baseUrl}/product/${encodeURIComponent(slug)}`;
 }
 
-function getAffiliateSourceLabel(brief) {
-  return trimText(
-    brief?.affiliate?.source_label
-    || brief?.brand_context?.partner_label
-    || brief?.affiliate_source_platform
-    || "Affiliate Partner"
-  );
-}
-
 function hasAffiliateInstagramDisclosure(value) {
   return AFFILIATE_DISCLOSURE_RE.test(String(value || ""));
 }
 
 function ensureAffiliateInstagramDisclosure(value, isAffiliate = false) {
   const caption = trimText(value);
-  if (!isAffiliate || !caption || hasAffiliateInstagramDisclosure(caption)) return caption;
-  return `${AFFILIATE_INSTAGRAM_DISCLOSURE}\n\n${caption}`;
+  if (!isAffiliate || !caption) return caption;
+  const withoutExistingDisclosure = caption
+    .replace(AFFILIATE_DISCLOSURE_BLOCK_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return [withoutExistingDisclosure, AFFILIATE_INSTAGRAM_DISCLOSURE].filter(Boolean).join("\n\n");
 }
 
 function buildAudience(category, tags) {
   const source = `${trimText(category)} ${Array.isArray(tags) ? tags.join(" ") : ""}`.toLowerCase();
-  if (source.includes("nutrition") || source.includes("supplement")) return "Women building healthier daily routines with a nutrition focus";
-  if (source.includes("beauty") || source.includes("skin") || source.includes("care")) return "Women looking for premium self-care and beauty upgrades";
-  if (source.includes("lifestyle") || source.includes("home")) return "Women curating calmer, more intentional lifestyle rituals";
-  return "Women exploring wellness products that fit into everyday life";
+  if (source.includes("nutrition") || source.includes("supplement")) return "People exploring nutrition-focused daily routines";
+  if (source.includes("beauty") || source.includes("skin") || source.includes("care")) return "People exploring self-care and beauty products";
+  if (source.includes("lifestyle") || source.includes("home")) return "People exploring practical lifestyle products";
+  return "People exploring products for everyday use";
 }
 
 function buildAngle(brief) {
@@ -94,31 +105,79 @@ function buildHooks(brief, strategy) {
   ];
 }
 
-function buildHashtags(brief) {
-  const tags = new Set(["#PinkPaisa", "#WomenWhoWellness", "#ShopPinkPaisa"]);
-  if (brief.category) tags.add(`#${trimText(brief.category).replace(/[^a-zA-Z0-9]+/g, "")}`);
-  if (brief.subcategory) tags.add(`#${trimText(brief.subcategory).replace(/[^a-zA-Z0-9]+/g, "")}`);
-  (brief.tags || []).filter(Boolean).slice(0, 2).forEach((tag) => tags.add(`#${trimText(tag).replace(/[^a-zA-Z0-9]+/g, "")}`));
-  return Array.from(tags).filter(Boolean).slice(0, 8);
+function scanBlockedClaims(textFragments) {
+  const combined = textFragments.filter(Boolean).join(" ");
+  return BLOCKED_CLAIM_PATTERNS
+    .filter(({ pattern }) => pattern.test(combined))
+    .map(({ label }) => label);
 }
 
-function scanBlockedClaims(textFragments) {
-  const combined = textFragments.filter(Boolean).join(" ").toLowerCase();
-  return BLOCKED_CLAIMS.filter((term) => combined.includes(term));
+function captionLengthError() {
+  const error = new Error("Final Instagram caption exceeds 2200 characters.");
+  error.code = "instagram_caption_too_long";
+  return error;
+}
+
+function truncateAtWord(value, maximum) {
+  const text = trimText(value);
+  if (text.length <= maximum) return text;
+  if (maximum <= 3) return text.slice(0, Math.max(maximum, 0));
+  const candidate = text.slice(0, maximum - 3).trimEnd();
+  const boundary = candidate.lastIndexOf(" ");
+  const shortened = boundary > Math.floor(candidate.length * 0.5) ? candidate.slice(0, boundary) : candidate;
+  return `${shortened.trimEnd()}...`;
+}
+
+function composeInstagramCaption({ caption, trackedUrl, hashtags = [], isAffiliate = false, overflowMode = "truncate" }) {
+  const body = trimText(caption).replace(AFFILIATE_DISCLOSURE_BLOCK_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  const url = trimText(trackedUrl);
+  const selectedHashtags = (Array.isArray(hashtags) ? hashtags : []).map(trimText).filter(Boolean).slice(0, 8);
+  const disclosure = isAffiliate ? AFFILIATE_INSTAGRAM_DISCLOSURE : "";
+  const assemble = (captionText, hashtagValues) => [
+    captionText,
+    url,
+    hashtagValues.join(" "),
+    disclosure,
+  ].filter(Boolean).join("\n\n");
+
+  let finalCaption = assemble(body, selectedHashtags);
+  if (finalCaption.length <= INSTAGRAM_CAPTION_MAX_LENGTH) {
+    return {
+      caption: finalCaption,
+      character_count: finalCaption.length,
+      was_truncated: false,
+      hashtags: selectedHashtags,
+    };
+  }
+  if (overflowMode === "error") throw captionLengthError();
+
+  let wasTruncated = false;
+  while (selectedHashtags.length && finalCaption.length > INSTAGRAM_CAPTION_MAX_LENGTH) {
+    selectedHashtags.pop();
+    wasTruncated = true;
+    finalCaption = assemble(body, selectedHashtags);
+  }
+
+  if (finalCaption.length > INSTAGRAM_CAPTION_MAX_LENGTH) {
+    const suffix = [url, selectedHashtags.join(" "), disclosure].filter(Boolean).join("\n\n");
+    const separatorLength = body && suffix ? 2 : 0;
+    const availableBodyLength = INSTAGRAM_CAPTION_MAX_LENGTH - suffix.length - separatorLength;
+    if (availableBodyLength < 1) throw captionLengthError();
+    finalCaption = assemble(truncateAtWord(body, availableBodyLength), selectedHashtags);
+    wasTruncated = true;
+  }
+
+  if (finalCaption.length > INSTAGRAM_CAPTION_MAX_LENGTH) throw captionLengthError();
+  return {
+    caption: finalCaption,
+    character_count: finalCaption.length,
+    was_truncated: wasTruncated,
+    hashtags: selectedHashtags,
+  };
 }
 
 function createIssue(severity, code, message) {
   return { severity, code, message };
-}
-
-function buildShortOfferLine(brief) {
-  if (brief.is_affiliate) {
-    return "Check current price on Amazon from the Pink Paisa product page.";
-  }
-  if (brief.pricing.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)) {
-    return `Was ${formatPrice(brief.pricing.price)}, now ${formatPrice(brief.pricing.sale_price)}.`;
-  }
-  return `Available now at ${formatPrice(brief.pricing.price)}.`;
 }
 
 async function runIntakeAgent(run) {
@@ -130,7 +189,8 @@ async function runIntakeAgent(run) {
     if (!publicProduct) throw new Error("Public product not found for intake");
 
     const vendor = await Vendor.findById(vendorProduct.vendor_id).lean();
-    const images = [vendorProduct.featured_image, ...(vendorProduct.additional_images || []), ...(publicProduct.images || [])]
+    const referenceImageUrl = resolveVendorReferenceImage(vendorProduct, publicProduct);
+    const images = [referenceImageUrl, vendorProduct.featured_image, publicProduct.featured_image, ...(vendorProduct.additional_images || []), ...(publicProduct.images || [])]
       .filter(Boolean)
       .filter((value, index, list) => list.indexOf(value) === index);
     const price = Number(vendorProduct.price || 0);
@@ -144,6 +204,7 @@ async function runIntakeAgent(run) {
       product_id: String(vendorProduct._id),
       public_product_id: String(publicProduct._id),
       title: vendorProduct.title,
+      campaign_label: publicProduct.campaign_label || null,
       slug: publicProduct.slug || vendorProduct.slug,
       product_url: buildProductUrl(publicProduct.slug || vendorProduct.slug),
       vendor: {
@@ -167,7 +228,21 @@ async function runIntakeAgent(run) {
         full: normalizeWhitespace(vendorProduct.full_description || publicProduct.full_description || ""),
       },
       tags: (vendorProduct.tags || publicProduct.tags || []).filter(Boolean),
+      brand_name: vendorProduct.brand_name || publicProduct.brand_name || null,
+      audience: trimText(vendorProduct.attributes?.target_audience || publicProduct.attributes?.target_audience) || null,
+      buying_intent: publicProduct.buying_intent || null,
+      pros: (publicProduct.pros || []).filter(Boolean),
+      cons: (publicProduct.cons || []).filter(Boolean),
       images,
+      primary_image: referenceImageUrl,
+      reference_image_url: referenceImageUrl,
+      campaign_asset: {
+        url: referenceImageUrl,
+        approved: Boolean(referenceImageUrl),
+        rights_status: "owned",
+        provenance: "vendor_provided",
+        fallback_mode: null,
+      },
       constraints: {
         returnable: vendorProduct.returnable !== false,
         return_window_days: Number(vendorProduct.return_window_days || 7),
@@ -176,7 +251,8 @@ async function runIntakeAgent(run) {
       },
       brand_context: {
         brand_name: "Pink Paisa",
-        tone: ["warm", "credible", "editorial", "women-first"],
+        product_brand: vendorProduct.brand_name || publicProduct.brand_name || null,
+        tone: ["credible", "editorial", "product-led"],
         primary_channels: ["instagram"],
         blocked_claims: BLOCKED_CLAIMS,
       },
@@ -207,10 +283,9 @@ async function runIntakeAgent(run) {
     ? affiliatePriceStatus === "verified" && approvedAffiliatePriceSource && affiliatePriceFresh && Number(publicProduct.price || 0) > 0
     : Number(publicProduct.price || 0) > 0;
   const campaignRights = String(publicProduct.affiliate_campaign_usage_rights || "unknown");
-  const campaignAssetApproved = !isAffiliate || ["admin_confirmed", "owned", "licensed", "api_permitted"].includes(campaignRights);
   const campaignAssetUrl = isAffiliate
     ? (publicProduct.affiliate_campaign_asset_url || publicProduct.featured_image || images[0] || null)
-    : (images[0] || null);
+    : (publicProduct.featured_image || images[0] || null);
   const affiliateSourceLabel = trimText(publicProduct.brand_name || publicProduct.affiliate_source_platform || "Affiliate Partner");
   const productUrl = buildProductUrl(publicProduct.slug);
 
@@ -219,6 +294,7 @@ async function runIntakeAgent(run) {
     product_id: String(publicProduct._id),
     public_product_id: String(publicProduct._id),
     title: publicProduct.title,
+    campaign_label: publicProduct.campaign_label || null,
     slug: publicProduct.slug,
     product_url: productUrl,
     is_affiliate: isAffiliate,
@@ -254,13 +330,20 @@ async function runIntakeAgent(run) {
       full: normalizeWhitespace(publicProduct.full_description || ""),
     },
     tags: (publicProduct.tags || []).filter(Boolean),
+    brand_name: publicProduct.brand_name || null,
+    audience: trimText(publicProduct.attributes?.target_audience) || null,
+    buying_intent: publicProduct.buying_intent || null,
+    pros: (publicProduct.pros || []).filter(Boolean),
+    cons: (publicProduct.cons || []).filter(Boolean),
     images,
+    primary_image: campaignAssetUrl,
+    reference_image_url: campaignAssetUrl,
     campaign_asset: {
       url: campaignAssetUrl,
-      approved: Boolean(campaignAssetApproved && campaignAssetUrl),
+      approved: Boolean(campaignAssetUrl),
       rights_status: isAffiliate ? campaignRights : "owned",
       provenance: isAffiliate ? (publicProduct.affiliate_image_provenance || "unknown") : "admin_provided",
-      fallback_mode: isAffiliate && !(campaignAssetApproved && campaignAssetUrl) ? "category_editorial" : null,
+      fallback_mode: null,
     },
     constraints: {
       returnable: publicProduct.returnable !== false,
@@ -271,9 +354,10 @@ async function runIntakeAgent(run) {
     },
     brand_context: {
       brand_name: "Pink Paisa",
+      product_brand: publicProduct.brand_name || null,
       partner_label: isAffiliate ? affiliateSourceLabel : null,
       commerce_model: isAffiliate ? "affiliate" : "owned_catalog",
-      tone: ["warm", "credible", "editorial", "women-first"],
+      tone: ["credible", "editorial", "product-led"],
       primary_channels: ["instagram"],
       blocked_claims: BLOCKED_CLAIMS,
     },
@@ -290,11 +374,7 @@ async function runStrategyAgent(run) {
   const audience = buildAudience(brief.category, brief.tags);
   const angle = buildAngle(brief);
   const cta = brief.is_affiliate ? "View partner pick" : chooseCtaText(brief);
-  const contentType = (!brief.is_affiliate || brief.campaign_asset?.approved)
-    && Array.isArray(brief.images) && brief.images.length >= 2
-    && String(process.env.MARKETING_ENABLE_CAROUSEL || "true") !== "false"
-    ? "carousel"
-    : "single_image";
+  const contentType = "single_image";
 
   return {
     goal,
@@ -321,56 +401,32 @@ async function runStrategyAgent(run) {
 
 async function runCreativeAgent(run) {
   const brief = run.brief_json;
-  const strategy = run.strategy_json;
-  if (!brief || !strategy) throw new Error("Brief or strategy missing for creative agent");
+  if (!brief) throw new Error("Brief missing for creative agent");
 
   const campaignSettings = await getCampaignSettings();
-  const creativeMode = campaignSettings.campaign_creative_mode || "template";
-  if (creativeMode !== "template") {
-    return generateAiInstagramCreative({
-      run,
-      brief,
-      strategy,
-      settings: campaignSettings,
-    });
-  }
-
-  return generateInstagramCreative(run, brief, strategy);
+  return generateAiInstagramCreative({
+    run,
+    brief,
+    settings: campaignSettings,
+  });
 }
 
 async function runCaptionAgent(run) {
   const brief = run.brief_json;
-  const strategy = run.strategy_json;
   const creative = run.creative_json;
-  if (!brief || !strategy || !creative) throw new Error("Brief, strategy, or creative missing for caption agent");
-
-  const coreDescription = brief.descriptions.short || brief.descriptions.full || (
-    brief.is_affiliate ? `${brief.title} is a partner pick on Pink Paisa` : `${brief.title} on Pink Paisa`
-  );
-  const priceLine = buildShortOfferLine(brief);
-  const captionLead = brief.is_affiliate
-    ? `${brief.title} is a partner pick for a more intentional ${String(brief.category || "wellness").toLowerCase()} ritual.`
-    : `${brief.title} is here for a more intentional ${String(brief.category || "wellness").toLowerCase()} ritual.`;
-  const sourceLine = brief.is_affiliate ? `Partner source: ${getAffiliateSourceLabel(brief)}.` : null;
-
-  const shortCaption = `${captionLead} ${priceLine} ${creative.cta_text || strategy.cta}.`;
-  const longCaption = [
-    brief.title,
-    coreDescription,
-    `Why we like it: ${strategy.angle}.`,
-    priceLine,
-    sourceLine,
-    `Made for ${strategy.audience.toLowerCase()}.`,
-    `${creative.cta_text || strategy.cta}.`,
-  ].filter(Boolean).join("\n\n");
+  if (!brief || !creative) throw new Error("Brief or creative missing for caption agent");
+  const generated = await generateCampaignCaption({ brief, creative });
+  const caption = ensureAffiliateInstagramDisclosure(generated.caption, brief.is_affiliate);
 
   return {
     instagram: {
-      short_caption: ensureAffiliateInstagramDisclosure(shortCaption, brief.is_affiliate),
-      long_caption: ensureAffiliateInstagramDisclosure(longCaption, brief.is_affiliate),
-      hashtags: buildHashtags(brief),
-      cta: creative.cta_text || strategy.cta,
+      caption,
+      hashtags: generated.hashtags.slice(0, 8),
+      cta: brief.is_affiliate ? "View partner pick" : generated.cta,
     },
+    provider: generated.provider,
+    model: generated.model,
+    generated_at: generated.generated_at,
     creative_summary: {
       content_type: creative.content_type,
       primary_asset_url: creative.primary_asset_url,
@@ -391,23 +447,28 @@ async function runComplianceAgent(run) {
     issues.push(createIssue("blocking", "missing_affiliate_url", "Affiliate campaigns require a partner affiliate URL in campaign metadata."));
   }
   if (brief.is_affiliate && !hasAffiliateInstagramDisclosure([
+    captions.instagram?.caption,
     captions.instagram?.short_caption,
     captions.instagram?.long_caption,
   ].filter(Boolean).join("\n\n"))) {
     issues.push(createIssue("blocking", "missing_affiliate_disclosure", "Affiliate Instagram captions must include the Amazon Associate disclosure."));
   }
-  if (!brief.is_affiliate && (!Array.isArray(brief.images) || brief.images.length === 0)) {
-    issues.push(createIssue("blocking", "missing_images", "At least one product image is required."));
+  if (!brief.reference_image_url && !brief.campaign_asset?.url) {
+    issues.push(createIssue("blocking", "reference_image_required", "Product image required."));
   }
-  if (brief.is_affiliate && !brief.campaign_asset?.approved) {
-    issues.push(createIssue("warning", "generic_affiliate_creative", "No rights-approved product image was used; the creative is category-level editorial artwork."));
+  if (!creative.source_image_url) {
+    issues.push(createIssue("blocking", "reference_image_not_used", "The generated creative is missing its required product reference."));
+  }
+  if (brief.is_affiliate && !["admin_confirmed", "owned", "licensed", "api_permitted"].includes(String(brief.campaign_asset?.rights_status || "unknown"))) {
+    issues.push(createIssue("warning", "reference_rights_unconfirmed", "Product image usage rights are unconfirmed. Review this before publishing."));
   }
   if (!Array.isArray(creative.asset_urls) || creative.asset_urls.length === 0) issues.push(createIssue("blocking", "missing_creative_assets", "The Instagram creative did not generate any publishable image assets."));
+  if (Array.isArray(creative.asset_urls) && creative.asset_urls.filter(Boolean).length !== 1) issues.push(createIssue("blocking", "single_image_required", "New campaigns require exactly one generated image."));
   if (!brief.is_affiliate && brief.pricing.sale_price != null && Number(brief.pricing.sale_price) >= Number(brief.pricing.price)) {
     issues.push(createIssue("blocking", "invalid_sale_price", "Sale price must be lower than the base price."));
   }
   if (!trimText(brief.descriptions.short) && !trimText(brief.descriptions.full)) {
-    issues.push(createIssue("blocking", "missing_descriptions", "Product copy is too thin for campaign use."));
+    issues.push(createIssue("warning", "missing_descriptions", "Product description is missing; verify the generated copy carefully."));
   }
   if (!brief.is_affiliate && Number(brief.constraints.stock_quantity || 0) <= 0) {
     issues.push(createIssue("warning", "out_of_stock", "Stock is zero or missing, so campaign timing should be checked."));
@@ -416,11 +477,40 @@ async function runComplianceAgent(run) {
   const blockedTerms = scanBlockedClaims([
     brief.descriptions.short,
     brief.descriptions.full,
+    captions.instagram?.caption,
     captions.instagram?.short_caption,
     captions.instagram?.long_caption,
+    captions.instagram?.cta,
+    ...(captions.instagram?.hashtags || []).map(normalizeHashtagForCompliance),
+    creative.image_copy?.eyebrow,
+    creative.image_copy?.headline,
+    creative.image_copy?.supporting_line,
+    creative.image_copy?.cta,
+    creative.creative_json?.image_copy?.eyebrow,
+    creative.creative_json?.image_copy?.headline,
+    creative.creative_json?.image_copy?.supporting_line,
+    creative.creative_json?.image_copy?.cta,
     creative.creative_json?.headline,
     creative.creative_json?.supporting_line,
   ]);
+
+  if (brief.is_affiliate) {
+    try {
+      validateCaptionPackage({
+        caption: [
+          captions.instagram?.caption || captions.instagram?.long_caption || captions.instagram?.short_caption || "",
+          creative.image_copy?.eyebrow || creative.creative_json?.image_copy?.eyebrow,
+          creative.image_copy?.headline || creative.creative_json?.image_copy?.headline,
+          creative.image_copy?.supporting_line || creative.creative_json?.image_copy?.supporting_line,
+          creative.image_copy?.cta || creative.creative_json?.image_copy?.cta,
+        ].filter(Boolean).join("\n"),
+        hashtags: captions.instagram?.hashtags || [],
+        cta: captions.instagram?.cta || "",
+      }, { isAffiliate: true, enforceGeneratedLimits: false });
+    } catch (error) {
+      issues.push(createIssue("blocking", error.code || "affiliate_caption_violation", error.message));
+    }
+  }
 
   for (const term of blockedTerms) {
     issues.push(createIssue("blocking", "blocked_claim", `Blocked claim detected: "${term}".`));
@@ -448,14 +538,13 @@ function appendParams(url, params) {
   return parsed.toString();
 }
 
-async function runTrackingAgent(run) {
+async function runTrackingAgent(run, { overflowMode = "truncate" } = {}) {
   const brief = run.brief_json;
-  const strategy = run.strategy_json;
   const captions = run.caption_json;
   const compliance = run.compliance_json;
   const creative = run.creative_json;
 
-  if (!brief || !strategy || !captions || !compliance || !creative) throw new Error("Inputs missing for tracking agent");
+  if (!brief || !captions || !compliance || !creative) throw new Error("Inputs missing for tracking agent");
   if (!brief.product_url) throw new Error("Cannot build tracking links without a product URL");
 
   const campaignSlug = slugify(`${brief.slug}-${run.campaign_id}`);
@@ -465,24 +554,31 @@ async function runTrackingAgent(run) {
     utm_campaign: campaignSlug,
     utm_content: creative.content_type === "carousel" ? "carousel_post" : "single_image_post",
   });
+  const composedCaption = composeInstagramCaption({
+    caption: captions.instagram?.caption || captions.instagram?.long_caption || captions.instagram?.short_caption || "",
+    trackedUrl: instagramFeedLink,
+    hashtags: captions.instagram?.hashtags || [],
+    isAffiliate: Boolean(brief.is_affiliate),
+    overflowMode,
+  });
 
   return {
     campaign_slug: campaignSlug,
-    objective: strategy.goal,
+    objective: run.strategy_json?.goal || "awareness",
     compliance_status: compliance.status,
     links: {
       instagram_feed: instagramFeedLink,
     },
     publish_payload: {
       channel: "instagram",
-      content_type: creative.content_type,
+      content_type: creative.content_type || "single_image",
       asset_urls: (creative.asset_urls || []).map((url) => resolvePublicUrl(url)),
-      caption: ensureAffiliateInstagramDisclosure(
-        `${captions.instagram?.long_caption || captions.instagram?.short_caption || ""}\n\n${instagramFeedLink}\n\n${(captions.instagram?.hashtags || []).join(" ")}`.trim(),
-        brief.is_affiliate,
-      ),
+      caption: composedCaption.caption,
+      caption_character_count: composedCaption.character_count,
+      caption_was_truncated: composedCaption.was_truncated,
+      hashtags: composedCaption.hashtags,
       tracked_url: instagramFeedLink,
-      cta: captions.instagram?.cta || strategy.cta,
+      cta: captions.instagram?.cta || creative.cta_text,
     },
   };
 }
@@ -491,22 +587,27 @@ async function runPublishPreparationAgent(run) {
   const creative = run.creative_json;
   const tracking = run.tracking_json;
   if (!creative || !tracking?.publish_payload) throw new Error("Creative or tracking payload missing for publish preparation");
+  const caption = ensureAffiliateInstagramDisclosure(
+    tracking.publish_payload.caption,
+    Boolean(run.brief_json?.is_affiliate || run.source_event === "affiliate_product.published"),
+  );
+  if (caption.length > INSTAGRAM_CAPTION_MAX_LENGTH) throw captionLengthError();
 
   return {
     channel: "instagram",
     content_type: creative.content_type,
     asset_urls: tracking.publish_payload.asset_urls || [],
-    caption: ensureAffiliateInstagramDisclosure(
-      tracking.publish_payload.caption,
-      Boolean(run.brief_json?.is_affiliate || run.source_event === "affiliate_product.published"),
-    ),
+    caption,
     tracked_url: tracking.publish_payload.tracked_url,
     cta: tracking.publish_payload.cta,
+    caption_character_count: caption.length,
+    caption_was_truncated: tracking.publish_payload.caption_was_truncated,
   };
 }
 
 module.exports = {
   AFFILIATE_INSTAGRAM_DISCLOSURE,
+  INSTAGRAM_CAPTION_MAX_LENGTH,
   ensureAffiliateInstagramDisclosure,
   hasAffiliateInstagramDisclosure,
   runIntakeAgent,
@@ -517,7 +618,7 @@ module.exports = {
   runTrackingAgent,
   runPublishPreparationAgent,
   _private: {
-    buildShortOfferLine,
+    composeInstagramCaption,
     ensureAffiliateInstagramDisclosure,
     hasAffiliateInstagramDisclosure,
   },

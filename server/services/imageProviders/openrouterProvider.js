@@ -228,6 +228,11 @@ function extractImageBuffer(json) {
 }
 
 async function generateImage({ model, prompt, sourceImageBuffer, size, quality }) {
+  if (!sourceImageBuffer?.length) {
+    const error = new Error("A product reference image is required for OpenRouter campaign image editing");
+    error.code = "reference_image_required";
+    throw error;
+  }
   const resolvedModel = trimText(model);
   if (!resolvedModel) throw new Error("An OpenRouter image model must be selected");
 
@@ -281,4 +286,9 @@ module.exports = {
   fetchImageModels,
   generateImage,
   getModelMetadata,
+  _private: {
+    buildMessages,
+    mimeTypeFromBuffer,
+    normalizeModelDefinition,
+  },
 };

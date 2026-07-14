@@ -2,7 +2,11 @@ const express = require("express");
 const router = express.Router();
 const AdminSettings = require("../models/AdminSettings");
 const { protect, adminOnly } = require("../middleware/auth");
-const { CAMPAIGN_SETTINGS_KEY, normaliseCampaignSettings } = require("../utils/campaignSettings");
+const {
+  CAMPAIGN_SETTINGS_KEY,
+  campaignSettingsPersistence,
+  normaliseCampaignSettings,
+} = require("../utils/campaignSettings");
 const { buildImageProviderRegistryResponse } = require("../services/imageProviders");
 const {
   AFFILIATE_DATA_SETTINGS_KEY,
@@ -100,7 +104,11 @@ router.get("/settings/campaigns/image-models", protect, adminOnly, async (_req, 
 // PUT /api/admin/settings/campaigns
 router.put("/settings/campaigns", protect, adminOnly, async (req, res) => {
   try {
-    const updates = normaliseCampaignSettings(req.body || {});
+    const current = await AdminSettings.findOne({ key: CAMPAIGN_SETTINGS_KEY }).lean();
+    const updates = campaignSettingsPersistence({
+      ...(current || {}),
+      ...(req.body || {}),
+    });
     const settings = await AdminSettings.findOneAndUpdate(
       { key: CAMPAIGN_SETTINGS_KEY },
       { $set: updates },

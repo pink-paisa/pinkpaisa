@@ -1,7 +1,5 @@
-import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { AlertTriangle, CheckCircle2, RefreshCcw, Rocket, ShieldCheck, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCcw, Rocket, ShieldCheck } from "lucide-react";
 
 type CampaignRunLite = {
   status: string;
@@ -40,14 +38,11 @@ const CampaignPublishActions = ({
   run,
   lastError,
   actionLoading,
-  onRefresh,
   onRetry,
   onResetStuckTask,
   onRegenerate,
   onApproveReview,
-  onRejectReview,
   onPostNow,
-  onSchedule,
   canResetStuck = false,
   instagramConnected = true,
   instagramConnectionWarning = null,
@@ -55,20 +50,17 @@ const CampaignPublishActions = ({
   run: CampaignRunLite;
   lastError?: string | null;
   actionLoading: boolean;
-  onRefresh: () => void;
   onRetry: () => void;
   onResetStuckTask: () => void;
   onRegenerate: () => void;
   onApproveReview: () => void;
-  onRejectReview: () => void;
   onPostNow: () => void;
-  onSchedule: (scheduledFor: string) => void;
   canResetStuck?: boolean;
   instagramConnected?: boolean;
   instagramConnectionWarning?: string | null;
 }) => {
-  const [scheduledFor, setScheduledFor] = useState("");
   const readinessBlockers = run.publish_readiness?.blockers || [];
+  const approvalBlockers = readinessBlockers.filter((blocker) => !["review_not_approved", "non_https_media_url"].includes(blocker.code));
   const readinessWarnings = run.publish_readiness?.warnings || [];
   const publishBlockers = [
     ...readinessBlockers,
@@ -80,10 +72,10 @@ const CampaignPublishActions = ({
     && run.publish_readiness?.can_publish === true
     && publishBlockers.length === 0;
   const showRetry = run.status === "failed" || run.publish_status === "failed";
-  const minimumScheduleValue = new Date(Date.now() + (5 * 60 * 1000)).toISOString().slice(0, 16);
   const publishFailed = run.publish_status === "failed";
   const publishStatusLabel = (run.publish_status || "not_ready").replace(/_/g, " ");
   const nextActionLabel = getNextActionLabel(run);
+  const canApprove = run.status === "waiting_review" && approvalBlockers.length === 0;
 
   return (
     <div className="rounded-[28px] border border-border bg-background p-5 shadow-sm">
@@ -100,11 +92,8 @@ const CampaignPublishActions = ({
       <div className="mt-4 rounded-2xl border border-border/70 bg-muted/20 p-4">
         <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Workflow tools</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <Button variant="outline" className="w-full rounded-2xl justify-center" onClick={onRefresh} disabled={actionLoading}>
-            <RefreshCcw className="mr-2 h-4 w-4" /> Refresh
-          </Button>
-          <Button variant="outline" className="w-full rounded-2xl justify-center" onClick={onRegenerate} disabled={actionLoading}>
-            <RefreshCcw className="mr-2 h-4 w-4" /> Regenerate creative
+          <Button variant="outline" className="w-full justify-center rounded-2xl sm:col-span-2" onClick={onRegenerate} disabled={actionLoading}>
+            <RefreshCcw className="mr-2 h-4 w-4" /> Regenerate image and caption
           </Button>
           {canResetStuck && (
             <Button variant="outline" className="w-full rounded-2xl justify-center sm:col-span-2" onClick={onResetStuckTask} disabled={actionLoading}>
@@ -126,14 +115,14 @@ const CampaignPublishActions = ({
             <p className="font-medium">Review gate</p>
           </div>
           <p className="mt-1 text-sm text-amber-800">Approve this draft to unlock Instagram posting.</p>
-          <div className="mt-4 flex flex-wrap gap-3">
-            <Button variant="outline" className="rounded-2xl border-rose-200 text-rose-700 hover:bg-rose-50" onClick={onRejectReview} disabled={actionLoading}>
-              <XCircle className="mr-2 h-4 w-4" /> Reject
-            </Button>
-            <Button className="rounded-2xl" onClick={onApproveReview} disabled={actionLoading}>
+          <div className="mt-4">
+            <Button className="rounded-2xl" onClick={onApproveReview} disabled={actionLoading || !canApprove}>
               <CheckCircle2 className="mr-2 h-4 w-4" /> Approve review
             </Button>
           </div>
+          {!canApprove && approvalBlockers.length ? (
+            <p className="mt-3 text-xs text-rose-700">{approvalBlockers[0].message}</p>
+          ) : null}
         </div>
       )}
 
@@ -170,7 +159,7 @@ const CampaignPublishActions = ({
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="font-medium text-[#6b4b57]">Instagram publishing</p>
-              <p className="text-sm text-[#8a6775]">Post instantly or schedule a time. Once published, the media ID and permalink will be stored on this run.</p>
+              <p className="text-sm text-[#8a6775]">Queue the approved post. The media ID and permalink are stored after Instagram confirms publishing.</p>
             </div>
             {publishFailed ? (
               <div className="rounded-full border border-rose-200 bg-rose-100 px-3 py-1 text-xs font-medium text-rose-700">
@@ -194,19 +183,6 @@ const CampaignPublishActions = ({
           <Button className="w-full rounded-2xl justify-center" onClick={onPostNow} disabled={actionLoading}>
             <Rocket className="mr-2 h-4 w-4" /> Queue Instagram post
           </Button>
-
-          <div className="grid gap-3 md:grid-cols-[1fr,auto]">
-            <Input type="datetime-local" min={minimumScheduleValue} value={scheduledFor} onChange={(e) => setScheduledFor(e.target.value)} />
-            <Button
-              variant="outline"
-              className="rounded-2xl"
-              onClick={() => onSchedule(scheduledFor)}
-              disabled={actionLoading || !scheduledFor}
-            >
-              Schedule
-            </Button>
-          </div>
-          <p className="text-xs text-[#8a6775]">Schedule at least 5 minutes ahead so the worker can queue and confirm the Instagram post cleanly.</p>
         </div>
       )}
 

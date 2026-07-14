@@ -1,44 +1,10 @@
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { Clock3, Image as ImageIcon, MessageSquareQuote, Rocket, ShieldCheck, Sparkles } from "lucide-react";
-
-export const DEFAULT_CAMPAIGN_AI_PROMPT_TEMPLATE = [
-  "Use the uploaded image of my product as the base.",
-  "",
-  "Create a high-quality Instagram marketing creative for this product.",
-  "",
-  "Product details:",
-  "- Product name: [Your Product Name]",
-  "- Category: [e.g., Skincare / Perfume / Serum]",
-  "- Target audience: [e.g., Men 20-35 / Women / Luxury buyers]",
-  "- Key benefits: [e.g., Hydration, Glow, Anti-aging]",
-  "- Brand tone: [Luxury / Minimal / Bold / Natural / Premium]",
-  "",
-  "Design requirements:",
-  "- Keep the original product intact and realistic",
-  "- Enhance lighting to make it premium and eye-catching",
-  "- Add a clean, aesthetic background (suggest options if needed)",
-  "- Include subtle props that match the product vibe (e.g., flowers, stones, water, fabric)",
-  "- Add soft shadows and reflections for depth",
-  "- Maintain a modern Instagram ad style",
-  "",
-  "- Keep the product as the hero on the left or center-left",
-  "- Leave elegant negative space in the composition for a balanced premium look",
-  "",
-  "Style references:",
-  "- Cinematic lighting",
-  "- Soft gradients or neutral tones",
-  "- Instagram luxury brand aesthetic",
-  "- High contrast but elegant",
-  "",
-  "Output:",
-  "- Portrait-friendly composition suitable for Instagram marketing",
-  "- Ultra high resolution",
-  "- Clean, minimal, premium look",
-  "- No typography, no price stickers, no CTA button rendered directly inside the AI image",
-].join("\n");
+import { AlertTriangle, Clock3, MessageSquareQuote, Rocket, ShieldCheck, Sparkles } from "lucide-react";
 
 export type CampaignAutomationSettings = {
   campaign_mode: "manual" | "automatic";
@@ -49,6 +15,12 @@ export type CampaignAutomationSettings = {
   campaign_ai_model: string;
   campaign_ai_image_quality: "low" | "medium" | "high";
   campaign_ai_prompt_template: string;
+  campaign_ai_affiliate_prompt_template: string;
+  campaign_ai_catalog_prompt_template: string;
+  prompt_defaults: {
+    affiliate: string;
+    catalog: string;
+  };
 };
 
 export type CampaignImageModelOption = {
@@ -85,7 +57,7 @@ export const DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY: CampaignImageProviderRegi
       description: "Production-ready image generation for Pink Paisa campaigns.",
       enabled: true,
       coming_soon: false,
-      default_model: "gpt-image-1-mini",
+      default_model: "gpt-image-2",
       models: [
         {
           id: "gpt-image-1-mini",
@@ -160,7 +132,7 @@ export const DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY: CampaignImageProviderRegi
   ],
   defaults: {
     provider: "openai",
-    model: "gpt-image-1-mini",
+    model: "gpt-image-2",
   },
 };
 
@@ -171,6 +143,7 @@ const CampaignAutomationPanel = ({
   loading,
   saving,
   imageRegistry,
+  imageRegistryError,
   onChange,
   onSave,
 }: {
@@ -178,25 +151,39 @@ const CampaignAutomationPanel = ({
   loading: boolean;
   saving: boolean;
   imageRegistry: CampaignImageProviderRegistry | null;
+  imageRegistryError?: string | null;
   onChange: (patch: Partial<CampaignAutomationSettings>) => void;
   onSave: () => void;
 }) => {
+  const [activePrompt, setActivePrompt] = useState<"affiliate" | "catalog">("affiliate");
   const scheduledTime = `${pad(settings.campaign_batch_hour_ist)}:${pad(settings.campaign_batch_minute_ist)}`;
-  const providerOptions = imageRegistry?.providers || [];
-  const selectedProvider = providerOptions.find((provider) => provider.key === settings.campaign_ai_provider)
-    || providerOptions.find((provider) => provider.enabled)
-    || null;
-  const modelOptions = selectedProvider?.models || [];
+  const providerOptions = (imageRegistry?.providers || [])
+    .map((provider) => ({
+      ...provider,
+      models: provider.models.filter((model) => model.supports_reference_image),
+    }))
+    .filter((provider) => provider.enabled && provider.models.length > 0);
+  const selectedProvider = providerOptions.find((provider) => provider.key === settings.campaign_ai_provider) || null;
+  const modelOptions = (selectedProvider?.models || []).filter((model) => model.supports_reference_image);
   const selectedModel = modelOptions.find((model) => model.id === settings.campaign_ai_model) || null;
+  const promptField = activePrompt === "affiliate"
+    ? "campaign_ai_affiliate_prompt_template"
+    : "campaign_ai_catalog_prompt_template";
+  const promptDefaults = settings.prompt_defaults || { affiliate: "", catalog: "" };
+  const defaultPrompt = promptDefaults[activePrompt] || "";
+  const promptValue = settings[promptField]
+    || (activePrompt === "affiliate" ? settings.campaign_ai_prompt_template : "")
+    || "";
+  const registryReadOnly = Boolean(imageRegistryError);
 
   return (
     <div className="rounded-3xl border border-border bg-card p-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Campaign automation</p>
-          <h3 className="mt-2 font-serif text-2xl">Manual or automatic posting mode</h3>
+          <h3 className="mt-2 font-serif text-2xl">Manual or automatic draft generation</h3>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-            Manual mode keeps every draft in review. Automatic mode can publish non-affiliate drafts after generation, but Amazon affiliate campaigns always stop for admin review.
+            Both modes stop every generated image and caption for admin review. Automatic mode only starts the scheduled draft pipeline; it never publishes by itself.
           </p>
         </div>
         <Button className="rounded-2xl" onClick={onSave} disabled={loading || saving}>
@@ -219,10 +206,10 @@ const CampaignAutomationPanel = ({
             >
               <div className="flex items-center gap-2 text-foreground">
                 <ShieldCheck className="h-4 w-4 text-primary" />
-                <p className="font-medium">Manual approval</p>
+                <p className="font-medium">Manual draft generation</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Generate drafts and stop at review. Admin approves before anything goes live.
+                Start batches yourself. Every completed draft waits for visual review and approval.
               </p>
             </button>
 
@@ -237,10 +224,10 @@ const CampaignAutomationPanel = ({
             >
               <div className="flex items-center gap-2 text-foreground">
                 <Rocket className="h-4 w-4 text-primary" />
-                <p className="font-medium">Automatic posting</p>
+                <p className="font-medium">Automatic draft generation</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Process queued products at the scheduled time. Non-affiliate runs may auto-publish; affiliate runs still require admin approval.
+                Start queued products at the scheduled time, then stop every result at mandatory review.
               </p>
             </button>
           </div>
@@ -252,7 +239,7 @@ const CampaignAutomationPanel = ({
             <p className="font-medium">Morning IST schedule</p>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Automatic mode uses this time for the daily batch trigger. Manual mode ignores it unless you switch modes later.
+            Automatic draft mode uses this time for the daily batch trigger. Manual mode ignores it until you switch modes.
           </p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -279,61 +266,26 @@ const CampaignAutomationPanel = ({
           </div>
 
           <div className="mt-4 rounded-2xl bg-[#fff8fa] px-4 py-3 text-sm text-[#6b4b57]">
-            Next automatic trigger target: <span className="font-medium">{scheduledTime} IST</span>
+            Next draft trigger target: <span className="font-medium">{scheduledTime} IST</span>
           </div>
         </div>
       </div>
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-[1fr,360px]">
-        <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
-          <div className="flex items-center gap-2 text-foreground">
-            <ImageIcon className="h-4 w-4 text-primary" />
-            <p className="font-medium">Creative generation mode</p>
-          </div>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Template mode uses the current Pink Paisa renderer. AI Generated sends the prompt and product image to the image model and uses the complete raw AI output as the final creative.
-          </p>
-
-          <div className="mt-4 grid gap-3 lg:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => onChange({ campaign_creative_mode: "template" })}
-              className={`rounded-2xl border p-4 text-left transition-all ${
-                settings.campaign_creative_mode === "template"
-                  ? "border-primary bg-primary/5"
-                  : "border-border/70 bg-background hover:border-border"
-              }`}
-            >
-              <p className="font-medium text-foreground">Template</p>
-              <p className="mt-2 text-sm text-muted-foreground">Fastest and cheapest. Uses your current Pink Paisa layout engine.</p>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onChange({ campaign_creative_mode: "ai_generated" })}
-              className={`rounded-2xl border p-4 text-left transition-all ${
-                settings.campaign_creative_mode === "ai_generated"
-                  ? "border-primary bg-primary/5"
-                  : "border-border/70 bg-background hover:border-border"
-              }`}
-            >
-              <div className="flex items-center gap-2 text-foreground">
-                <Sparkles className="h-4 w-4 text-primary" />
-                <p className="font-medium">AI Generated</p>
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">Complete AI raw output. Uses the uploaded product image as reference when available and does not apply the in-house overlay renderer.</p>
-            </button>
-          </div>
-        </div>
-
+      <div className="mt-4">
         <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
           <div className="flex items-center gap-2 text-foreground">
             <Sparkles className="h-4 w-4 text-primary" />
             <p className="font-medium">AI provider setup</p>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Choose the approved provider and model here. This keeps model switching safe and avoids manual typing mistakes.
+            Only models that accept a required product reference image are available.
           </p>
+          {imageRegistryError ? (
+            <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <p>{imageRegistryError} Your saved provider and model are preserved and read-only until the registry loads again.</p>
+            </div>
+          ) : null}
 
           <div className="mt-4 space-y-4">
             <div>
@@ -347,15 +299,20 @@ const CampaignAutomationPanel = ({
                     campaign_ai_model: nextProvider?.default_model || nextProvider?.models?.[0]?.id || "",
                   });
                 }}
-                disabled={!providerOptions.length}
+                disabled={registryReadOnly || !providerOptions.length}
               >
                 <SelectTrigger className="rounded-xl">
                   <SelectValue placeholder="Select provider" />
                 </SelectTrigger>
                 <SelectContent>
+                  {!selectedProvider && settings.campaign_ai_provider ? (
+                    <SelectItem value={settings.campaign_ai_provider} disabled>
+                      {settings.campaign_ai_provider} (saved, unavailable)
+                    </SelectItem>
+                  ) : null}
                   {providerOptions.map((provider) => (
-                    <SelectItem key={provider.key} value={provider.key} disabled={!provider.enabled}>
-                      {provider.enabled ? provider.label : `${provider.label} (coming soon)`}
+                    <SelectItem key={provider.key} value={provider.key}>
+                      {provider.label}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -370,12 +327,17 @@ const CampaignAutomationPanel = ({
               <Select
                 value={selectedModel?.id || settings.campaign_ai_model}
                 onValueChange={(value) => onChange({ campaign_ai_model: value })}
-                disabled={!modelOptions.length}
+                disabled={registryReadOnly || !modelOptions.length}
               >
                 <SelectTrigger className="rounded-xl">
                   <SelectValue placeholder="Select model" />
                 </SelectTrigger>
                 <SelectContent>
+                  {!selectedModel && settings.campaign_ai_model ? (
+                    <SelectItem value={settings.campaign_ai_model} disabled>
+                      {settings.campaign_ai_model} (saved, unavailable)
+                    </SelectItem>
+                  ) : null}
                   {modelOptions.map((model) => (
                     <SelectItem key={model.id} value={model.id}>
                       {model.label}
@@ -396,7 +358,7 @@ const CampaignAutomationPanel = ({
                 <p className="font-medium">Image quality</p>
               </div>
               <p className="mt-1 text-sm text-muted-foreground">
-                Higher quality gives better premium visuals but increases cost and generation time. This setting is used only in AI Generated mode.
+                Higher quality can improve the final reference edit but increases cost and generation time.
               </p>
             </div>
 
@@ -424,7 +386,7 @@ const CampaignAutomationPanel = ({
           </div>
 
           <div className="mt-4 rounded-2xl bg-[#fff8fa] px-4 py-3 text-sm text-[#6b4b57]">
-            The selected provider must have its API key configured on the backend. AI generation is strict now, so failed generation will fail the campaign instead of falling back to template creative.
+            The product image is mandatory. A missing, invalid, or unreachable reference fails before the image model is called, and there is no generic fallback.
           </div>
         </div>
       </div>
@@ -434,30 +396,36 @@ const CampaignAutomationPanel = ({
           <div className="max-w-3xl">
             <div className="flex items-center gap-2 text-foreground">
               <MessageSquareQuote className="h-4 w-4 text-primary" />
-              <p className="font-medium">Prompt</p>
+              <p className="font-medium">Creative direction</p>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              This prompt template is merged with the current product details and used when you regenerate AI creative. In AI Generated mode, the uploaded product image and this prompt go together when a source image exists.
+              This direction is merged with verified product details and the mandatory product image. Identity-preservation and prohibited-content rules are always added by the server.
             </p>
           </div>
           <Button
             type="button"
             variant="outline"
             className="rounded-2xl"
-            onClick={() => onChange({ campaign_ai_prompt_template: DEFAULT_CAMPAIGN_AI_PROMPT_TEMPLATE })}
-            disabled={loading || saving}
+            onClick={() => onChange({ [promptField]: defaultPrompt })}
+            disabled={loading || saving || !defaultPrompt}
           >
-            Reset default prompt
+            Reset {activePrompt} prompt
           </Button>
         </div>
 
         <div className="mt-4">
+          <Tabs value={activePrompt} onValueChange={(value) => setActivePrompt(value as "affiliate" | "catalog")}>
+            <TabsList className="grid w-full max-w-sm grid-cols-2">
+              <TabsTrigger value="affiliate">Affiliate</TabsTrigger>
+              <TabsTrigger value="catalog">Catalog</TabsTrigger>
+            </TabsList>
+          </Tabs>
           <Textarea
             rows={18}
-            value={settings.campaign_ai_prompt_template}
-            onChange={(event) => onChange({ campaign_ai_prompt_template: event.target.value })}
-            placeholder="Use the uploaded image of my product as the base..."
-            className="font-mono text-sm leading-6"
+            value={promptValue}
+            onChange={(event) => onChange({ [promptField]: event.target.value })}
+            placeholder="Describe the background, lighting, mood, and restrained props..."
+            className="mt-3 font-mono text-sm leading-6"
           />
         </div>
       </div>

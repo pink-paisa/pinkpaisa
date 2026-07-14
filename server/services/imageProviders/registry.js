@@ -126,6 +126,12 @@ function getDefaultModelId(providerKey) {
     return envPreferredModel;
   }
 
+  if (provider.key === "openai") {
+    return provider.models.find((model) => model.id === "gpt-image-2" && model.supports_reference_image)?.id
+      || provider.models.find((model) => model.supports_reference_image)?.id
+      || "";
+  }
+
   return provider.models[0]?.id || "";
 }
 
@@ -164,8 +170,9 @@ async function buildImageProviderRegistryResponse() {
     try {
       const { fetchImageModels } = require("./openrouterProvider");
       const models = await fetchImageModels();
-      if (models.length) {
-        openrouterProvider.models = models;
+      const referenceModels = models.filter((model) => model.supports_reference_image === true);
+      if (referenceModels.length) {
+        openrouterProvider.models = referenceModels;
         openrouterProvider.enabled = true;
         openrouterProvider.coming_soon = false;
         openrouterProvider.description = "Live OpenRouter image model list discovered from the OpenRouter Models API.";
@@ -183,19 +190,23 @@ async function buildImageProviderRegistryResponse() {
   }
 
   const providers = registry.map((provider) => {
+    const referenceModels = provider.models.filter((model) => model.supports_reference_image === true);
     const envPreferredModel = provider.key === "openrouter"
       ? trimText(process.env.OPENROUTER_IMAGE_MODEL)
       : "";
     const defaultModel = provider.enabled
       ? (
-        envPreferredModel && provider.models.some((model) => model.id === envPreferredModel)
+        envPreferredModel && referenceModels.some((model) => model.id === envPreferredModel)
           ? envPreferredModel
-          : provider.models[0]?.id || null
+          : provider.key === "openai"
+            ? getDefaultModelId("openai") || null
+            : referenceModels[0]?.id || null
       )
       : null;
 
     return {
       ...provider,
+      models: referenceModels,
       default_model: provider.key === "openrouter" && defaultModel == null && envPreferredModel
         ? envPreferredModel
         : defaultModel,

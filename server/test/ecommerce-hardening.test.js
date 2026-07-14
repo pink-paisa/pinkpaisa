@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const sharp = require("sharp");
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-with-enough-length";
 
@@ -38,6 +39,7 @@ const { checkAffiliateProductLink } = require("../services/affiliateLinkChecker"
 const { getCreatorsApiEnvStatus } = require("../utils/affiliateDataSettings");
 const creatorsApiService = require("../services/amazonCreatorsApiService");
 const affiliateProductController = require("../controllers/affiliateProductController");
+const marketingCampaignController = require("../controllers/marketingCampaignController");
 const wishlistController = require("../controllers/wishlistController");
 const authPrivate = authRoute._private;
 const productPrivate = productController._private;
@@ -47,11 +49,28 @@ const emailPrivate = emailUtils._private;
 const creatorsApiPrivate = creatorsApiService._private;
 const affiliateProductPrivate = affiliateProductController._private;
 const wishlistPrivate = wishlistController._private;
-const openaiImageProviderPrivate = require("../services/imageProviders/openaiProvider")._private;
-const { getImageProviderRegistry } = require("../services/imageProviders/registry");
+const openaiImageProvider = require("../services/imageProviders/openaiProvider");
+const openaiImageProviderPrivate = openaiImageProvider._private;
+const googleImageProvider = require("../services/imageProviders/googleProvider");
+const googleImageProviderPrivate = googleImageProvider._private;
+const openrouterImageProvider = require("../services/imageProviders/openrouterProvider");
+const openrouterImageProviderPrivate = openrouterImageProvider._private;
+const imageProviderService = require("../services/imageProviders");
+const { getDefaultModelId, getImageProviderRegistry } = require("../services/imageProviders/registry");
 const campaignAssetStoragePrivate = require("../services/campaignAssetStorage")._private;
-const { buildVariantPrompt } = require("../services/instagramAiCreativeService");
+const { buildVariantPrompt, _private: instagramCreativePrivate } = require("../services/instagramAiCreativeService");
+const {
+  normalizeReferenceBuffer,
+  resolveProductReferenceImage,
+  resolveVendorReferenceImage,
+} = require("../services/campaignReferenceImage");
+const openAiCaptionPrivate = require("../services/openAiCaptionService")._private;
 const { buildAffiliatePriceMigrationUpdate } = require("../scripts/migrateAffiliatePriceState");
+const {
+  DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT_TEMPLATE,
+  DEFAULT_CATALOG_CAMPAIGN_AI_PROMPT_TEMPLATE,
+  normaliseCampaignSettings,
+} = require("../utils/campaignSettings");
 const {
   canonicalizeAmazonAffiliateUrl,
   validateAmazonAffiliateUrl,
@@ -173,9 +192,29 @@ test("marketing publish event schema records audit fields", () => {
   assert.ok(indexes.includes(JSON.stringify({ campaign_run_id: 1, created_at: -1 })));
 });
 
+test("new carousel publishing is disabled while historical carousel data remains readable", async () => {
+  let statusCode = null;
+  let payload = null;
+  const response = {
+    status(value) {
+      statusCode = value;
+      return this;
+    },
+    json(value) {
+      payload = value;
+      return value;
+    },
+  };
+
+  await marketingCampaignController.publishMarketingCarouselController({}, response);
+  assert.equal(statusCode, 410);
+  assert.equal(payload.code, "carousel_creation_disabled");
+});
+
 test("OpenAI image provider strips unsupported parameters for every selectable model", () => {
   const openaiProvider = getImageProviderRegistry().find((provider) => provider.key === "openai");
   assert.ok(openaiProvider, "OpenAI provider should be registered");
+  assert.equal(getDefaultModelId("openai"), process.env.OPENAI_IMAGE_MODEL || "gpt-image-2");
   assert.deepEqual(openaiProvider.models.map((model) => model.id), [
     "gpt-image-1-mini",
     "gpt-image-1",
@@ -200,6 +239,301 @@ test("OpenAI image provider strips unsupported parameters for every selectable m
     });
     assert.equal(Object.hasOwn(request, "input_fidelity"), expected, model.id);
   }
+});
+
+test("campaign reference images normalize JPEG, PNG, and WebP inputs", async () => {
+  assert.equal(resolveProductReferenceImage({
+    affiliate_campaign_asset_url: "campaign.jpg",
+    featured_image: "featured.jpg",
+    images: ["gallery.jpg"],
+  }), "campaign.jpg");
+  assert.equal(resolveProductReferenceImage({ featured_image: "featured.jpg", images: ["gallery.jpg"] }), "featured.jpg");
+  assert.equal(resolveProductReferenceImage({ images: ["gallery.jpg"] }), "gallery.jpg");
+  assert.equal(resolveProductReferenceImage({}), null);
+  assert.equal(resolveVendorReferenceImage({ featured_image: "vendor.jpg" }, { featured_image: "public.jpg" }), "vendor.jpg");
+  assert.equal(resolveVendorReferenceImage(
+    { featured_image: "vendor.jpg" },
+    { affiliate_campaign_asset_url: "dedicated.jpg", featured_image: "public.jpg" },
+  ), "dedicated.jpg");
+  assert.equal(resolveVendorReferenceImage({}, { featured_image: "public.jpg" }), "public.jpg");
+
+  const formats = ["jpeg", "png", "webp"];
+  for (const format of formats) {
+    const pipeline = sharp({
+      create: {
+        width: 24,
+        height: 30,
+        channels: 4,
+        background: { r: 180, g: 40, b: 90, alpha: 1 },
+      },
+    });
+    const source = await pipeline[format]().toBuffer();
+    const normalized = await normalizeReferenceBuffer(source, `test-${format}`);
+    const metadata = await sharp(normalized.buffer).metadata();
+    assert.equal(normalized.mime_type, "image/png", format);
+    assert.equal(metadata.format, "png", format);
+    assert.equal(metadata.width, 24, format);
+    assert.equal(metadata.height, 30, format);
+  }
+
+  await assert.rejects(
+    normalizeReferenceBuffer(Buffer.from("not-an-image"), "bad-image"),
+    (error) => error.code === "reference_image_unavailable",
+  );
+});
+
+test("every image provider request includes the required product reference", async () => {
+  const source = await sharp({
+    create: { width: 12, height: 15, channels: 3, background: "#d84b7d" },
+  }).png().toBuffer();
+
+  const openaiForm = openaiImageProviderPrivate.buildEditForm({
+    model: "gpt-image-2",
+    prompt: "Preserve this exact product",
+    sourceImageBuffer: source,
+    size: "1024x1536",
+    quality: "high",
+  });
+  const openaiImage = openaiForm.get("image");
+  assert.equal(openaiImage.type, "image/png");
+  assert.equal(openaiImage.size, source.length);
+
+  const googleBody = googleImageProviderPrivate.buildRequestBody({
+    model: "gemini-2.5-flash-image",
+    prompt: "Preserve this exact product",
+    sourceImageBuffer: source,
+    size: "1080x1350",
+    quality: "medium",
+  });
+  assert.equal(googleBody.contents[0].parts[0].inlineData.mimeType, "image/png");
+  assert.equal(Buffer.from(googleBody.contents[0].parts[0].inlineData.data, "base64").equals(source), true);
+
+  const openrouterMessages = openrouterImageProviderPrivate.buildMessages({
+    prompt: "Preserve this exact product",
+    sourceImageBuffer: source,
+  });
+  assert.match(openrouterMessages[0].content[1].image_url.url, /^data:image\/png;base64,/);
+  assert.equal(openrouterMessages[0].content[1].image_url.url.endsWith(source.toString("base64")), true);
+
+  await assert.rejects(
+    googleImageProvider.generateImage({ model: "gemini-2.5-flash-image", prompt: "No source" }),
+    (error) => error.code === "reference_image_required",
+  );
+  await assert.rejects(
+    openrouterImageProvider.generateImage({ model: "image-model", prompt: "No source" }),
+    (error) => error.code === "reference_image_required",
+  );
+});
+
+test("OpenRouter capability lookup failures use the reference-model error contract", async () => {
+  const originalGetModelMetadata = openrouterImageProvider.getModelMetadata;
+  openrouterImageProvider.getModelMetadata = async () => {
+    throw new Error("OpenRouter unavailable");
+  };
+
+  try {
+    await assert.rejects(
+      imageProviderService.assertReferenceModelSupported("openrouter", "example/image-model"),
+      (error) => error.code === "reference_model_unsupported",
+    );
+  } finally {
+    openrouterImageProvider.getModelMetadata = originalGetModelMetadata;
+  }
+});
+
+test("OpenAI campaign creatives use image edits and never text-only generations", async () => {
+  const originalFetch = global.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const calls = [];
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  global.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: true,
+      async json() {
+        return { data: [{ b64_json: Buffer.from("generated-image").toString("base64") }] };
+      },
+    };
+  };
+
+  try {
+    const source = await sharp({
+      create: { width: 12, height: 15, channels: 3, background: "#d84b7d" },
+    }).png().toBuffer();
+    await openaiImageProvider.generateImage({
+      model: "gpt-image-2",
+      prompt: "Preserve this exact product",
+      sourceImageBuffer: source,
+      size: "1024x1536",
+      quality: "medium",
+    });
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].url, /\/images\/edits$/);
+    assert.doesNotMatch(calls[0].url, /\/images\/generations$/);
+    assert.equal(calls[0].options.body.get("image").size, source.length);
+    assert.ok(calls[0].options.signal instanceof AbortSignal);
+
+    await assert.rejects(
+      openaiImageProvider.generateImage({
+        model: "gpt-image-2",
+        prompt: "No source",
+        sourceImageBuffer: null,
+      }),
+      (error) => error.code === "reference_image_required",
+    );
+    assert.equal(calls.length, 1);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalApiKey == null) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalApiKey;
+  }
+});
+
+test("Instagram output fitting preserves the full image without cover cropping", async () => {
+  assert.equal(instagramCreativePrivate.generationSizeForProvider("openai", "gpt-image-2"), "1088x1360");
+  assert.equal(instagramCreativePrivate.generationSizeForProvider("openai", "gpt-image-1.5"), "1024x1536");
+  assert.equal(instagramCreativePrivate.generationSizeForProvider("google", "gemini-2.5-flash-image"), "1080x1350");
+
+  const source = await sharp({
+    create: { width: 100, height: 100, channels: 3, background: { r: 220, g: 20, b: 60 } },
+  }).png().toBuffer();
+  const output = await instagramCreativePrivate.processOutputForInstagram(source);
+  const { data, info } = await sharp(output).raw().toBuffer({ resolveWithObject: true });
+  const pixel = (x, y, channel) => data[((y * info.width + x) * info.channels) + channel];
+
+  assert.equal(info.width, 1080);
+  assert.equal(info.height, 1350);
+  assert.ok(pixel(540, 10, 0) > 245 && pixel(540, 10, 1) > 245 && pixel(540, 10, 2) > 245);
+  assert.ok(pixel(540, 675, 0) > 190 && pixel(540, 675, 1) < 60 && pixel(540, 675, 2) < 100);
+});
+
+test("structured caption parsing enforces schema fields, hashtag limits, and affiliate rules", () => {
+  const valid = openAiCaptionPrivate.parseCaptionResponse({
+    output_text: JSON.stringify({
+      caption: "A considered partner pick for a simple daily routine.",
+      hashtags: ["PinkPaisa", "#PartnerPick"],
+      cta: "View partner pick",
+    }),
+  }, { isAffiliate: true });
+  assert.deepEqual(valid.hashtags, ["#PinkPaisa", "#PartnerPick"]);
+
+  assert.throws(
+    () => openAiCaptionPrivate.validateCaptionPackage({
+      caption: "Partner pick",
+      hashtags: Array.from({ length: 9 }, (_, index) => `#Tag${index}`),
+      cta: "View partner pick",
+    }, { isAffiliate: true }),
+    /eight-hashtag limit/,
+  );
+  assert.throws(
+    () => openAiCaptionPrivate.validateCaptionPackage({
+      caption: "Available now with 20% discount and fast delivery.",
+      hashtags: [],
+      cta: "Buy from Pink Paisa",
+    }, { isAffiliate: true }),
+    /affiliate rule/,
+  );
+  assert.throws(
+    () => openAiCaptionPrivate.validateCaptionPackage({
+      caption: "A partner pick for your routine.",
+      hashtags: [],
+      cta: "Buy now",
+    }, { isAffiliate: true }),
+    /affiliate rule/,
+  );
+  assert.throws(
+    () => openAiCaptionPrivate.validateCaptionPackage({
+      caption: "A partner pick for your routine.",
+      hashtags: ["#Sale"],
+      cta: "View partner pick",
+    }, { isAffiliate: true }),
+    /affiliate rule/,
+  );
+  assert.throws(
+    () => openAiCaptionPrivate.validateCaptionPackage({
+      caption: "x".repeat(1401),
+      hashtags: [],
+      cta: "Explore",
+    }),
+    /allowed length/,
+  );
+  assert.throws(
+    () => openAiCaptionPrivate.parseCaptionResponse({ output_text: "not json" }),
+    /not valid JSON/,
+  );
+});
+
+test("campaign compliance scans hashtags and resolved image copy", async () => {
+  const disclosure = marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE;
+  const compliance = await marketingAgents.runComplianceAgent({
+    brief_json: {
+      product_url: "https://pinkpaisa.in/product/test-product",
+      affiliate_url: "https://www.amazon.in/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
+      is_affiliate: true,
+      reference_image_url: "https://cdn.example.com/product.jpg",
+      campaign_asset: { url: "https://cdn.example.com/product.jpg", rights_status: "admin_confirmed" },
+      pricing: { price: null, sale_price: null },
+      descriptions: { short: "A curated daily product.", full: "" },
+      constraints: { stock_quantity: 1 },
+    },
+    caption_json: {
+      instagram: {
+        caption: `A curated partner pick.\n\n${disclosure}`,
+        hashtags: ["#Sale", "#ClinicallyProven", "#100PercentSafe"],
+        cta: "View partner pick",
+      },
+    },
+    creative_json: {
+      source_image_url: "https://cdn.example.com/product.jpg",
+      asset_urls: ["https://cdn.example.com/creative.jpg"],
+      image_copy: {
+        eyebrow: "PINK PAISA PARTNER PICK",
+        headline: "Available Now",
+        supporting_line: "A curated partner pick.",
+        cta: "VIEW PARTNER PICK",
+      },
+    },
+  });
+
+  assert.equal(compliance.status, "needs_review");
+  assert.ok(compliance.issues.some((issue) => issue.code === "affiliate_discount_claim"));
+  assert.ok(compliance.issues.some((issue) => issue.code === "blocked_claim" && /clinically proven/i.test(issue.message)));
+  assert.ok(compliance.issues.some((issue) => issue.code === "blocked_claim" && /100% safe/i.test(issue.message)));
+});
+
+test("Instagram caption assembly preserves tracked URLs and affiliate disclosure within 2200 characters", () => {
+  const trackedUrl = "https://pinkpaisa.in/product/test?utm_source=instagram&utm_campaign=campaign";
+  const generated = marketingAgentsPrivate.composeInstagramCaption({
+    caption: Array.from({ length: 420 }, () => "editorial").join(" "),
+    trackedUrl,
+    hashtags: Array.from({ length: 8 }, (_, index) => `#CampaignHashtagNumber${index}`),
+    isAffiliate: true,
+  });
+
+  assert.equal(generated.caption.length <= marketingAgents.INSTAGRAM_CAPTION_MAX_LENGTH, true);
+  assert.equal(generated.character_count, generated.caption.length);
+  assert.equal(generated.was_truncated, true);
+  assert.ok(generated.caption.includes(trackedUrl));
+  assert.match(generated.caption, /Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned$/);
+
+  assert.throws(
+    () => marketingAgentsPrivate.composeInstagramCaption({
+      caption: "x".repeat(2300),
+      trackedUrl,
+      hashtags: [],
+      isAffiliate: true,
+      overflowMode: "error",
+    }),
+    (error) => error.code === "instagram_caption_too_long"
+      && error.message === "Final Instagram caption exceeds 2200 characters.",
+  );
+});
+
+test("new campaign stage sequence skips strategy and stops after tracking", () => {
+  assert.equal(marketingPrivate.getNextAutoAgent("intake"), "creative");
+  assert.equal(marketingPrivate.getNextAutoAgent("creative"), "caption");
+  assert.equal(marketingPrivate.getNextAutoAgent("tracking"), null);
+  assert.equal(marketingPrivate.getNextAutoAgent("strategy"), "creative");
 });
 
 test("marketing agent tasks support durable lanes, leases, cancellation, and idempotency", () => {
@@ -415,7 +749,7 @@ test("affiliate price migration preserves valid values when only one sentinel is
   });
 });
 
-test("missing-price affiliate creative prompts prohibit numeric pricing and exact product imitation", () => {
+test("affiliate reference-edit prompts preserve exact products and prohibit commercial claims", () => {
   const prompt = buildVariantPrompt({
     variant: "hero",
     brief: {
@@ -424,15 +758,71 @@ test("missing-price affiliate creative prompts prohibit numeric pricing and exac
       subcategory: "Self Care",
       is_affiliate: true,
       pricing: { available: false, status: "unavailable", price: null, sale_price: null },
-      campaign_asset: { approved: false, url: null },
+      campaign_asset: { approved: true, url: "https://cdn.example.com/product.png" },
       tags: ["wellness"],
     },
     strategy: { audience: "wellness shoppers", cta: "Explore this affiliate pick" },
     settings: {},
   });
   assert.doesNotMatch(prompt, /(?:\u20b9|Rs\.?)[ ]*0|available at/i);
-  assert.match(prompt, /Do not show or mention a numeric price/i);
-  assert.match(prompt, /do not render, imitate, or invent branded packaging/i);
+  assert.match(prompt, /Do not show prices, discounts/i);
+  assert.match(prompt, /Preserve the exact product shape, proportions, package structure/i);
+  assert.match(prompt, /Modify only the background, lighting, shadows/i);
+  assert.doesNotMatch(prompt, /\[[^\]]+\]/);
+});
+
+test("campaign prompts separate affiliate and catalog rules and resolve canonical copy", () => {
+  const settings = normaliseCampaignSettings({});
+  const commonBrief = {
+    title: "Premium Botanical Face Serum With Ceramides And Peptides",
+    campaign_label: "A Verified Seven Word Product Campaign Label",
+    brand_name: "Example Brand",
+    category: "Beauty",
+    subcategory: "Skin Care",
+    descriptions: {
+      short: "A lightweight serum for a simple daily skincare routine with a soft finish. Another sentence.",
+    },
+    brand_context: { tone: ["premium", "editorial"] },
+  };
+  const affiliate = instagramCreativePrivate.resolveCreativePrompt({
+    brief: { ...commonBrief, is_affiliate: true },
+    settings,
+  });
+  const catalog = instagramCreativePrivate.resolveCreativePrompt({
+    brief: { ...commonBrief, is_affiliate: false },
+    settings,
+  });
+
+  assert.equal(affiliate.promptType, "affiliate");
+  assert.match(affiliate.prompt, /affiliate discovery item/i);
+  assert.equal(affiliate.imageCopy.eyebrow, "PINK PAISA PARTNER PICK");
+  assert.equal(affiliate.imageCopy.cta, "VIEW PARTNER PICK");
+  assert.equal(affiliate.imageCopy.headline.split(" ").length <= 7, true);
+  assert.equal(affiliate.imageCopy.supporting_line.split(" ").length <= 16, true);
+  assert.doesNotMatch(affiliate.prompt, /Do not add typography/i);
+  assert.doesNotMatch(affiliate.prompt, /\[[A-Z][A-Z0-9_ /-]*\]/i);
+
+  assert.equal(catalog.promptType, "catalog");
+  assert.doesNotMatch(catalog.prompt, /affiliate|partner pick|does not manufacture|does not sell|does not ship/i);
+  assert.equal(catalog.imageCopy.eyebrow, "PINK PAISA EDITORIAL PICK");
+  assert.equal(catalog.imageCopy.cta, "EXPLORE ON PINK PAISA");
+  assert.match(catalog.prompt, /Render only the supplied eyebrow/i);
+  assert.equal(settings.prompt_defaults.affiliate, DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT_TEMPLATE);
+  assert.equal(settings.prompt_defaults.catalog, DEFAULT_CATALOG_CAMPAIGN_AI_PROMPT_TEMPLATE);
+});
+
+test("campaign prompt validation rejects unknown placeholders before generation", () => {
+  assert.throws(
+    () => instagramCreativePrivate.resolveCreativePrompt({
+      brief: { title: "Product", is_affiliate: false },
+      settings: { campaign_ai_catalog_prompt_template: "Create [UNKNOWN_FIELD]" },
+    }),
+    (error) => error.code === "prompt_template_invalid",
+  );
+  assert.doesNotThrow(() => instagramCreativePrivate.resolveCreativePrompt({
+    brief: { title: "Serum [New Formula]", is_affiliate: false },
+    settings: { campaign_ai_catalog_prompt_template: "Feature [PRODUCT_NAME]" },
+  }));
 });
 
 test("affiliate campaign validation accepts active assigned affiliate products", () => {
@@ -450,6 +840,7 @@ test("affiliate campaign validation accepts active assigned affiliate products",
     is_visible: true,
     category: "Beauty",
     subcategory: "Skin Care",
+    featured_image: "https://cdn.example.com/product.jpg",
   }), true);
 });
 
@@ -468,6 +859,7 @@ test("affiliate campaign validation rejects hidden uncategorized or url-less pro
     is_visible: true,
     category: "Beauty",
     subcategory: "Skin Care",
+    featured_image: "https://cdn.example.com/product.jpg",
   };
 
   assert.throws(
@@ -489,6 +881,10 @@ test("affiliate campaign validation rejects hidden uncategorized or url-less pro
   assert.throws(
     () => validateAffiliateProductForCampaign({ ...validProduct, affiliate_link_check_status: "failed", affiliate_link_failure_reason: "Amazon returned an error" }),
     /Amazon returned an error/,
+  );
+  assert.throws(
+    () => validateAffiliateProductForCampaign({ ...validProduct, featured_image: "" }),
+    (error) => error.code === "reference_image_required" && /Product image required/.test(error.message),
   );
 });
 
@@ -518,6 +914,20 @@ test("campaign catalog product serializer exposes readiness without affiliate pr
   assert.equal(serialized.readiness_status, "blocked");
   assert.ok(serialized.readiness.blockers.some((blocker) => blocker.code === "affiliate_non_compliant"));
   assert.ok(serialized.readiness.blockers.some((blocker) => blocker.code === "affiliate_tag_missing"));
+
+  const missingImage = marketingAgentOrchestrator.serialiseCatalogProduct({
+    _id: "normal-product-id",
+    title: "Image-less Product",
+    slug: "image-less-product",
+    source_type: "admin",
+    status: "active",
+    is_visible: true,
+    is_affiliate: false,
+    category: "Beauty",
+    subcategory: "Haircare",
+  });
+  assert.equal(missingImage.readiness.can_queue, false);
+  assert.ok(missingImage.readiness.blockers.some((blocker) => blocker.code === "reference_image_required"));
 });
 
 test("daily batch helper lets new or empty running batches claim queued runs", () => {
@@ -560,27 +970,56 @@ test("affiliate campaign captions include disclosure and avoid manual Amazon pri
     },
   };
 
-  const caption = await marketingAgents.runCaptionAgent(affiliateRun);
-  assert.match(caption.instagram.long_caption, /^Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned/);
-  assert.doesNotMatch(caption.instagram.long_caption, /₹0|Core price|Partner-listed/i);
+  const originalFetch = global.fetch;
+  const originalApiKey = process.env.OPENAI_API_KEY;
+  const requests = [];
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  global.fetch = async (url, options) => {
+    requests.push({ url: String(url), body: JSON.parse(options.body) });
+    return {
+      ok: true,
+      async json() {
+        return {
+          output_text: JSON.stringify({
+            caption: "A carefully curated haircare partner pick for your routine.",
+            hashtags: ["#PinkPaisa", "#Haircare", "#PartnerPick"],
+            cta: "View partner pick",
+          }),
+        };
+      },
+    };
+  };
 
-  const tracking = await marketingAgents.runTrackingAgent({
-    ...affiliateRun,
-    caption_json: caption,
-    compliance_json: { status: "approved" },
-  });
-  assert.match(tracking.publish_payload.caption, /^Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned/);
+  try {
+    const caption = await marketingAgents.runCaptionAgent(affiliateRun);
+    assert.match(caption.instagram.caption, /Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned$/);
+    assert.doesNotMatch(caption.instagram.caption, /\u20b90|Core price|Partner-listed/i);
+    assert.equal(caption.instagram.cta, "View partner pick");
 
-  const nonAffiliateCaption = await marketingAgents.runCaptionAgent({
-    ...affiliateRun,
-    source_event: "admin_product.published",
-    brief_json: {
-      ...affiliateRun.brief_json,
-      is_affiliate: false,
-      pricing: { price: 999, sale_price: null, currency: "INR" },
-    },
-  });
-  assert.equal(marketingAgentsPrivate.hasAffiliateInstagramDisclosure(nonAffiliateCaption.instagram.long_caption), false);
+    const tracking = await marketingAgents.runTrackingAgent({
+      ...affiliateRun,
+      caption_json: caption,
+      compliance_json: { status: "approved" },
+    });
+    assert.match(tracking.publish_payload.caption, /Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned$/);
+
+    const nonAffiliateCaption = await marketingAgents.runCaptionAgent({
+      ...affiliateRun,
+      source_event: "admin_product.published",
+      brief_json: {
+        ...affiliateRun.brief_json,
+        is_affiliate: false,
+        pricing: { price: 999, sale_price: null, currency: "INR" },
+      },
+    });
+    assert.equal(marketingAgentsPrivate.hasAffiliateInstagramDisclosure(nonAffiliateCaption.instagram.caption), false);
+    assert.ok(requests.every((request) => request.url.endsWith("/responses")));
+    assert.ok(requests.every((request) => request.body.text.format.schema.properties.hashtags.maxItems === 8));
+  } finally {
+    global.fetch = originalFetch;
+    if (originalApiKey == null) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalApiKey;
+  }
 });
 
 test("publish readiness blocks unsafe affiliate products and non-HTTPS media", () => {
@@ -593,6 +1032,14 @@ test("publish readiness blocks unsafe affiliate products and non-HTTPS media", (
     review_status: "approved",
     publish_status: "ready",
     status: "approved_for_publish",
+    brief_json: {
+      is_affiliate: true,
+      reference_image_url: "https://cdn.example.com/product.jpg",
+    },
+    creative_json: {
+      source_image_url: "https://cdn.example.com/product.jpg",
+    },
+    compliance_json: { status: "approved", issues: [] },
     tracking_json: {
       publish_payload: {
         asset_urls: ["https://cdn.example.com/creative.jpg"],
@@ -614,9 +1061,20 @@ test("publish readiness blocks unsafe affiliate products and non-HTTPS media", (
     affiliate_tag: "pinkpaisa07-21",
     affiliate_compliance_status: "compliant",
     affiliate_link_check_status: "ok",
+    featured_image: "https://cdn.example.com/product.jpg",
   };
 
   assert.equal(marketingPrivate.buildRunPublishReadinessSnapshot(run, product, { productWasFetched: true }).can_publish, true);
+
+  const complianceBlocked = marketingPrivate.buildRunPublishReadinessSnapshot({
+    ...run,
+    compliance_json: {
+      status: "needs_review",
+      issues: [{ severity: "blocking", code: "blocked_claim", message: "Unsupported claim" }],
+    },
+  }, product, { productWasFetched: true });
+  assert.equal(complianceBlocked.can_publish, false);
+  assert.ok(complianceBlocked.blockers.some((blocker) => blocker.code === "compliance_blocked"));
 
   const cases = [
     [{ ...product, is_visible: false }, "product_hidden"],
@@ -637,10 +1095,35 @@ test("publish readiness blocks unsafe affiliate products and non-HTTPS media", (
 
   const nonHttps = marketingPrivate.buildRunPublishReadinessSnapshot({
     ...run,
-    tracking_json: { publish_payload: { asset_urls: ["http://cdn.example.com/creative.jpg"] } },
+    tracking_json: {
+      publish_payload: {
+        ...run.tracking_json.publish_payload,
+        asset_urls: ["http://cdn.example.com/creative.jpg"],
+      },
+    },
   }, product, { productWasFetched: true });
   assert.equal(nonHttps.can_publish, false);
   assert.ok(nonHttps.blockers.some((blocker) => blocker.code === "non_https_media_url"));
+  assert.doesNotThrow(() => marketingPrivate.assertReviewApprovalReadiness(nonHttps));
+
+  const missingDisclosure = marketingPrivate.buildRunPublishReadinessSnapshot({
+    ...run,
+    tracking_json: {
+      publish_payload: {
+        ...run.tracking_json.publish_payload,
+        caption: "Explore this partner pick.",
+      },
+    },
+  }, product, { productWasFetched: true });
+  assert.ok(missingDisclosure.blockers.some((blocker) => blocker.code === "affiliate_disclosure_missing"));
+  assert.throws(
+    () => marketingPrivate.assertReviewApprovalReadiness(missingDisclosure),
+    /Affiliate disclosure is required/,
+  );
+  assert.throws(
+    () => marketingPrivate.assertReviewApprovalReadiness(complianceBlocked),
+    /blocking compliance issues|Resolve all blocking compliance issues/,
+  );
 });
 
 test("carousel readiness reports unsafe selected affiliate runs before publishing", () => {
@@ -654,6 +1137,14 @@ test("carousel readiness reports unsafe selected affiliate runs before publishin
     review_status: "approved",
     publish_status: "ready",
     status: "approved_for_publish",
+    brief_json: {
+      is_affiliate: true,
+      reference_image_url: "https://cdn.example.com/product.jpg",
+    },
+    creative_json: {
+      source_image_url: "https://cdn.example.com/product.jpg",
+    },
+    compliance_json: { status: "approved", issues: [] },
     tracking_json: {
       publish_payload: {
         asset_urls: ["https://cdn.example.com/creative.jpg"],
@@ -674,6 +1165,7 @@ test("carousel readiness reports unsafe selected affiliate runs before publishin
     affiliate_tag: "pinkpaisa07-21",
     affiliate_compliance_status: "compliant",
     affiliate_link_check_status: "ok",
+    featured_image: "https://cdn.example.com/product.jpg",
   };
   const hiddenProduct = { ...compliantProduct, _id: "product-2", is_visible: false };
   const blockers = marketingPrivate.buildCarouselReadinessBlockers(
@@ -687,7 +1179,7 @@ test("carousel readiness reports unsafe selected affiliate runs before publishin
   assert.equal(blockers.length, 1);
   assert.equal(blockers[0].product_title, "Product 2");
   assert.equal(blockers[0].code, "product_hidden");
-  assert.match(marketingPrivate.buildBulkCarouselCaption([makeRun("1", "product-1")]), /^Affiliate disclosure: As an Amazon Associate/);
+  assert.match(marketingPrivate.buildBulkCarouselCaption([makeRun("1", "product-1")]), /Affiliate disclosure: As an Amazon Associate.*#CommissionsEarned$/);
 });
 
 test("customer session helpers prefer session cookie and fall back to bearer auth", () => {

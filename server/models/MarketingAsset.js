@@ -11,7 +11,17 @@ const MarketingAssetSchema = new mongoose.Schema({
   source_url: { type: String, default: null, trim: true },
   source_provenance: {
     type: String,
-    enum: ["admin_provided", "amazon_import", "creators_api", "generated_without_reference", "generated_from_approved_source", "unknown"],
+    enum: [
+      "admin_provided",
+      "vendor_provided",
+      "amazon_import",
+      "creators_api",
+      "generated",
+      "product_reference",
+      "generated_without_reference",
+      "generated_from_approved_source",
+      "unknown",
+    ],
     default: "unknown",
   },
   usage_rights_status: {

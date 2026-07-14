@@ -131,6 +131,11 @@ function extractImageBuffer(responseJson) {
 }
 
 async function generateImage({ model, prompt, sourceImageBuffer, size, quality }) {
+  if (!sourceImageBuffer?.length) {
+    const error = new Error("A product reference image is required for Google campaign image editing");
+    error.code = "reference_image_required";
+    throw error;
+  }
   const apiKey = resolveApiKey();
   if (!apiKey) throw new Error("GEMINI_API_KEY or GOOGLE_API_KEY is required for Google image generation");
 
@@ -176,4 +181,8 @@ async function generateImage({ model, prompt, sourceImageBuffer, size, quality }
 
 module.exports = {
   generateImage,
+  _private: {
+    buildRequestBody,
+    resolveMimeType,
+  },
 };
