@@ -16,6 +16,9 @@ export type CatalogProduct = {
   affiliate_data_last_refreshed_at?: string | null;
   affiliate_data_expires_at?: string | null;
   affiliate_api_error?: string | null;
+  price_status?: "unavailable" | "manual_unverified" | "verified" | "stale" | null;
+  price_available?: boolean;
+  price_verified_at?: string | null;
   affiliate_compliance_status?: "needs_review" | "compliant" | "non_compliant" | "paused" | null;
   affiliate_compliance_flags?: string[];
   buying_intent?: string | null;
@@ -36,9 +39,9 @@ export type CatalogProduct = {
   images: string[];
   image_items?: Array<{ url: string; alt: string | null; position: number }>;
   featured_image: string | null;
-  price: number;
+  price: number | null;
   sale_price: number | null;
-  effective_price?: number;
+  effective_price?: number | null;
   mrp?: number | null;
   gst_rate_percent?: number;
   hsn_code?: string | null;

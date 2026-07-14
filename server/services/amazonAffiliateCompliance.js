@@ -68,6 +68,40 @@ function extractAffiliateTag(value) {
   return parsed.searchParams.get("tag") || null;
 }
 
+function canonicalizeAmazonAffiliateUrl(value, { marketplace: requestedMarketplace = null, appendConfiguredTag = true } = {}) {
+  const originalUrl = normalizeUrl(value, requestedMarketplace || "amazon_in");
+  const detectedMarketplace = detectMarketplace(originalUrl);
+  const marketplace = detectedMarketplace || requestedMarketplace;
+  const asin = extractAsin(originalUrl);
+  const parsed = parseUrl(originalUrl);
+  if (requestedMarketplace && detectedMarketplace && requestedMarketplace !== detectedMarketplace) {
+    return {
+      originalUrl,
+      canonicalUrl: originalUrl,
+      marketplace: detectedMarketplace,
+      asin,
+      affiliateTag: extractAffiliateTag(originalUrl),
+      marketplaceMismatch: true,
+    };
+  }
+  if (!parsed || !marketplace || !asin || !MARKETPLACES[marketplace]) {
+    return { originalUrl, canonicalUrl: originalUrl, marketplace: marketplace || null, asin, affiliateTag: extractAffiliateTag(originalUrl) };
+  }
+
+  const existingTag = extractAffiliateTag(originalUrl);
+  const configuredTag = getConfiguredTag(marketplace);
+  const affiliateTag = existingTag || (appendConfiguredTag ? configuredTag : "") || null;
+  const canonical = new URL(`/dp/${asin}`, MARKETPLACES[marketplace].defaultBaseUrl);
+  if (affiliateTag) canonical.searchParams.set("tag", affiliateTag);
+  return {
+    originalUrl,
+    canonicalUrl: canonical.toString(),
+    marketplace,
+    asin,
+    affiliateTag,
+  };
+}
+
 function validateAmazonAffiliateUrl(value, { marketplace: requestedMarketplace = null, requireConfiguredTag = true } = {}) {
   const flags = [];
   const normalizedUrl = normalizeUrl(value, requestedMarketplace || "amazon_in");
@@ -123,6 +157,7 @@ function buildComplianceStatus(flags = []) {
 module.exports = {
   MARKETPLACES,
   buildComplianceStatus,
+  canonicalizeAmazonAffiliateUrl,
   detectMarketplace,
   extractAffiliateTag,
   extractAsin,

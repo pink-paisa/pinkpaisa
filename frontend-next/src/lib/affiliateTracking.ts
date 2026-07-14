@@ -85,6 +85,14 @@ function getUtmParams() {
   return getStoredUtmParams();
 }
 
+export function buildAffiliateOutboundQuery() {
+  const params = new URLSearchParams();
+  Object.entries(getUtmParams()).forEach(([key, value]) => {
+    if (value) params.set(key, value);
+  });
+  return params.toString();
+}
+
 export function getAffiliateCtaExperiment(): { experiment_name: string; experiment_variant: AffiliateCtaVariant } {
   if (typeof window === "undefined") {
     return { experiment_name: CTA_EXPERIMENT_NAME, experiment_variant: "check_price_on_amazon" };

@@ -8,8 +8,11 @@ export type PhysicalProduct = {
   source_type?: "admin" | "vendor";
   is_affiliate?: boolean;
   affiliate_url?: string | null;
+  affiliate_original_url?: string | null;
+  affiliate_canonical_url?: string | null;
   affiliate_external_id?: string | null;
   affiliate_source_platform?: string | null;
+  affiliate_source_mode?: "manual_upload" | "manual_entry" | "creators_api" | null;
   affiliate_asin?: string | null;
   affiliate_marketplace?: "amazon_in" | "amazon_us" | null;
   affiliate_tag?: string | null;
@@ -17,6 +20,9 @@ export type PhysicalProduct = {
   affiliate_data_last_refreshed_at?: string | null;
   affiliate_data_expires_at?: string | null;
   affiliate_api_error?: string | null;
+  affiliate_image_provenance?: "admin_provided" | "amazon_import" | "creators_api" | "generated" | "unknown" | null;
+  affiliate_campaign_usage_rights?: "unknown" | "admin_confirmed" | "owned" | "licensed" | "api_permitted" | null;
+  affiliate_campaign_asset_url?: string | null;
   affiliate_compliance_status?: "needs_review" | "compliant" | "non_compliant" | "paused" | null;
   affiliate_compliance_flags?: string[];
   buying_intent?: string | null;
@@ -41,9 +47,12 @@ export type PhysicalProduct = {
   images: string[];
   image_items?: Array<{ url: string; alt: string | null; position: number }>;
   featured_image: string | null;
-  price: number;
+  price: number | null;
   sale_price: number | null;
-  effective_price?: number;
+  effective_price?: number | null;
+  price_status?: "unavailable" | "manual_unverified" | "verified" | "stale";
+  price_available?: boolean;
+  price_verified_at?: string | null;
   mrp?: number | null;
   cost_price: number | null;
   gst_rate_percent?: number;
@@ -69,6 +78,8 @@ export type PhysicalProduct = {
   sort_order: number;
   created_at?: string;
   createdAt?: string;
+  archived_at?: string | null;
+  archived_by?: string | null;
 };
 
 export const usePhysicalProducts = (includeAll = false, sourceType?: "admin" | "vendor", affiliateFilter?: boolean) => {

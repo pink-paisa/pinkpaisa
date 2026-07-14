@@ -69,6 +69,8 @@ const toWishlistProduct = (product: CatalogProduct): WishlistProductSummary => (
   affiliate_data_source: product.affiliate_data_source,
   affiliate_data_last_refreshed_at: product.affiliate_data_last_refreshed_at,
   affiliate_data_expires_at: product.affiliate_data_expires_at,
+  price_status: product.price_status,
+  price_available: product.price_available,
   affiliate_compliance_status: product.affiliate_compliance_status,
 });
 

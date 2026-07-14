@@ -12,7 +12,7 @@ const MarketingCampaignRunSchema = new mongoose.Schema({
   vendor_shop_name: { type: String, default: null, trim: true },
   status: {
     type: String,
-    enum: ["queued", "running", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing", "completed", "published", "failed", "rejected"],
+    enum: ["queued", "running", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing", "completed", "published", "failed", "rejected", "archived"],
     default: "queued",
     index: true,
   },
@@ -31,6 +31,7 @@ const MarketingCampaignRunSchema = new mongoose.Schema({
   publish_attempted_at: { type: Date, default: null },
   published_at: { type: Date, default: null },
   instagram_creation_id: { type: String, default: null, trim: true },
+  instagram_child_creation_ids: [{ type: String, trim: true }],
   instagram_media_id: { type: String, default: null, trim: true },
   instagram_permalink: { type: String, default: null, trim: true },
   approved_at: { type: Date, default: null },
@@ -41,10 +42,15 @@ const MarketingCampaignRunSchema = new mongoose.Schema({
   compliance_json: { type: mongoose.Schema.Types.Mixed, default: null },
   tracking_json: { type: mongoose.Schema.Types.Mixed, default: null },
   published_urls: [{ type: String }],
+  archived_at: { type: Date, default: null, index: true },
+  archived_by: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+  archive_reason: { type: String, default: null, trim: true },
+  archived_from_status: { type: String, default: null, trim: true },
 }, { timestamps: { createdAt: "created_at", updatedAt: "updated_at" } });
 
 MarketingCampaignRunSchema.index({ vendor_product_id: 1, created_at: -1 });
 MarketingCampaignRunSchema.index({ status: 1, scheduled_for: 1 });
 MarketingCampaignRunSchema.index({ batch_key: 1, status: 1 });
+MarketingCampaignRunSchema.index({ archived_at: 1, updated_at: -1 });
 
 module.exports = mongoose.model("MarketingCampaignRun", MarketingCampaignRunSchema);

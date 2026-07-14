@@ -7,6 +7,7 @@ import {
   Database,
   Download,
   Edit,
+  FolderArchive,
   ExternalLink,
   FileSpreadsheet,
   ImageIcon,
@@ -19,6 +20,7 @@ import {
   Tags,
   Trash2,
   Upload,
+  Undo2,
   X,
   XCircle,
 } from "lucide-react";
@@ -131,6 +133,7 @@ type AffiliateForm = {
   is_featured_affiliate: boolean;
   affiliate_is_instagram_pick: boolean;
   affiliate_sort_order: number;
+  confirm_campaign_usage_rights: boolean;
 };
 
 type AffiliateUploadResponse = {
@@ -174,7 +177,7 @@ type AffiliatePreviewResponse = {
 
 type AffiliateDataMode = "manual_only" | "creators_api";
 
-type AffiliateQuickFilter = "all" | "needs_review" | "published" | "draft" | "paused" | "uncategorized" | "missing_image" | "link_issue";
+type AffiliateQuickFilter = "all" | "needs_review" | "published" | "draft" | "paused" | "uncategorized" | "missing_image" | "link_issue" | "archived";
 
 type AffiliateBulkAction =
   | "validate_compliance"
@@ -285,6 +288,7 @@ const blankForm: AffiliateForm = {
   is_featured_affiliate: false,
   affiliate_is_instagram_pick: false,
   affiliate_sort_order: 0,
+  confirm_campaign_usage_rights: false,
 };
 
 const isUncategorizedProduct = (product: PhysicalProduct) => {
@@ -325,6 +329,7 @@ const quickFilterLabels: Record<AffiliateQuickFilter, string> = {
   uncategorized: "Uncategorized",
   missing_image: "Missing image",
   link_issue: "Link issue",
+  archived: "Archived",
 };
 
 const bulkActionLabels: Record<AffiliateBulkAction, string> = {
@@ -339,7 +344,7 @@ const bulkActionLabels: Record<AffiliateBulkAction, string> = {
   instagram_unpick: "Remove Instagram pick",
   refresh_api: "Refresh API",
   assign_category: "Assign category",
-  delete: "Delete",
+  delete: "Archive",
 };
 
 const isPublishedAffiliateProduct = (product: PhysicalProduct) => product.status === "active" && Boolean(product.is_visible);
@@ -469,10 +474,12 @@ export default function AdminAffiliateProducts() {
     uncategorized: 0,
     missing_image: 0,
     link_issue: 0,
+    archived: 0,
   };
   const filtered = affiliateProducts;
+  const selectableProducts = filtered.filter((product) => !product.archived_at);
 
-  const allVisibleSelected = filtered.length > 0 && filtered.every((item) => selectedIds.includes(item.id));
+  const allVisibleSelected = selectableProducts.length > 0 && selectableProducts.every((item) => selectedIds.includes(item.id));
   const selectedProducts = useMemo(() => {
     const selected = new Set(selectedIds);
     return affiliateProducts.filter((product) => selected.has(product.id));
@@ -571,6 +578,7 @@ export default function AdminAffiliateProducts() {
       is_featured_affiliate: Boolean(product.is_featured_affiliate),
       affiliate_is_instagram_pick: Boolean(product.affiliate_is_instagram_pick),
       affiliate_sort_order: Number(product.affiliate_sort_order || 0),
+      confirm_campaign_usage_rights: ["admin_confirmed", "owned", "licensed", "api_permitted"].includes(String(product.affiliate_campaign_usage_rights || "unknown")),
     });
     setImagePreviewFailed(false);
     setFormOpen(true);
@@ -582,10 +590,10 @@ export default function AdminAffiliateProducts() {
 
   const toggleSelectAllVisible = () => {
     if (allVisibleSelected) {
-      setSelectedIds((current) => current.filter((id) => !filtered.some((item) => item.id === id)));
+      setSelectedIds((current) => current.filter((id) => !selectableProducts.some((item) => item.id === id)));
       return;
     }
-    setSelectedIds((current) => Array.from(new Set([...current, ...filtered.map((item) => item.id)])));
+    setSelectedIds((current) => Array.from(new Set([...current, ...selectableProducts.map((item) => item.id)])));
   };
 
   const saveAffiliateDataMode = async (mode: AffiliateDataMode) => {
@@ -849,10 +857,9 @@ export default function AdminAffiliateProducts() {
     }
     setPendingBulkConfirmation({
       action: "delete",
-      title: "Delete selected affiliate products",
-      description: `Delete safe drafts from ${selectedIds.length} selected affiliate product(s)? Published products will be blocked by the server and must be unpublished first.`,
-      confirmLabel: "Delete safe drafts",
-      destructive: true,
+      title: "Archive selected affiliate products",
+      description: `Archive ${selectedIds.length} selected affiliate product(s)? They will be unpublished and can be restored from the Archived view.`,
+      confirmLabel: "Archive products",
     });
   };
 
@@ -866,8 +873,16 @@ export default function AdminAffiliateProducts() {
   const confirmDeleteProduct = async () => {
     if (!productPendingDelete) return;
     const product = productPendingDelete;
-    await runAction(`/affiliate-products/${product.id}`, "Affiliate product deleted", { method: "DELETE" });
+    await runAction(`/affiliate-products/${product.id}`, "Affiliate product archived", { method: "DELETE" });
     setProductPendingDelete(null);
+  };
+
+  const queueAffiliateCampaign = async (product: PhysicalProduct) => {
+    await runAction(
+      `/marketing-campaigns/admin/from-product/${encodeURIComponent(product.id)}`,
+      "Affiliate campaign queued",
+      { method: "POST", body: JSON.stringify({}) }
+    );
   };
 
   const renderBulkActionsMenu = (triggerLabel = "More", includePrimaryActions = false) => (
@@ -1134,6 +1149,11 @@ export default function AdminAffiliateProducts() {
             <div className="space-y-3">
               <CheckboxField label="Featured affiliate pick" checked={form.is_featured_affiliate} onChange={(value) => updateForm({ is_featured_affiliate: value })} />
               <CheckboxField label="Instagram campaign pick" checked={form.affiliate_is_instagram_pick} onChange={(value) => updateForm({ affiliate_is_instagram_pick: value })} />
+              <CheckboxField
+                label="I confirm this image is owned, licensed, or otherwise approved for campaign use"
+                checked={form.confirm_campaign_usage_rights}
+                onChange={(value) => updateForm({ confirm_campaign_usage_rights: value })}
+              />
             </div>
           </div>
           <Field label="Short Description *">
@@ -1387,14 +1407,13 @@ export default function AdminAffiliateProducts() {
         onOpenChange={(open) => {
           if (!open) setProductPendingDelete(null);
         }}
-        title="Delete affiliate product"
+        title="Archive affiliate product"
         description={
           productPendingDelete
-            ? `Delete "${productPendingDelete.title}"? This cannot be undone. Published products should be unpublished first.`
+            ? `Archive "${productPendingDelete.title}"? It will be unpublished and can be restored later.`
             : undefined
         }
-        confirmLabel="Delete product"
-        destructive
+        confirmLabel="Archive product"
         onConfirm={confirmDeleteProduct}
       />
 
@@ -1510,7 +1529,7 @@ export default function AdminAffiliateProducts() {
       <div className="rounded-2xl border border-border bg-card overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-4 py-3 text-sm text-muted-foreground">
           <label className="flex items-center gap-2">
-            <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAllVisible} className="h-4 w-4 rounded border-input text-primary" />
+            <input type="checkbox" checked={allVisibleSelected} onChange={toggleSelectAllVisible} disabled={selectableProducts.length === 0} className="h-4 w-4 rounded border-input text-primary" />
             Select visible results
           </label>
           <span>
@@ -1532,10 +1551,11 @@ export default function AdminAffiliateProducts() {
               const published = isPublishedAffiliateProduct(product);
               const dataBadge = getAffiliateDataBadge(product);
               const linkStatus = String(product.affiliate_link_check_status || "unchecked").toLowerCase();
+              const archived = Boolean(product.archived_at);
               return (
                 <div key={product.id} className={`grid gap-4 px-4 py-4 transition hover:bg-muted/30 lg:grid-cols-[auto_minmax(0,1fr)_auto] lg:items-center ${selectedIds.includes(product.id) ? "bg-primary/5" : ""}`}>
                   <div className="flex items-start gap-3">
-                    <input type="checkbox" checked={selectedIds.includes(product.id)} onChange={() => toggleSelection(product.id)} className="h-4 w-4 rounded border-input text-primary" />
+                    <input type="checkbox" checked={selectedIds.includes(product.id)} onChange={() => toggleSelection(product.id)} disabled={archived} className="h-4 w-4 rounded border-input text-primary" />
                     <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border bg-muted text-xs font-semibold text-muted-foreground">
                       {product.featured_image ? (
                         <img src={product.featured_image} alt={product.title} className="h-full w-full object-cover" />
@@ -1549,6 +1569,7 @@ export default function AdminAffiliateProducts() {
                       <h4 className="min-w-0 max-w-full truncate text-sm font-semibold text-foreground">{product.title}</h4>
                       <StatusBadge status={product.status} />
                       <StatusBadge status={product.affiliate_compliance_status || "needs_review"} />
+                      {archived ? <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-800">Archived</span> : null}
                       {published ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">Published</span> : null}
                       {uncategorized ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">Uncategorized</span> : null}
                       {!product.featured_image ? <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-800">Missing image</span> : null}
@@ -1572,18 +1593,18 @@ export default function AdminAffiliateProducts() {
                     </p>
                   </div>
                   <div className="flex flex-wrap justify-start gap-2 lg:justify-end">
-                    <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => openEdit(product)}>
+                    <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => openEdit(product)} disabled={archived}>
                       <Edit className="h-4 w-4" /> Edit
                     </Button>
-                    {published ? (
+                    {!archived && published ? (
                       <Button type="button" variant="outline" size="sm" className="rounded-xl" onClick={() => void runAction(`/affiliate-products/${product.id}/unpublish`, "Affiliate product unpublished", { method: "POST" })}>
                         <XCircle className="h-4 w-4" /> Unpublish
                       </Button>
-                    ) : (
+                    ) : !archived ? (
                       <Button type="button" size="sm" className="rounded-xl" onClick={() => void runAction(`/affiliate-products/${product.id}/publish`, "Affiliate product published", { method: "POST" })}>
                         <CheckCircle2 className="h-4 w-4" /> Publish
                       </Button>
-                    )}
+                    ) : null}
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button type="button" variant="outline" size="sm" className="rounded-xl" aria-label={`More actions for ${product.title}`}>
@@ -1594,24 +1615,30 @@ export default function AdminAffiliateProducts() {
                       <DropdownMenuContent align="end" className="w-56">
                         <DropdownMenuLabel>Product actions</DropdownMenuLabel>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/validate-compliance`, "Compliance rechecked", { method: "POST" })}>
+                        {!archived ? (
+                          <DropdownMenuItem onSelect={() => void queueAffiliateCampaign(product)}>
+                            <Instagram className="mr-2 h-4 w-4" />
+                            Queue campaign
+                          </DropdownMenuItem>
+                        ) : null}
+                        <DropdownMenuItem disabled={archived} onSelect={() => void runAction(`/affiliate-products/${product.id}/validate-compliance`, "Compliance rechecked", { method: "POST" })}>
                           <CheckCircle2 className="mr-2 h-4 w-4" />
                           Validate compliance
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/check-link`, "Amazon link checked", { method: "POST" })}>
+                        <DropdownMenuItem disabled={archived} onSelect={() => void runAction(`/affiliate-products/${product.id}/check-link`, "Amazon link checked", { method: "POST" })}>
                           <ExternalLink className="mr-2 h-4 w-4" />
                           Check Amazon link
                         </DropdownMenuItem>
-                        <DropdownMenuItem disabled={!affiliateDataSettings?.creators_can_refresh} onSelect={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
+                        <DropdownMenuItem disabled={archived || !affiliateDataSettings?.creators_can_refresh} onSelect={() => void runAction(`/affiliate-products/${product.id}/refresh-api-data`, "Creators API refresh attempted", { method: "POST" })}>
                           <RefreshCw className="mr-2 h-4 w-4" />
                           Refresh Creators API
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/pause`, "Affiliate product paused", { method: "POST" })}>
+                        <DropdownMenuItem disabled={archived} onSelect={() => void runAction(`/affiliate-products/${product.id}/pause`, "Affiliate product paused", { method: "POST" })}>
                           <PauseCircle className="mr-2 h-4 w-4" />
                           Pause product
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/feature`, "Feature settings updated", {
+                        <DropdownMenuItem disabled={archived} onSelect={() => void runAction(`/affiliate-products/${product.id}/feature`, "Feature settings updated", {
                           method: "PATCH",
                           body: JSON.stringify({
                             is_featured_affiliate: !product.is_featured_affiliate,
@@ -1621,7 +1648,7 @@ export default function AdminAffiliateProducts() {
                           <Star className="mr-2 h-4 w-4" />
                           {product.is_featured_affiliate ? "Unfeature" : "Feature"}
                         </DropdownMenuItem>
-                        <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/feature`, "Instagram pick updated", {
+                        <DropdownMenuItem disabled={archived} onSelect={() => void runAction(`/affiliate-products/${product.id}/feature`, "Instagram pick updated", {
                           method: "PATCH",
                           body: JSON.stringify({
                             is_featured_affiliate: product.is_featured_affiliate,
@@ -1640,10 +1667,23 @@ export default function AdminAffiliateProducts() {
                           </DropdownMenuItem>
                         ) : null}
                         <DropdownMenuSeparator />
-                        <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => setProductPendingDelete(product)}>
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Delete
-                        </DropdownMenuItem>
+                        {archived ? (
+                          <>
+                            <DropdownMenuItem onSelect={() => void runAction(`/affiliate-products/${product.id}/restore`, "Affiliate product restored as a draft", { method: "POST" })}>
+                              <Undo2 className="mr-2 h-4 w-4" />
+                              Restore as draft
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => void runAction(`/affiliate-products/${product.id}/purge`, "Affiliate product permanently deleted", { method: "DELETE" })}>
+                              <Trash2 className="mr-2 h-4 w-4" />
+                              Permanently delete
+                            </DropdownMenuItem>
+                          </>
+                        ) : (
+                          <DropdownMenuItem onSelect={() => setProductPendingDelete(product)}>
+                            <FolderArchive className="mr-2 h-4 w-4" />
+                            Archive
+                          </DropdownMenuItem>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>

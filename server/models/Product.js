@@ -18,9 +18,13 @@ const ProductSchema = new mongoose.Schema({
   images: [{ type: String }],
   image_items: { type: [ProductImageSchema], default: [] },
   featured_image: { type: String, default: null },
-  price: { type: Number, required: true },
+  price: {
+    type: Number,
+    default: null,
+    required() { return !this.is_affiliate; },
+  },
   sale_price: { type: Number, default: null },
-  effective_price: { type: Number, default: 0, index: true },
+  effective_price: { type: Number, default: null, index: true },
   mrp: { type: Number, default: null, min: 0 },
   cost_price: { type: Number, default: 0 },
   gst_rate_percent: { type: Number, default: 0, min: 0, max: 50 },
@@ -49,8 +53,16 @@ const ProductSchema = new mongoose.Schema({
   vendor_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "VendorProduct", default: undefined },
   is_affiliate: { type: Boolean, default: false, index: true },
   affiliate_url: { type: String, default: null },
+  affiliate_original_url: { type: String, default: null },
+  affiliate_canonical_url: { type: String, default: null },
   affiliate_external_id: { type: String, default: null, index: true },
   affiliate_source_platform: { type: String, default: null },
+  affiliate_source_mode: {
+    type: String,
+    enum: ["manual_upload", "manual_entry", "creators_api"],
+    default: null,
+    index: true,
+  },
   affiliate_payload: { type: mongoose.Schema.Types.Mixed, default: null },
   affiliate_asin: { type: String, default: null, trim: true, uppercase: true, index: true },
   affiliate_marketplace: { type: String, enum: ["amazon_in", "amazon_us", null], default: null, index: true },
@@ -63,6 +75,25 @@ const ProductSchema = new mongoose.Schema({
   affiliate_data_last_refreshed_at: { type: Date, default: null },
   affiliate_data_expires_at: { type: Date, default: null, index: true },
   affiliate_api_error: { type: String, default: null, trim: true },
+  price_status: {
+    type: String,
+    enum: ["unavailable", "manual_unverified", "verified", "stale"],
+    default() { return this.is_affiliate ? "unavailable" : "verified"; },
+    index: true,
+  },
+  price_verified_at: { type: Date, default: null },
+  affiliate_image_provenance: {
+    type: String,
+    enum: ["admin_provided", "amazon_import", "creators_api", "generated", "unknown"],
+    default: "unknown",
+  },
+  affiliate_campaign_usage_rights: {
+    type: String,
+    enum: ["unknown", "admin_confirmed", "owned", "licensed", "api_permitted"],
+    default: "unknown",
+    index: true,
+  },
+  affiliate_campaign_asset_url: { type: String, default: null, trim: true },
   affiliate_compliance_status: {
     type: String,
     enum: ["needs_review", "compliant", "non_compliant", "paused"],
@@ -88,6 +119,8 @@ const ProductSchema = new mongoose.Schema({
   },
   affiliate_link_failure_count: { type: Number, default: 0, min: 0 },
   affiliate_link_failure_reason: { type: String, default: null, trim: true },
+  archived_at: { type: Date, default: null, index: true },
+  archived_by: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
 }, { timestamps: true });
 
 ProductSchema.index(

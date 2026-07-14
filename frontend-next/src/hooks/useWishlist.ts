@@ -7,7 +7,7 @@ export type WishlistProductSummary = {
   slug: string;
   title: string;
   featured_image: string | null;
-  price: number;
+  price: number | null;
   sale_price: number | null;
   stock_quantity: number;
   is_affiliate?: boolean;
@@ -15,6 +15,8 @@ export type WishlistProductSummary = {
   affiliate_data_source?: string | null;
   affiliate_data_last_refreshed_at?: string | null;
   affiliate_data_expires_at?: string | null;
+  price_status?: "unavailable" | "manual_unverified" | "verified" | "stale" | null;
+  price_available?: boolean;
   affiliate_compliance_status?: "needs_review" | "compliant" | "non_compliant" | "paused" | null;
 };
 

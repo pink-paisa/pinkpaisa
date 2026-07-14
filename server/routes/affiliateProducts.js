@@ -7,6 +7,8 @@ const {
   createAffiliateProduct,
   updateAffiliateProduct,
   deleteAffiliateProduct,
+  restoreAffiliateProduct,
+  purgeAffiliateProduct,
   previewAffiliateProducts,
   uploadAffiliateProducts,
   assignAffiliateCategory,
@@ -32,8 +34,9 @@ const upload = multer({
     const allowedMimeTypes = new Set([
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "application/octet-stream",
+      "application/zip",
     ]);
-    if (name.endsWith(".xlsx") || allowedMimeTypes.has(file.mimetype)) {
+    if (name.endsWith(".xlsx") && allowedMimeTypes.has(file.mimetype)) {
       return cb(null, true);
     }
     return cb(new Error("Only modern Excel files (.xlsx) are allowed"));
@@ -58,6 +61,8 @@ router.post("/backfill-images", protect, adminOnly, backfillAffiliateImages);
 router.post("/refresh-api-data", protect, adminOnly, refreshAffiliateProductsApiData);
 router.put("/:id", protect, adminOnly, updateAffiliateProduct);
 router.delete("/:id", protect, adminOnly, deleteAffiliateProduct);
+router.post("/:id/restore", protect, adminOnly, restoreAffiliateProduct);
+router.delete("/:id/purge", protect, adminOnly, purgeAffiliateProduct);
 router.post("/:id/publish", protect, adminOnly, publishAffiliateProduct);
 router.post("/:id/unpublish", protect, adminOnly, unpublishAffiliateProduct);
 router.post("/:id/pause", protect, adminOnly, pauseAffiliateProduct);

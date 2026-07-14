@@ -151,8 +151,13 @@ async function bootstrapApplication() {
     logger.info("bootstrap seeding skipped");
   }
 
-  startMarketingAgentWorker();
-  startDailyBatchScheduler();
+  const workerInApiDefault = process.env.NODE_ENV === "production" ? "false" : "true";
+  if (String(process.env.MARKETING_WORKER_IN_API || workerInApiDefault).toLowerCase() === "true") {
+    startMarketingAgentWorker();
+  }
+  if (String(process.env.MARKETING_SCHEDULER_IN_API || workerInApiDefault).toLowerCase() === "true") {
+    startDailyBatchScheduler();
+  }
 
   const server = app.listen(PORT, () => logger.info({ port: PORT }, "server listening"));
 

@@ -288,6 +288,7 @@ const Account = () => {
               {wishlistItems.length === 0 ? <div className="rounded-2xl border border-dashed border-border p-10 text-center text-muted-foreground">Your wishlist is empty.</div> : wishlistItems.map((item) => {
                 const isAffiliate = Boolean(item.product.is_affiliate && item.product.affiliate_url);
                 const showAffiliatePrice = hasVisibleAffiliatePrice(item.product);
+                const checkoutPrice = Number(item.product.sale_price ?? item.product.price ?? 0);
                 return (
                   <div key={item.id} className="flex flex-col gap-4 rounded-2xl border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-center gap-4">
@@ -296,10 +297,10 @@ const Account = () => {
                         <p className="font-medium">{item.product.title}</p>
                         {isAffiliate ? (
                           <p className="text-sm text-muted-foreground">
-                            {showAffiliatePrice ? `${formatPrice(item.product.sale_price ?? item.product.price)} - confirm on Amazon` : "Check price on Amazon"}
+                            {showAffiliatePrice ? `${formatPrice(checkoutPrice)} - confirm on Amazon` : "Check price on Amazon"}
                           </p>
                         ) : (
-                          <p className="text-sm text-muted-foreground">{formatPrice(item.product.sale_price ?? item.product.price)}</p>
+                          <p className="text-sm text-muted-foreground">{formatPrice(checkoutPrice)}</p>
                         )}
                       </div>
                     </div>
@@ -318,8 +319,8 @@ const Account = () => {
                               {
                                 id: item.product.id,
                                 title: item.product.title,
-                                price: item.product.sale_price ?? item.product.price,
-                                priceMax: item.product.price,
+                                price: checkoutPrice,
+                                priceMax: Number(item.product.price ?? checkoutPrice),
                                 format: "Physical Product",
                                 image_url: item.product.featured_image,
                                 slug: item.product.slug,

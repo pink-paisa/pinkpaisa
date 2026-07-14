@@ -9,6 +9,9 @@ const OrderItem = require("../models/OrderItem");
 const AmazonReportRow = require("../models/AmazonReportRow");
 const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
+const AgentTask = require("../models/AgentTask");
+const MarketingAsset = require("../models/MarketingAsset");
+const MarketingPublishAttempt = require("../models/MarketingPublishAttempt");
 const marketingAgentOrchestrator = require("../services/marketingAgentOrchestrator");
 const marketingAgents = require("../services/marketingAgents");
 const {
@@ -46,6 +49,13 @@ const affiliateProductPrivate = affiliateProductController._private;
 const wishlistPrivate = wishlistController._private;
 const openaiImageProviderPrivate = require("../services/imageProviders/openaiProvider")._private;
 const { getImageProviderRegistry } = require("../services/imageProviders/registry");
+const campaignAssetStoragePrivate = require("../services/campaignAssetStorage")._private;
+const { buildVariantPrompt } = require("../services/instagramAiCreativeService");
+const { buildAffiliatePriceMigrationUpdate } = require("../scripts/migrateAffiliatePriceState");
+const {
+  canonicalizeAmazonAffiliateUrl,
+  validateAmazonAffiliateUrl,
+} = require("../services/amazonAffiliateCompliance");
 
 test("pending payment schema supports processing lifecycle and ttl cleanup", () => {
   const statusPath = PendingPayment.schema.path("status");
@@ -94,6 +104,18 @@ test("order list pagination preserves legacy status-only filters", () => {
     ],
   });
   assert.ok(filter.$and[1].$or.some((clause) => clause.order_number instanceof RegExp));
+});
+
+test("checkout rejects affiliate products and uses the stored product price", () => {
+  assert.throws(
+    () => orderPrivate.resolveCheckoutUnitPrice({ title: "Partner pick", is_affiliate: true, price: 1 }),
+    /must be purchased on the partner site/
+  );
+  assert.equal(orderPrivate.resolveCheckoutUnitPrice({ title: "Store item", price: 500, sale_price: 425 }), 425);
+  assert.throws(
+    () => orderPrivate.resolveCheckoutUnitPrice({ title: "Missing price", price: null, sale_price: null }),
+    /valid checkout price is not available/
+  );
 });
 
 test("order and order item schemas include pagination support indexes", () => {
@@ -151,12 +173,7 @@ test("marketing publish event schema records audit fields", () => {
   assert.ok(indexes.includes(JSON.stringify({ campaign_run_id: 1, created_at: -1 })));
 });
 
-test("OpenAI image provider omits unsupported input fidelity for gpt-image-2", () => {
-  assert.equal(openaiImageProviderPrivate.supportsInputFidelity("gpt-image-2"), false);
-  assert.equal(openaiImageProviderPrivate.supportsInputFidelity("gpt-image-1"), true);
-});
-
-test("OpenAI image provider registry includes current GPT Image API models", () => {
+test("OpenAI image provider strips unsupported parameters for every selectable model", () => {
   const openaiProvider = getImageProviderRegistry().find((provider) => provider.key === "openai");
   assert.ok(openaiProvider, "OpenAI provider should be registered");
   assert.deepEqual(openaiProvider.models.map((model) => model.id), [
@@ -165,6 +182,218 @@ test("OpenAI image provider registry includes current GPT Image API models", () 
     "gpt-image-1.5",
     "gpt-image-2",
   ]);
+  const expectedInputFidelity = new Map([
+    ["gpt-image-1-mini", false],
+    ["gpt-image-1", true],
+    ["gpt-image-1.5", true],
+    ["gpt-image-2", false],
+  ]);
+  for (const model of openaiProvider.models) {
+    const expected = expectedInputFidelity.get(model.id);
+    assert.equal(model.capabilities.input_fidelity, expected, model.id);
+    assert.equal(openaiImageProviderPrivate.supportsInputFidelity(model.id), expected, model.id);
+    const request = openaiImageProviderPrivate.buildEditRequestParameters({
+      model: model.id,
+      prompt: "Product campaign",
+      size: "1024x1536",
+      quality: "medium",
+    });
+    assert.equal(Object.hasOwn(request, "input_fidelity"), expected, model.id);
+  }
+});
+
+test("marketing agent tasks support durable lanes, leases, cancellation, and idempotency", () => {
+  assert.deepEqual(AgentTask.schema.path("queue_lane").enumValues, ["fast", "creative", "publish"]);
+  assert.ok(AgentTask.schema.path("lease_owner"));
+  assert.ok(AgentTask.schema.path("lease_expires_at"));
+  assert.ok(AgentTask.schema.path("heartbeat_at"));
+  assert.ok(AgentTask.schema.path("cancellation_requested"));
+
+  const indexes = AgentTask.schema.indexes();
+  assert.ok(indexes.some(([index]) => index.status === 1 && index.queue_lane === 1 && index.available_at === 1));
+  assert.ok(indexes.some(([index, options]) => index.idempotency_key === 1 && options.unique && options.sparse));
+  assert.equal(marketingPrivate.getQueueLane("tracking"), "fast");
+  assert.equal(marketingPrivate.getQueueLane("creative"), "creative");
+  assert.equal(marketingPrivate.getQueueLane("publish"), "publish");
+  const leaseFilter = marketingPrivate.getActiveLeaseFilter({ _id: "task-id", attempt_count: 2 });
+  assert.equal(leaseFilter.status, "running");
+  assert.equal(leaseFilter.attempt_count, 2);
+  assert.equal(typeof leaseFilter.lease_owner, "string");
+
+  const recoveryFilter = marketingPrivate.buildStaleTaskRecoveryFilter({
+    _id: "task-id",
+    attempt_count: 2,
+    lease_expires_at: new Date("2026-07-14T10:00:00.000Z"),
+  }, { now: new Date("2026-07-14T10:01:00.000Z") });
+  assert.equal(recoveryFilter.status, "running");
+  assert.equal(recoveryFilter.attempt_count, 2);
+  assert.deepEqual(recoveryFilter.lease_expires_at, { $lte: new Date("2026-07-14T10:01:00.000Z") });
+
+  const lanes = {
+    fast: { queued: 0, running: 0, failed: 0 },
+    creative: { queued: 0, running: 0, failed: 0 },
+    publish: { queued: 0, running: 0, failed: 0 },
+  };
+  marketingPrivate.accumulateQueueLaneCounts(lanes, [
+    { _id: { lane: "fast", agent_name: "intake", status: "queued" }, count: 2 },
+    { _id: { lane: "fast", agent_name: "tracking", status: "queued" }, count: 3 },
+    { _id: { lane: "fast", agent_name: "caption", status: "running" }, count: 1 },
+  ]);
+  assert.equal(lanes.fast.queued, 5);
+  assert.equal(lanes.fast.running, 1);
+});
+
+test("campaign assets stay on guarded local storage and publish attempts fingerprint payloads", () => {
+  assert.deepEqual(MarketingAsset.schema.path("storage_provider").enumValues, ["local", "external"]);
+  assert.ok(MarketingPublishAttempt.schema.path("payload_fingerprint"));
+  assert.ok(MarketingPublishAttempt.schema.path("group_run_ids"));
+  assert.equal(campaignAssetStoragePrivate.safeFileName("campaign-asset.jpg"), "campaign-asset.jpg");
+  assert.throws(() => campaignAssetStoragePrivate.safeFileName("../outside.jpg"), /Invalid campaign asset file name/);
+  const firstVersion = campaignAssetStoragePrivate.createCampaignAssetVersion();
+  const secondVersion = campaignAssetStoragePrivate.createCampaignAssetVersion();
+  assert.match(firstVersion, /^[a-z0-9]+-[a-f0-9]{10}$/);
+  assert.notEqual(firstVersion, secondVersion);
+});
+
+test("durable Instagram attempts are resumed without creating another post", () => {
+  const payload = {
+    content_type: "carousel",
+    asset_urls: ["https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"],
+    caption: "Campaign caption",
+  };
+  const identity = marketingPrivate.buildPublishPayloadIdentity(payload);
+  const attempt = {
+    content_type: "carousel",
+    group_run_ids: ["run-2", "run-1"],
+    payload_fingerprint: identity.payloadFingerprint,
+    creation_id: "container-1",
+    child_creation_ids: ["child-1", "child-2"],
+    media_id: "media-1",
+    permalink: "https://www.instagram.com/p/example/",
+  };
+
+  assert.equal(marketingPrivate.hasDurablePublishedAttempt(attempt), true);
+  assert.equal(marketingPrivate.isMatchingDurableCarouselAttempt(attempt, ["run-1", "run-2"], payload), true);
+  assert.equal(marketingPrivate.isMatchingDurableCarouselAttempt(attempt, ["run-1", "run-3"], payload), false);
+  assert.equal(marketingPrivate.buildPublishResultFromAttempt(attempt, payload).skipped_duplicate_publish, true);
+  assert.equal(marketingPrivate.buildPublishResultFromAttempt(attempt, payload).media_id, "media-1");
+  const recoveredFromRun = marketingPrivate.mergeAttemptWithRunPublishState({
+    ...attempt,
+    media_id: null,
+  }, {
+    instagram_media_id: "media-from-run",
+    instagram_permalink: "https://www.instagram.com/p/recovered/",
+  });
+  assert.equal(recoveredFromRun.media_id, "media-from-run");
+  assert.equal(marketingPrivate.isMatchingDurableCarouselAttempt(recoveredFromRun, ["run-1", "run-2"], payload), true);
+  assert.equal(marketingPrivate.isUnresolvedPublishAttempt({ status: "publishing", media_id: null }), true);
+  assert.equal(marketingPrivate.isUnresolvedPublishAttempt(attempt), false);
+});
+
+test("archive membership includes queued grouped carousel tasks", () => {
+  const query = marketingPrivate.buildPublishTaskMembershipQuery("run-2");
+  assert.deepEqual(query.agent_name.$in, ["publish", "carousel"]);
+  assert.deepEqual(query.$or, [
+    { campaign_run_id: "run-2" },
+    { "input_json.grouped_run_ids": "run-2" },
+  ]);
+});
+
+test("campaign asset purge checks every persisted campaign asset reference", () => {
+  const query = marketingPrivate.buildCampaignAssetReferenceQuery("https://pinkpaisa.in/uploads/generated/campaigns/a.png", "run-1");
+  assert.deepEqual(query._id, { $ne: "run-1" });
+  assert.deepEqual(
+    query.$or.map((condition) => Object.keys(condition)[0]),
+    [
+      "asset_urls",
+      "published_urls",
+      "creative_json.primary_asset_url",
+      "creative_json.asset_urls",
+      "tracking_json.publish_payload.asset_urls",
+    ]
+  );
+});
+
+test("Amazon URL canonicalization appends only the configured Associate tag", () => {
+  const previousTag = process.env.AMAZON_ASSOCIATE_TAG_IN;
+  process.env.AMAZON_ASSOCIATE_TAG_IN = "pinkpaisa07-21";
+  try {
+    const missingTag = canonicalizeAmazonAffiliateUrl("https://www.amazon.in/example-name/dp/B0ABCDEFGH?ref_=abc", {
+      marketplace: "amazon_in",
+    });
+    assert.equal(missingTag.asin, "B0ABCDEFGH");
+    assert.equal(missingTag.canonicalUrl, "https://www.amazon.in/dp/B0ABCDEFGH?tag=pinkpaisa07-21");
+
+    const conflicting = canonicalizeAmazonAffiliateUrl("https://www.amazon.in/dp/B0ABCDEFGH?tag=someone-else-21", {
+      marketplace: "amazon_in",
+    });
+    assert.match(conflicting.canonicalUrl, /tag=someone-else-21/);
+    assert.ok(validateAmazonAffiliateUrl(conflicting.canonicalUrl, {
+      marketplace: "amazon_in",
+      requireConfiguredTag: true,
+    }).flags.includes("amazon_affiliate_tag_mismatch"));
+
+    const mismatchedMarketplace = canonicalizeAmazonAffiliateUrl("https://www.amazon.com/dp/B0ABCDEFGH", {
+      marketplace: "amazon_in",
+    });
+    assert.equal(mismatchedMarketplace.canonicalUrl, "https://www.amazon.com/dp/B0ABCDEFGH");
+    assert.equal(mismatchedMarketplace.marketplace, "amazon_us");
+    assert.equal(mismatchedMarketplace.marketplaceMismatch, true);
+    assert.ok(validateAmazonAffiliateUrl(mismatchedMarketplace.canonicalUrl, {
+      marketplace: "amazon_in",
+      requireConfiguredTag: true,
+    }).flags.includes("amazon_marketplace_mismatch"));
+  } finally {
+    process.env.AMAZON_ASSOCIATE_TAG_IN = previousTag;
+  }
+});
+
+test("affiliate price migration preserves valid values when only one sentinel is zero", () => {
+  assert.deepEqual(buildAffiliatePriceMigrationUpdate({
+    price: 999,
+    sale_price: 0,
+    effective_price: 999,
+    price_status: "manual_unverified",
+  }), {
+    price: 999,
+    sale_price: null,
+    effective_price: 999,
+    price_status: "manual_unverified",
+    price_verified_at: null,
+  });
+
+  assert.deepEqual(buildAffiliatePriceMigrationUpdate({
+    price: 0,
+    sale_price: 0,
+    effective_price: 0,
+    attributes: {},
+  }), {
+    price: null,
+    sale_price: null,
+    effective_price: null,
+    price_status: "unavailable",
+    price_verified_at: null,
+  });
+});
+
+test("missing-price affiliate creative prompts prohibit numeric pricing and exact product imitation", () => {
+  const prompt = buildVariantPrompt({
+    variant: "hero",
+    brief: {
+      title: "Wellness Partner Pick",
+      category: "Wellness",
+      subcategory: "Self Care",
+      is_affiliate: true,
+      pricing: { available: false, status: "unavailable", price: null, sale_price: null },
+      campaign_asset: { approved: false, url: null },
+      tags: ["wellness"],
+    },
+    strategy: { audience: "wellness shoppers", cta: "Explore this affiliate pick" },
+    settings: {},
+  });
+  assert.doesNotMatch(prompt, /(?:\u20b9|Rs\.?)[ ]*0|available at/i);
+  assert.match(prompt, /Do not show or mention a numeric price/i);
+  assert.match(prompt, /do not render, imitate, or invent branded packaging/i);
 });
 
 test("affiliate campaign validation accepts active assigned affiliate products", () => {
@@ -566,6 +795,7 @@ test("password reset application clears reset tokens and login lock state", asyn
     password_reset_expires_at: new Date(Date.now() + 1000),
     failed_login_attempts: 5,
     locked_until: new Date(Date.now() + 1000),
+    auth_version: 4,
     async save() {
       saved = true;
     },
@@ -579,6 +809,7 @@ test("password reset application clears reset tokens and login lock state", asyn
   assert.equal(user.password_reset_expires_at, null);
   assert.equal(user.failed_login_attempts, 0);
   assert.equal(user.locked_until, null);
+  assert.equal(user.auth_version, 5);
 });
 
 test("production rate limiter fails closed when Redis is not configured", async () => {
@@ -653,7 +884,7 @@ test("public product serialization strips affiliate internals and imported Amazo
   assert.equal(flat.cost_price, undefined);
   assert.equal(flat.affiliate_tag, undefined);
   assert.equal(flat.affiliate_payload, undefined);
-  assert.equal(flat.price, 0);
+  assert.equal(flat.price, null);
   assert.equal(flat.sale_price, null);
   assert.equal(flat.mrp, null);
   assert.equal(flat.stock_quantity, 0);
@@ -677,7 +908,7 @@ test("public affiliate serialization keeps manual image URLs including Amazon me
 
   assert.equal(safeManual.featured_image, "https://cdn.example.com/product.jpg");
   assert.deepEqual(safeManual.images, ["https://cdn.example.com/product.jpg"]);
-  assert.equal(safeManual.price, 0);
+  assert.equal(safeManual.price, null);
   assert.equal(safeManual.sale_price, null);
 
   const amazonMediaManual = productPrivate.toFlat({
@@ -693,7 +924,7 @@ test("public affiliate serialization keeps manual image URLs including Amazon me
 
   assert.equal(amazonMediaManual.featured_image, "https://m.media-amazon.com/images/I/product.jpg");
   assert.deepEqual(amazonMediaManual.images, ["https://m.media-amazon.com/images/I/product.jpg"]);
-  assert.equal(amazonMediaManual.price, 0);
+  assert.equal(amazonMediaManual.price, null);
 
   const payloadOnlyManual = productPrivate.toFlat({
     _id: { toString: () => "payload-image-product-id" },
@@ -729,10 +960,11 @@ test("public affiliate serialization requires fresh API expiry before showing Am
 
   const missingExpiry = productPrivate.toFlat(baseProduct, { publicView: true });
   assert.equal(missingExpiry.featured_image, null);
-  assert.equal(missingExpiry.price, 0);
+  assert.equal(missingExpiry.price, null);
 
   const fresh = productPrivate.toFlat({
     ...baseProduct,
+    price_status: "verified",
     affiliate_data_expires_at: new Date(Date.now() + 60 * 60 * 1000),
   }, { publicView: true });
   assert.equal(fresh.featured_image, "https://example.com/api-image.jpg");
@@ -741,10 +973,12 @@ test("public affiliate serialization requires fresh API expiry before showing Am
 
   const expired = productPrivate.toFlat({
     ...baseProduct,
+    price_status: "verified",
     affiliate_data_expires_at: new Date(Date.now() - 60 * 1000),
   }, { publicView: true });
   assert.equal(expired.featured_image, null);
-  assert.equal(expired.price, 0);
+  assert.equal(expired.price, null);
+  assert.equal(expired.price_status, "stale");
 });
 
 test("wishlist serialization hides affiliate prices without fresh API-approved data", () => {
@@ -763,7 +997,7 @@ test("wishlist serialization hides affiliate prices without fresh API-approved d
   });
 
   assert.equal(manualAffiliate.is_affiliate, true);
-  assert.equal(manualAffiliate.price, 0);
+  assert.equal(manualAffiliate.price, null);
   assert.equal(manualAffiliate.sale_price, null);
   assert.equal(manualAffiliate.stock_quantity, 0);
 
@@ -778,6 +1012,7 @@ test("wishlist serialization hides affiliate prices without fresh API-approved d
     is_affiliate: true,
     affiliate_url: "https://www.amazon.in/dp/B0ABCDEFGH?tag=pinkpaisa07-21",
     affiliate_data_source: "creators_api",
+    price_status: "verified",
     affiliate_data_expires_at: new Date(Date.now() + 60_000).toISOString(),
     affiliate_compliance_status: "compliant",
   });
@@ -815,7 +1050,7 @@ test("admin affiliate CRUD cannot promote manual submissions into API-sourced co
     "Manual product"
   );
   assert.equal(manual.featured_image, "https://cdn.example.com/manual-product.jpg");
-  assert.equal(manual.price, 0);
+  assert.equal(manual.price, null);
 
   const amazonMediaManual = affiliateProductPrivate.buildAffiliateImageContent(
     { image_url: "https://m.media-amazon.com/images/I/product.jpg" },

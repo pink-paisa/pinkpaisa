@@ -1,16 +1,13 @@
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
+const MarketingAsset = require("../models/MarketingAsset");
+const { createCampaignAssetVersion, storeCampaignAsset } = require("./campaignAssetStorage");
 const { generateImage } = require("./imageProviders");
 
-const OUTPUT_DIR = path.join(__dirname, "..", "uploads", "generated", "campaigns");
 const DEFAULT_SERVER_URL = "http://localhost:5000";
 const INSTAGRAM_CANVAS_WIDTH = 1080;
 const INSTAGRAM_CANVAS_HEIGHT = 1350;
-
-function ensureOutputDir() {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-}
 
 function getSharp() {
   try {
@@ -214,6 +211,14 @@ function buildOverlayBenefits(brief) {
 }
 
 function buildOverlayPriceSummary(brief) {
+  if (brief?.is_affiliate || brief?.pricing?.available === false) {
+    return {
+      label: "Partner Pick",
+      currentPrice: "Check price",
+      previousPrice: null,
+      savings: null,
+    };
+  }
   const price = Number(brief?.pricing?.price || 0);
   const salePrice = brief?.pricing?.sale_price == null ? null : Number(brief.pricing.sale_price);
   const hasDiscount = salePrice != null && salePrice > 0 && salePrice < price;
@@ -243,8 +248,11 @@ function buildOverlayFooter(brief) {
 
 function buildPromptTemplate({ brief, strategy, settings }) {
   const template = trimText(settings?.campaign_ai_prompt_template || "");
+  const hasApprovedSourceImage = Boolean(brief?.campaign_asset?.approved && brief?.campaign_asset?.url);
   const resolvedTemplate = template || [
-    "Use the uploaded image of my product as the base.",
+    hasApprovedSourceImage
+      ? "Use the uploaded image of my product as the base."
+      : "Create an original category-level editorial visual without copying product packaging or logos.",
     "",
     "Create a high-quality Instagram marketing creative for this product.",
     "",
@@ -288,7 +296,7 @@ function buildPromptTemplate({ brief, strategy, settings }) {
     "[Luxury / Minimal / Bold / Natural / Premium]": buildBrandTone(brief),
     '[e.g., "Elevate Your Skin Routine"]': buildHeadline(brief),
     '[e.g., "Pure. Effective. Luxurious."]': buildSubtext(brief, strategy),
-    '[e.g., "Shop Now"]': trimText(strategy?.cta || "Shop Now"),
+    '[e.g., "Shop Now"]': trimText(strategy?.cta || (brief?.is_affiliate ? "Explore Partner Pick" : "Shop Now")),
   });
 }
 
@@ -333,13 +341,20 @@ async function readImageBuffer(source) {
 }
 
 function buildSharedPrompt({ brief, strategy, settings }) {
+  const hasApprovedSourceImage = Boolean(brief?.campaign_asset?.approved && brief?.campaign_asset?.url);
   return [
     buildPromptTemplate({ brief, strategy, settings }),
     "",
     "Additional technical guardrails:",
-    "If a source image is available, use it as the visual reference and preserve the actual product shape, material, texture, proportions, and recognizable details.",
-    "Preserve the exact bottle silhouette, cap, nozzle, label layout, printed text, and branding from the source image.",
-    "Do not invent a new package design, do not rename the product, and do not rewrite the label when a source image is provided.",
+    hasApprovedSourceImage
+      ? "Use the rights-approved source image as the visual reference and preserve the actual product shape, material, proportions, and recognizable details."
+      : "No product reference image is rights-approved. Create only a generic lifestyle scene for the product category; do not render, imitate, or invent branded packaging, labels, or logos.",
+    hasApprovedSourceImage
+      ? "Preserve the exact bottle silhouette, cap, nozzle, label layout, printed text, and branding from the approved source image."
+      : "Keep the composition useful as a Pink Paisa editorial partner-pick background with clear negative space for the product title overlay.",
+    hasApprovedSourceImage
+      ? "Do not invent a new package design, rename the product, or rewrite the label."
+      : "Do not imply that the generated scene is a photograph of the exact affiliate item.",
     "Return a clean premium marketing visual as a final raw image with no extra UI chrome, price stickers, or fake CTA buttons unless the prompt explicitly asks for them.",
     "Use realistic premium ecommerce photography with tasteful props only.",
     "Avoid warped packaging, duplicated products, cropped labels, extra hands, collage layouts, watermarks, or broken anatomy.",
@@ -349,9 +364,12 @@ function buildSharedPrompt({ brief, strategy, settings }) {
 
 function buildVariantPrompt({ variant, brief, strategy, settings }) {
   const shared = buildSharedPrompt({ brief, strategy, settings });
-  const offerLine = brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)
+  const priceAvailable = brief?.pricing?.available !== false && Number(brief?.pricing?.price || 0) > 0;
+  const offerLine = brief?.is_affiliate || !priceAvailable
+    ? "Do not show or mention a numeric price, discount, sale, availability claim, or price sticker."
+    : brief?.pricing?.sale_price != null && Number(brief.pricing.sale_price) < Number(brief.pricing.price)
     ? `Highlight that the product feels giftable and premium while supporting a sale offer from ${formatPrice(brief.pricing.price)} down to ${formatPrice(brief.pricing.sale_price)}.`
-    : `Present the product as a premium discovery item available at ${formatPrice(brief?.pricing?.price || 0)}.`;
+    : `Present the product as a premium discovery item available at ${formatPrice(brief.pricing.price)}.`;
 
   if (variant === "hero") {
     return `${shared} Compose a hero shot on a soft blush or neutral luxury surface with editorial natural light, balanced shadows, and a polished women-first wellness aesthetic. ${offerLine}`;
@@ -377,14 +395,33 @@ async function processOutputForInstagram({ buffer }) {
     .toBuffer();
 }
 
-async function writeOutput(fileName, buffer) {
-  ensureOutputDir();
-  const filePath = path.join(OUTPUT_DIR, fileName);
-  await fs.promises.writeFile(filePath, buffer);
-  return {
-    file_path: filePath,
-    public_url: `${getServerBaseUrl()}/uploads/generated/campaigns/${fileName}`,
-  };
+async function writeOutput({ run, brief, settings, fileName, buffer }) {
+  const stored = await storeCampaignAsset({ fileName, buffer });
+  const sourceAsset = brief?.campaign_asset || {};
+  await MarketingAsset.findOneAndUpdate(
+    { url: stored.url },
+    {
+      $set: {
+        campaign_run_id: run._id,
+        campaign_id: run.campaign_id,
+        asset_type: "creative",
+        url: stored.url,
+        storage_provider: stored.storage_provider,
+        storage_key: stored.storage_key,
+        checksum_sha256: stored.checksum_sha256,
+        source_url: sourceAsset.approved ? sourceAsset.url : null,
+        source_provenance: sourceAsset.approved
+          ? "generated_from_approved_source"
+          : "generated_without_reference",
+        usage_rights_status: sourceAsset.rights_status || "unknown",
+        provider: settings.campaign_ai_provider,
+        model: settings.campaign_ai_model,
+        deleted_at: null,
+      },
+    },
+    { upsert: true, new: true }
+  );
+  return { file_path: stored.file_path || null, public_url: stored.url };
 }
 
 async function generateVariantBuffer({ variant, brief, strategy, settings, productBuffer }) {
@@ -405,7 +442,10 @@ async function generateVariantBuffer({ variant, brief, strategy, settings, produ
 
 async function generateAiInstagramCreative({ run, brief, strategy, settings }) {
   const contentType = strategy?.recommended_content_type === "carousel" ? "carousel" : "single_image";
-  const primaryImage = Array.isArray(brief?.images) ? brief.images.find(Boolean) : null;
+  const assetVersion = createCampaignAssetVersion();
+  const primaryImage = brief?.campaign_asset?.approved
+    ? brief.campaign_asset.url
+    : (!brief?.is_affiliate && Array.isArray(brief?.images) ? brief.images.find(Boolean) : null);
 
   const productBuffer = primaryImage ? await readImageBuffer(primaryImage) : null;
   const variants = contentType === "carousel"
@@ -427,14 +467,20 @@ async function generateAiInstagramCreative({ run, brief, strategy, settings }) {
   for (let index = 0; index < generated.length; index += 1) {
     const variant = variants[index];
     const fileName = contentType === "carousel"
-      ? `${slugify(run.campaign_id)}-ai-carousel-${index + 1}.jpg`
-      : `${slugify(run.campaign_id)}-ai-hero.jpg`;
-    outputs.push(await writeOutput(fileName, generated[index].processedBuffer));
+      ? `${slugify(run.campaign_id)}-${assetVersion}-ai-carousel-${index + 1}.jpg`
+      : `${slugify(run.campaign_id)}-${assetVersion}-ai-hero.jpg`;
+    outputs.push(await writeOutput({
+      run,
+      brief,
+      settings,
+      fileName,
+      buffer: generated[index].processedBuffer,
+    }));
   }
 
   return {
     content_type: contentType,
-    cta_text: strategy?.cta || "Shop Now",
+    cta_text: strategy?.cta || (brief?.is_affiliate ? "Explore Partner Pick" : "Shop Now"),
     primary_asset_url: outputs[0].public_url,
     asset_urls: outputs.map((item) => item.public_url),
     creative_json: {
@@ -447,7 +493,7 @@ async function generateAiInstagramCreative({ run, brief, strategy, settings }) {
       quality: settings.campaign_ai_image_quality || "medium",
       headline: trimText(brief?.title || "Pink Paisa Pick"),
       supporting_line: strategy?.angle || null,
-      cta_text: strategy?.cta || "Shop Now",
+      cta_text: strategy?.cta || (brief?.is_affiliate ? "Explore Partner Pick" : "Shop Now"),
       slides: outputs.map((item, index) => ({
         type: variants[index],
         url: item.public_url,

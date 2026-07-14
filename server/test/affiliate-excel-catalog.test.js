@@ -253,7 +253,7 @@ test("affiliate product list keeps legacy array response without pagination para
 
   try {
     Product.find = (query) => {
-      assert.deepEqual(query, { is_affiliate: true, source_type: "admin" });
+      assert.deepEqual(query, { is_affiliate: true, source_type: "admin", archived_at: null });
       return queryResult(docs);
     };
     Product.countDocuments = async () => {
@@ -594,6 +594,9 @@ test("affiliate excel confirm import creates and updates draft review products o
     assert.equal(createdDocs.length, 1);
     assert.equal(createdDocs[0].status, "draft");
     assert.equal(createdDocs[0].is_visible, false);
+    assert.equal(createdDocs[0].affiliate_source_mode, "manual_upload");
+    assert.equal(createdDocs[0].affiliate_original_url, "https://www.amazon.in/dp/B0CTVGPLQX?tag=pinkpaisa-21");
+    assert.equal(createdDocs[0].affiliate_canonical_url, "https://www.amazon.in/dp/B0CTVGPLQX?tag=pinkpaisa-21");
     assert.equal(existingProduct.__saved, true);
     assert.equal(existingProduct.status, "draft");
     assert.equal(existingProduct.is_visible, false);
@@ -630,17 +633,20 @@ test("affiliate bulk publish returns row-level success and compliance failures",
   });
 });
 
-test("affiliate bulk delete blocks published products and deletes safe drafts", async () => {
-  await withAffiliateBulkMocks(async ({ deletedIds }) => {
+test("affiliate bulk delete archives both published products and drafts", async () => {
+  await withAffiliateBulkMocks(async ({ docs, deletedIds }) => {
     const summary = await affiliateProductPrivate.performAffiliateBulkAction({
       productIds: ["active", "draft"],
       action: "delete",
     });
 
-    assert.equal(summary.succeeded, 1);
-    assert.equal(summary.failed, 1);
-    assert.deepEqual(deletedIds, ["draft"]);
-    assert.equal(summary.results.find((result) => result.id === "active").message, "Unpublish before deleting");
+    assert.equal(summary.succeeded, 2);
+    assert.equal(summary.failed, 0);
+    assert.deepEqual(deletedIds, []);
+    assert.ok(docs.get("active").archived_at instanceof Date);
+    assert.ok(docs.get("draft").archived_at instanceof Date);
+    assert.equal(docs.get("active").is_visible, false);
+    assert.equal(docs.get("active").status, "draft");
   });
 });
 

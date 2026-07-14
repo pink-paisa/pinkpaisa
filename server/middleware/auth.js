@@ -17,6 +17,9 @@ const protect = async (req, res, next) => {
     }
     req.user = await User.findById(decoded.id).select("-password").lean();
     if (!req.user) return res.status(401).json({ message: "User not found" });
+    if (Number(decoded.version || 0) !== Number(req.user.auth_version || 0)) {
+      return res.status(401).json({ message: "Session expired. Please log in again." });
+    }
     if (isAccountLocked(req.user)) {
       return res.status(423).json({ message: "Account is temporarily locked. Try again in 15 minutes." });
     }
@@ -40,6 +43,10 @@ const optionalProtect = async (req, res, next) => {
       return next();
     }
     req.user = await User.findById(decoded.id).select("-password").lean();
+    if (req.user && Number(decoded.version || 0) !== Number(req.user.auth_version || 0)) {
+      req.user = null;
+      return next();
+    }
     if (req.user && isAccountLocked(req.user)) {
       req.user = null;
     }

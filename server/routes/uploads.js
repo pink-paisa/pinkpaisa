@@ -34,8 +34,9 @@ async function requireImageUploadActor(req, res, next) {
   if (customerToken) {
     try {
       const decoded = jwt.verify(customerToken, getJwtSecret());
-      const user = await User.findById(decoded.id).select("role").lean();
-      if (user?.role === "admin") {
+      const user = await User.findById(decoded.id).select("role auth_version").lean();
+      const sessionIsCurrent = Number(decoded.version || 0) === Number(user?.auth_version || 0);
+      if (user?.role === "admin" && sessionIsCurrent) {
         req.user = user;
         return next();
       }

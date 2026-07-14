@@ -20,6 +20,7 @@ const UserSchema = new mongoose.Schema({
   locked_until: { type: Date, default: null },
   last_login_at: { type: Date, default: null },
   last_login_ip: { type: String, default: null, trim: true },
+  auth_version: { type: Number, default: 0, min: 0 },
   wallet_balance: { type: Number, default: 0, min: 0 },
   cart_snapshot_json: { type: [mongoose.Schema.Types.Mixed], default: [] },
 }, { timestamps: true });

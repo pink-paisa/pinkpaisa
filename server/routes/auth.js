@@ -24,8 +24,8 @@ const {
 } = require("../utils/loginProtection");
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const signToken = (id, role = "user") =>
-  jwt.sign({ id, type: role === "admin" ? "admin" : "customer" }, getJwtSecret(), { expiresIn: "7d" });
+const signToken = (id, role = "user", authVersion = 0) =>
+  jwt.sign({ id, type: role === "admin" ? "admin" : "customer", version: Number(authVersion || 0) }, getJwtSecret(), { expiresIn: "7d" });
 const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const GENERIC_RESET_MESSAGE = "If an account exists for that email, a reset link has been sent.";
@@ -148,6 +148,7 @@ async function applyPasswordReset(user, password) {
   user.password_reset_expires_at = null;
   user.failed_login_attempts = 0;
   user.locked_until = null;
+  user.auth_version = Number(user.auth_version || 0) + 1;
   await user.save();
   return user;
 }
@@ -177,7 +178,7 @@ router.post("/register", async (req, res) => {
       email_verified: false,
     });
     const preview = await issueCustomerVerification(user);
-    const token = signToken(user._id, user.role);
+    const token = signToken(user._id, user.role, user.auth_version);
     setCustomerSessionCookie(res, req, token);
     setCsrfCookie(res, req);
     res.status(201).json({
@@ -205,7 +206,7 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
     await clearLoginFailures(user, req.ip);
-    const token = signToken(user._id, user.role);
+    const token = signToken(user._id, user.role, user.auth_version);
     setCustomerSessionCookie(res, req, token);
     setCsrfCookie(res, req);
     res.json({
@@ -288,7 +289,7 @@ router.post("/password/reset", async (req, res) => {
     const user = await User.findOne(buildPasswordResetTokenLookup(token, "customer"));
     if (!user) return res.status(400).json({ message: "This reset link is invalid or expired" });
     await applyPasswordReset(user, password);
-    const sessionToken = signToken(user._id, user.role);
+    const sessionToken = signToken(user._id, user.role, user.auth_version);
     setCustomerSessionCookie(res, req, sessionToken);
     setCsrfCookie(res, req);
     res.json({
@@ -330,7 +331,7 @@ router.post("/admin/password/reset", async (req, res) => {
     const admin = await User.findOne(buildPasswordResetTokenLookup(token, "admin"));
     if (!admin) return res.status(400).json({ message: "This reset link is invalid or expired" });
     await applyPasswordReset(admin, password);
-    const sessionToken = signToken(admin._id, admin.role);
+    const sessionToken = signToken(admin._id, admin.role, admin.auth_version);
     setCustomerSessionCookie(res, req, sessionToken);
     setCsrfCookie(res, req);
     res.json({
@@ -379,7 +380,7 @@ router.post("/admin-login", adminLoginLimiter, async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
     await clearLoginFailures(admin, req.ip);
-    const token = signToken(admin._id, admin.role);
+    const token = signToken(admin._id, admin.role, admin.auth_version);
     setCustomerSessionCookie(res, req, token);
     setCsrfCookie(res, req);
     res.json({ token, user: serializeUser(admin.toObject()) });

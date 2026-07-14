@@ -422,6 +422,20 @@ body{font-family:Arial,sans-serif;background:#fff8f8;color:#4a2030;padding:32px}
 </html>`;
 }
 
+function resolveCheckoutUnitPrice(product = {}) {
+  if (product.is_affiliate) {
+    throw new Error(`${product.title || "This item"} is an affiliate product and must be purchased on the partner site`);
+  }
+  const basePrice = Number(product.price);
+  const salePrice = product.sale_price == null ? null : Number(product.sale_price);
+  const hasValidSalePrice = Number.isFinite(salePrice) && salePrice > 0 && salePrice < basePrice;
+  const unitPrice = hasValidSalePrice ? salePrice : basePrice;
+  if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+    throw new Error(`A valid checkout price is not available for ${product.title || "this item"}`);
+  }
+  return unitPrice;
+}
+
 async function enrichOrderItemsWithProductData(rawItems = []) {
   const productIds = rawItems.map((item) => item.id).filter(Boolean);
   const products = await Product.find({ _id: { $in: productIds } }).lean();
@@ -433,16 +447,17 @@ async function enrichOrderItemsWithProductData(rawItems = []) {
   return rawItems.map((item) => {
     const product = productMap.get(String(item.id));
     if (!product) throw new Error(`Product not found for item ${item.title || item.id}`);
+    const unitPrice = resolveCheckoutUnitPrice(product);
     if (Number(product.stock_quantity || 0) < Number(item.quantity || 1)) throw new Error(`Insufficient stock for ${product.title}`);
     const vendor = product.vendor_id ? vendorMap.get(String(product.vendor_id)) : null;
     const commissionPercent = Number(vendor?.commission_percent || 20);
-    const breakup = calculatePayoutBreakup(item.price ?? product.sale_price ?? product.price, item.quantity || 1, commissionPercent);
+    const breakup = calculatePayoutBreakup(unitPrice, item.quantity || 1, commissionPercent);
     return {
       order_item: {
         order_id: "",
         product_id: String(product._id),
         product_title: product.title,
-        price: Number(item.price ?? product.sale_price ?? product.price),
+        price: unitPrice,
         cost_price: Number(product.cost_price || 0),
         quantity: Number(item.quantity || 1),
         vendor_id: product.vendor_id || null,
@@ -1876,5 +1891,6 @@ module.exports = {
     parseListPagination,
     wantsPaginatedOrderList,
     buildOrderListFilter,
+    resolveCheckoutUnitPrice,
   },
 };

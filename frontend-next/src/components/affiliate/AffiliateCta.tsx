@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AffiliateDisclosure } from "@/components/affiliate/AffiliateDisclosure";
-import { getAffiliateCtaExperiment, trackAffiliateEvent, type AffiliateTrackableProduct } from "@/lib/affiliateTracking";
+import { buildAffiliateOutboundQuery, getAffiliateCtaExperiment, trackAffiliateEvent, type AffiliateTrackableProduct } from "@/lib/affiliateTracking";
+import { API_URL } from "@/lib/api";
 
 type AffiliateCtaProps = {
   product: AffiliateTrackableProduct & {
@@ -25,18 +26,20 @@ export function AffiliateCta({
   showDisclosure = true,
 }: AffiliateCtaProps) {
   const [experimentVariant, setExperimentVariant] = useState("check_price_on_amazon");
-  const href = product.affiliate_url || "";
-  const disabled = !href || product.affiliate_compliance_status !== "compliant";
+  const [outboundQuery, setOutboundQuery] = useState("");
+  const outboundBase = product.id ? `${API_URL.replace(/\/$/, "")}/affiliate-events/out/${encodeURIComponent(product.id)}` : "";
+  const href = outboundBase ? `${outboundBase}${outboundQuery ? `?${outboundQuery}` : ""}` : "";
+  const disabled = !product.affiliate_url || !href || product.affiliate_compliance_status !== "compliant";
   const resolvedLabel = label || (experimentVariant === "view_on_amazon" ? "View on Amazon" : "Check price on Amazon");
 
   useEffect(() => {
     setExperimentVariant(getAffiliateCtaExperiment().experiment_variant);
+    setOutboundQuery(buildAffiliateOutboundQuery());
   }, []);
 
   const handleClick = () => {
     if (disabled) return;
     trackAffiliateEvent(product, "cta_click");
-    trackAffiliateEvent(product, "outbound_click");
   };
 
   return (
@@ -50,7 +53,7 @@ export function AffiliateCta({
           <a
             href={href}
             target="_blank"
-            rel="sponsored noopener noreferrer nofollow"
+            rel="sponsored noopener nofollow"
             onClick={handleClick}
           >
             <ExternalLink className="h-4 w-4" />

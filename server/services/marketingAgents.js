@@ -157,6 +157,8 @@ async function runIntakeAgent(run) {
         sale_price: salePrice,
         currency: "INR",
         discount_percent: discountPercent,
+        available: price > 0,
+        status: "verified",
       },
       category: vendorProduct.category || publicProduct.category || "Uncategorized",
       subcategory: vendorProduct.subcategory || publicProduct.subcategory || "Uncategorized",
@@ -193,6 +195,22 @@ async function runIntakeAgent(run) {
     ? Math.round(((price - salePrice) / price) * 100)
     : null;
   const isAffiliate = Boolean(publicProduct.is_affiliate);
+  const approvedAffiliatePriceSource = ["creators_api", "pa_api"].includes(String(publicProduct.affiliate_data_source || ""));
+  const affiliatePriceFresh = !publicProduct.affiliate_data_expires_at
+    ? false
+    : new Date(publicProduct.affiliate_data_expires_at).getTime() > Date.now();
+  const storedAffiliatePriceStatus = publicProduct.price_status || "unavailable";
+  const affiliatePriceStatus = storedAffiliatePriceStatus === "verified" && (!approvedAffiliatePriceSource || !affiliatePriceFresh)
+    ? "stale"
+    : storedAffiliatePriceStatus;
+  const priceAvailable = isAffiliate
+    ? affiliatePriceStatus === "verified" && approvedAffiliatePriceSource && affiliatePriceFresh && Number(publicProduct.price || 0) > 0
+    : Number(publicProduct.price || 0) > 0;
+  const campaignRights = String(publicProduct.affiliate_campaign_usage_rights || "unknown");
+  const campaignAssetApproved = !isAffiliate || ["admin_confirmed", "owned", "licensed", "api_permitted"].includes(campaignRights);
+  const campaignAssetUrl = isAffiliate
+    ? (publicProduct.affiliate_campaign_asset_url || publicProduct.featured_image || images[0] || null)
+    : (images[0] || null);
   const affiliateSourceLabel = trimText(publicProduct.brand_name || publicProduct.affiliate_source_platform || "Affiliate Partner");
   const productUrl = buildProductUrl(publicProduct.slug);
 
@@ -207,10 +225,12 @@ async function runIntakeAgent(run) {
     affiliate_url: publicProduct.affiliate_url || null,
     affiliate_external_id: publicProduct.affiliate_external_id || null,
     affiliate_source_platform: publicProduct.affiliate_source_platform || null,
+    affiliate_source_mode: publicProduct.affiliate_source_mode || null,
     affiliate: isAffiliate ? {
       url: publicProduct.affiliate_url || null,
       external_id: publicProduct.affiliate_external_id || null,
       source_platform: publicProduct.affiliate_source_platform || null,
+      source_mode: publicProduct.affiliate_source_mode || null,
       source_label: affiliateSourceLabel,
     } : null,
     vendor: {
@@ -220,10 +240,12 @@ async function runIntakeAgent(run) {
       email: null,
     },
     pricing: {
-      price,
-      sale_price: salePrice,
+      price: priceAvailable ? price : null,
+      sale_price: priceAvailable ? salePrice : null,
       currency: "INR",
-      discount_percent: discountPercent,
+      discount_percent: priceAvailable ? discountPercent : null,
+      available: priceAvailable,
+      status: isAffiliate ? affiliatePriceStatus : "verified",
     },
     category: publicProduct.category || "Uncategorized",
     subcategory: publicProduct.subcategory || "Uncategorized",
@@ -233,6 +255,13 @@ async function runIntakeAgent(run) {
     },
     tags: (publicProduct.tags || []).filter(Boolean),
     images,
+    campaign_asset: {
+      url: campaignAssetUrl,
+      approved: Boolean(campaignAssetApproved && campaignAssetUrl),
+      rights_status: isAffiliate ? campaignRights : "owned",
+      provenance: isAffiliate ? (publicProduct.affiliate_image_provenance || "unknown") : "admin_provided",
+      fallback_mode: isAffiliate && !(campaignAssetApproved && campaignAssetUrl) ? "category_editorial" : null,
+    },
     constraints: {
       returnable: publicProduct.returnable !== false,
       return_window_days: Number(publicProduct.return_window_days || 7),
@@ -261,7 +290,9 @@ async function runStrategyAgent(run) {
   const audience = buildAudience(brief.category, brief.tags);
   const angle = buildAngle(brief);
   const cta = brief.is_affiliate ? "View partner pick" : chooseCtaText(brief);
-  const contentType = Array.isArray(brief.images) && brief.images.length >= 2 && String(process.env.MARKETING_ENABLE_CAROUSEL || "true") !== "false"
+  const contentType = (!brief.is_affiliate || brief.campaign_asset?.approved)
+    && Array.isArray(brief.images) && brief.images.length >= 2
+    && String(process.env.MARKETING_ENABLE_CAROUSEL || "true") !== "false"
     ? "carousel"
     : "single_image";
 
@@ -365,7 +396,12 @@ async function runComplianceAgent(run) {
   ].filter(Boolean).join("\n\n"))) {
     issues.push(createIssue("blocking", "missing_affiliate_disclosure", "Affiliate Instagram captions must include the Amazon Associate disclosure."));
   }
-  if (!Array.isArray(brief.images) || brief.images.length === 0) issues.push(createIssue("blocking", "missing_images", "At least one product image is required."));
+  if (!brief.is_affiliate && (!Array.isArray(brief.images) || brief.images.length === 0)) {
+    issues.push(createIssue("blocking", "missing_images", "At least one product image is required."));
+  }
+  if (brief.is_affiliate && !brief.campaign_asset?.approved) {
+    issues.push(createIssue("warning", "generic_affiliate_creative", "No rights-approved product image was used; the creative is category-level editorial artwork."));
+  }
   if (!Array.isArray(creative.asset_urls) || creative.asset_urls.length === 0) issues.push(createIssue("blocking", "missing_creative_assets", "The Instagram creative did not generate any publishable image assets."));
   if (!brief.is_affiliate && brief.pricing.sale_price != null && Number(brief.pricing.sale_price) >= Number(brief.pricing.price)) {
     issues.push(createIssue("blocking", "invalid_sale_price", "Sale price must be lower than the base price."));

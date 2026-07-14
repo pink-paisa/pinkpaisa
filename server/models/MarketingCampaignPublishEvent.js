@@ -11,7 +11,7 @@ const MarketingCampaignPublishEventSchema = new mongoose.Schema({
   batch_run_id: { type: mongoose.Schema.Types.ObjectId, ref: "DailyBatchRun", default: null, index: true },
   action_type: {
     type: String,
-    enum: ["publish", "schedule", "retry", "carousel_publish", "failed_publish", "regenerate", "reset"],
+    enum: ["publish", "schedule", "retry", "carousel_publish", "failed_publish", "regenerate", "reset", "archive", "restore", "purge"],
     required: true,
     index: true,
   },

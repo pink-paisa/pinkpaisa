@@ -5,6 +5,9 @@ import { AlertTriangle, CheckCircle2, RefreshCcw, Rocket, ShieldCheck, XCircle }
 
 type CampaignRunLite = {
   status: string;
+  current_stage?: string | null;
+  archived_at?: string | null;
+  next_action?: string | null;
   review_status?: string | null;
   publish_status?: string | null;
   publish_readiness?: {
@@ -13,6 +16,24 @@ type CampaignRunLite = {
     warnings: Array<{ code: string; message: string }>;
     checked_at?: string | null;
   } | null;
+};
+
+const getNextActionLabel = (run: CampaignRunLite) => {
+  const action = run.next_action || "wait_for_worker";
+  if (action === "restore_campaign") return "Archived";
+  if (action === "open_instagram") return "Published on Instagram";
+  if (action === "wait_for_publish") return "Publishing";
+  if (action === "review_draft") return "Ready for review";
+  if (action === "approve_for_publish") return "Waiting for review approval";
+  if (action === "fix_publish_blockers") return "Needs admin action";
+  if (action === "retry_failed_task") return "Retry available";
+  if (action === "wait_for_creative") return "Generating image";
+  if (action === "wait_for_tracking") return "Tracking link";
+  if (action.startsWith("wait_for_")) {
+    const stage = action.slice("wait_for_".length).replace(/_/g, " ");
+    return stage === "queued for daily batch" ? "Waiting in campaign queue" : `Running ${stage}`;
+  }
+  return action.replace(/_/g, " ");
 };
 
 const CampaignPublishActions = ({
@@ -54,6 +75,7 @@ const CampaignPublishActions = ({
     ...(!instagramConnected ? [{ code: "instagram_not_connected", message: "Instagram must be connected before publishing." }] : []),
   ];
   const canPublish = run.review_status === "approved"
+    && !run.archived_at
     && ["ready", "failed", "scheduled", "draft"].includes(run.publish_status || "")
     && run.publish_readiness?.can_publish === true
     && publishBlockers.length === 0;
@@ -61,13 +83,14 @@ const CampaignPublishActions = ({
   const minimumScheduleValue = new Date(Date.now() + (5 * 60 * 1000)).toISOString().slice(0, 16);
   const publishFailed = run.publish_status === "failed";
   const publishStatusLabel = (run.publish_status || "not_ready").replace(/_/g, " ");
+  const nextActionLabel = getNextActionLabel(run);
 
   return (
     <div className="rounded-[28px] border border-border bg-background p-5 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Actions</p>
-          <p className="mt-1 text-sm text-muted-foreground">Run recovery steps, approve review, and trigger Instagram publish from one rail.</p>
+          <p className="mt-1 text-sm text-muted-foreground">{nextActionLabel}</p>
         </div>
         <div className="rounded-full border border-border bg-muted/30 px-3 py-1 text-xs font-medium capitalize text-muted-foreground">
           Publish: {publishStatusLabel}
@@ -169,7 +192,7 @@ const CampaignPublishActions = ({
           ) : null}
 
           <Button className="w-full rounded-2xl justify-center" onClick={onPostNow} disabled={actionLoading}>
-            <Rocket className="mr-2 h-4 w-4" /> Post now
+            <Rocket className="mr-2 h-4 w-4" /> Queue Instagram post
           </Button>
 
           <div className="grid gap-3 md:grid-cols-[1fr,auto]">
@@ -187,13 +210,13 @@ const CampaignPublishActions = ({
         </div>
       )}
 
-      {!canPublish && run.status !== "waiting_review" && (
+      {!canPublish && run.status !== "waiting_review" && !run.archived_at && (
         <div className="mt-5 rounded-2xl border border-dashed border-border/70 bg-muted/20 p-4 text-sm text-muted-foreground">
           <div className="flex items-center gap-2 text-foreground">
             <ShieldCheck className="h-4 w-4" />
-            <p className="font-medium">Publishing is blocked until readiness passes</p>
+            <p className="font-medium">{nextActionLabel}</p>
           </div>
-          <p className="mt-1">Fix the blocking messages above, then refresh this campaign before posting or scheduling.</p>
+          <p className="mt-1">The page updates automatically. Admin action is needed only when a blocker is listed above.</p>
         </div>
       )}
     </div>

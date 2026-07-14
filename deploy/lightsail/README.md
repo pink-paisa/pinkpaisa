@@ -4,6 +4,7 @@ This project is easiest to deploy on a single Ubuntu Lightsail instance with:
 
 - `frontend-next/` run as a Next.js server on port `3000`
 - `server/server.js` run by PM2 on port `5001`
+- `server/workers/marketingWorker.js` run as a separate PM2 process
 - Nginx proxying `/` to Next.js and `/api` + `/uploads` to Express
 
 For Instagram publishing to work, use a real domain with HTTPS. Do not keep `localhost` or temporary tunnel URLs in production env files.
@@ -53,6 +54,8 @@ Important:
 - `PUBLIC_MEDIA_BASE_URL` should usually match `SERVER_URL`
 - `FRONTEND_URL` must be your public frontend URL
 - `INSTAGRAM_REDIRECT_URI` must match Meta exactly
+- keep `MARKETING_WORKER_IN_API=false` and `MARKETING_SCHEDULER_IN_API=false` in production
+- keep `AMAZON_CREATORS_API_ENABLED=false` until Pink Paisa receives Creators API access
 - rotate any secrets that were exposed during local testing
 
 ## 4. Frontend env
@@ -79,11 +82,19 @@ npm run build
 npm prune --omit=dev
 ```
 
+Preview and then apply the affiliate-only missing-price migration. It never updates normal checkout products:
+
+```bash
+cd /home/ubuntu/pinkpaisa/server
+npm run migrate:affiliate-prices
+APPLY=true npm run migrate:affiliate-prices
+```
+
 ## 6. Start backend with PM2
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-pm2 start ecosystem.config.cjs
+pm2 startOrReload ecosystem.config.cjs --update-env
 pm2 save
 pm2 startup
 ```
@@ -154,9 +165,11 @@ Check public media:
 
 If the image opens publicly over HTTPS, Instagram publishing can fetch it.
 
+Campaign assets are stored on the Lightsail disk under `server/uploads/generated/campaigns`. Releases must preserve `server/uploads`; the deployment package intentionally excludes that directory from replacement.
+
 ## 11. Backups
 
-At minimum, enable automatic Lightsail instance snapshots.
+The no-object-storage baseline keeps compressed upload and MongoDB backups on the Lightsail disk. This avoids a separate storage service, but it does not protect against complete instance or disk loss. Lightsail snapshots are optional when the budget permits and are the recommended off-instance recovery layer.
 
 For app-level backups, set these env values in `/home/ubuntu/pinkpaisa/server/.env`:
 
@@ -165,6 +178,8 @@ BACKUP_DIR=/home/ubuntu/pinkpaisa-backups
 BACKUP_RETENTION_DAYS=14
 BACKUP_SCRIPT_PATH=/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh
 ```
+
+The upload backup includes generated campaign assets. Because storage is local to the instance, keep the backup cron enabled and retain Lightsail snapshots.
 
 Then run:
 

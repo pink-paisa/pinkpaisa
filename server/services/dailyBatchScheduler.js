@@ -1,3 +1,5 @@
+const crypto = require("crypto");
+const os = require("os");
 const {
   getCampaignSettings,
   processDueScheduledPublishes,
@@ -8,6 +10,7 @@ const Product = require("../models/Product");
 const { checkAffiliateProductLink, persistAffiliateLinkCheck } = require("./affiliateLinkChecker");
 const { runDueCreatorsApiRefresh } = require("./amazonCreatorsApiService");
 const logger = require("../utils/logger");
+const SchedulerLease = require("../models/SchedulerLease");
 
 const CHECK_INTERVAL_MS = Math.max(parseInt(process.env.MARKETING_SCHEDULER_POLL_MS || "30000", 10), 10000);
 const PAYOUT_READINESS_SWEEP_INTERVAL_MS = Math.max(parseInt(process.env.PAYOUT_READINESS_SWEEP_MS || `${30 * 60 * 1000}`, 10), 5 * 60 * 1000);
@@ -21,6 +24,36 @@ let lastTriggeredBatchKey = null;
 let lastPayoutSweepBucket = null;
 let lastAffiliateLinkSweepKey = null;
 let lastCreatorsApiRefreshBucket = null;
+const schedulerOwner = `${os.hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
+const SCHEDULER_LEASE_MS = Math.max(CHECK_INTERVAL_MS * 3, 60000);
+
+async function acquireSchedulerLease(now = new Date()) {
+  try {
+    const lease = await SchedulerLease.findOneAndUpdate(
+      {
+        lease_key: "pinkpaisa-daily-scheduler",
+        $or: [
+          { lease_owner: schedulerOwner },
+          { lease_expires_at: { $lte: now } },
+          { lease_expires_at: { $exists: false } },
+        ],
+      },
+      {
+        $set: {
+          lease_owner: schedulerOwner,
+          lease_expires_at: new Date(now.getTime() + SCHEDULER_LEASE_MS),
+          heartbeat_at: now,
+        },
+        $setOnInsert: { lease_key: "pinkpaisa-daily-scheduler" },
+      },
+      { upsert: true, new: true }
+    );
+    return lease?.lease_owner === schedulerOwner;
+  } catch (error) {
+    if (error?.code === 11000) return false;
+    throw error;
+  }
+}
 
 function getIstParts(date = new Date()) {
   const formatter = new Intl.DateTimeFormat("en-CA", {
@@ -99,6 +132,7 @@ async function runAffiliateLinkSweep({ now = new Date(), limit = AFFILIATE_LINK_
 
 async function tickScheduler() {
   const now = new Date();
+  if (!await acquireSchedulerLease(now)) return;
   const batchKey = buildBatchKey(now);
   if (await shouldRunDailyBatch(now) && lastTriggeredBatchKey !== batchKey) {
     lastTriggeredBatchKey = batchKey;
@@ -152,6 +186,7 @@ module.exports = {
   buildBatchKey,
   getIstParts,
   runAffiliateLinkSweep,
+  acquireSchedulerLease,
   shouldRunAffiliateLinkSweep,
   startDailyBatchScheduler,
 };

@@ -168,3 +168,29 @@
 body {
   top: 0 !important;
 }
+
+.campaign-post-lightbox .yarl__container {
+  background-color: rgba(12, 12, 16, 0.97);
+}
+
+.campaign-post-lightbox .yarl__slide_image {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+
+.campaign-post-lightbox .yarl__button {
+  color: #ffffff;
+  filter: none;
+}
+
+.campaign-post-lightbox .yarl__slide_title_container,
+.campaign-post-lightbox .yarl__slide_description_container {
+  background-color: rgba(12, 12, 16, 0.86);
+}
+
+.campaign-post-lightbox .yarl__slide_title,
+.campaign-post-lightbox .yarl__slide_description {
+  letter-spacing: 0;
+  text-align: center;
+}

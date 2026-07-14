@@ -1,7 +1,12 @@
+const crypto = require("crypto");
+const os = require("os");
 const AgentTask = require("../models/AgentTask");
 const DailyBatchRun = require("../models/DailyBatchRun");
 const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
+const MarketingAsset = require("../models/MarketingAsset");
+const MarketingPublishAttempt = require("../models/MarketingPublishAttempt");
+const MarketingWorkerHeartbeat = require("../models/MarketingWorkerHeartbeat");
 const Product = require("../models/Product");
 const Vendor = require("../models/Vendor");
 const VendorProduct = require("../models/VendorProduct");
@@ -20,22 +25,64 @@ const {
 } = require("./marketingAgents");
 const { validateAmazonAffiliateUrl } = require("./amazonAffiliateCompliance");
 const { isPublicMediaUrl, publishInstagramDraft } = require("./instagramPublishService");
+const { deleteCampaignAsset } = require("./campaignAssetStorage");
 
 const AUTO_SEQUENCE = ["intake", "strategy", "creative", "caption", "compliance", "tracking"];
 const ALL_SEQUENCE = [...AUTO_SEQUENCE, "publish"];
 const WORKER_INTERVAL_MS = Math.max(parseInt(process.env.MARKETING_AGENT_POLL_MS || "5000", 10), 1000);
 const STALE_TASK_THRESHOLD_MS = Math.max(parseInt(process.env.MARKETING_STALE_TASK_MS || String(30 * 60 * 1000), 10), 60 * 1000);
+const TASK_LEASE_MS = Math.max(parseInt(process.env.MARKETING_TASK_LEASE_MS || String(5 * 60 * 1000), 10), 60 * 1000);
+const MAX_TASK_ATTEMPTS = Math.max(parseInt(process.env.MARKETING_MAX_TASK_ATTEMPTS || "3", 10), 1);
 const MIN_SCHEDULE_DELAY_MS = Math.max(parseInt(process.env.MARKETING_MIN_SCHEDULE_DELAY_MS || String(5 * 60 * 1000), 10), 60 * 1000);
 const CAMPAIGN_OPEN_STATUSES = ["queued", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing"];
 const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = [
   "title slug status is_visible category subcategory category_id subcategory_id featured_image images",
-  "is_affiliate affiliate_url affiliate_external_id affiliate_source_platform brand_name source_type",
+  "is_affiliate affiliate_url affiliate_external_id affiliate_source_platform affiliate_source_mode brand_name source_type",
   "affiliate_asin affiliate_marketplace affiliate_tag affiliate_compliance_status affiliate_compliance_flags",
   "affiliate_link_check_status affiliate_link_failure_reason",
+  "price price_status affiliate_data_source affiliate_data_expires_at archived_at",
+  "affiliate_campaign_asset_url affiliate_campaign_usage_rights affiliate_image_provenance",
 ].join(" ");
 
 let workerStarted = false;
-let processing = false;
+const laneProcessing = new Set();
+const workerId = `${os.hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
+const TASK_LANES = {
+  fast: { agents: ["intake", "strategy", "caption", "compliance", "tracking"], concurrency: Math.max(parseInt(process.env.MARKETING_FAST_CONCURRENCY || "3", 10), 1) },
+  creative: { agents: ["creative"], concurrency: Math.max(parseInt(process.env.MARKETING_CREATIVE_CONCURRENCY || "1", 10), 1) },
+  publish: { agents: ["publish", "carousel"], concurrency: Math.max(parseInt(process.env.MARKETING_PUBLISH_CONCURRENCY || "1", 10), 1) },
+};
+
+function getQueueLane(agentName) {
+  if (agentName === "creative") return "creative";
+  if (agentName === "publish" || agentName === "carousel") return "publish";
+  return "fast";
+}
+
+function getTaskPriority(agentName) {
+  if (["tracking", "compliance"].includes(agentName)) return 90;
+  if (agentName === "publish" || agentName === "carousel") return 100;
+  if (agentName === "creative") return 30;
+  return 50;
+}
+
+function getActiveLeaseFilter(task) {
+  return {
+    _id: task._id,
+    status: "running",
+    lease_owner: workerId,
+    attempt_count: Number(task.attempt_count || 0),
+  };
+}
+
+function ownsActiveLease(task, latestTask) {
+  return Boolean(
+    latestTask
+    && latestTask.status === "running"
+    && String(latestTask.lease_owner || "") === workerId
+    && Number(latestTask.attempt_count || 0) === Number(task.attempt_count || 0)
+  );
+}
 
 function describeExecutionError(error) {
   if (!error) return "Agent execution failed";
@@ -119,6 +166,7 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
   productWasFetched = false,
   requireApproval = true,
   allowPublishingState = false,
+  allowPublishedState = false,
 } = {}) {
   const blockers = [];
   const warnings = [];
@@ -127,7 +175,10 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
   const isAffiliate = isAffiliateCampaignRun(run, product);
   const assetUrls = getRunPublishAssetUrls(run);
 
-  if (run.instagram_media_id || run.publish_status === "published" || run.status === "published") {
+  if (run.archived_at || run.status === "archived") {
+    blockers.push(readinessIssue("campaign_archived", "This campaign is archived. Restore it before continuing."));
+  }
+  if (!allowPublishedState && (run.instagram_media_id || run.publish_status === "published" || run.status === "published")) {
     blockers.push(readinessIssue("already_published", "This campaign run is already published."));
   }
   if (!allowPublishingState && (run.publish_status === "publishing" || run.status === "publishing")) {
@@ -135,6 +186,9 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
   }
   if (requireApproval && run.review_status !== "approved") {
     blockers.push(readinessIssue("review_not_approved", "Admin review approval is required before Instagram publishing."));
+  }
+  if (!run.tracking_json?.publish_payload) {
+    blockers.push(readinessIssue("pipeline_incomplete", "Campaign generation and tracking must finish before review or publishing."));
   }
   if (!assetUrls.length) {
     blockers.push(readinessIssue("missing_assets", "No publish-ready Instagram creative image is available."));
@@ -150,6 +204,9 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
   }
 
   if (isProductSnapshot) {
+    if (product.archived_at) {
+      blockers.push(readinessIssue("product_archived", "The source product is archived."));
+    }
     if (product.status !== "active") {
       blockers.push(readinessIssue("product_inactive", "The source product is not active."));
     }
@@ -162,6 +219,9 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
   }
 
   if (isAffiliate) {
+    if (String(process.env.AMAZON_ASSOCIATE_STATUS || "approved").toLowerCase() !== "approved") {
+      blockers.push(readinessIssue("associate_account_unapproved", "Amazon Associate approval must be confirmed before publishing affiliate campaigns."));
+    }
     if (!isProductSnapshot && productWasFetched) {
       blockers.push(readinessIssue("affiliate_product_missing", "Affiliate source product could not be revalidated."));
     }
@@ -196,6 +256,9 @@ function buildRunPublishReadinessSnapshot(run = {}, product = null, {
         blockers.push(readinessIssue("affiliate_link_failed", product.affiliate_link_failure_reason || "Affiliate product link check failed."));
       } else if (linkStatus === "unchecked") {
         warnings.push(readinessIssue("affiliate_link_unchecked", "Affiliate link has not been checked recently."));
+      }
+      if (!["admin_confirmed", "owned", "licensed", "api_permitted"].includes(String(product.affiliate_campaign_usage_rights || "unknown"))) {
+        warnings.push(readinessIssue("generic_affiliate_creative", "The product image is not rights-approved; campaign generation will use category-level artwork."));
       }
     }
 
@@ -233,13 +296,18 @@ function assertPublishReadiness(readiness, fallback) {
   throw new Error(formatReadinessBlockers(readiness, fallback));
 }
 
-function buildCarouselReadinessBlockers(runs = [], productMap = new Map()) {
+function buildCarouselReadinessBlockers(runs = [], productMap = new Map(), {
+  allowPublishingState = false,
+  allowPublishedState = false,
+} = {}) {
   return runs.flatMap((run) => {
     const productId = getObjectIdString(run.public_product_id);
     const product = productId ? productMap.get(productId) || null : null;
     const readiness = buildRunPublishReadinessSnapshot(run, product, {
       productWasFetched: Boolean(productId),
       requireApproval: true,
+      allowPublishingState,
+      allowPublishedState,
     });
     return readiness.blockers.map((blocker) => ({
       run_id: String(run._id),
@@ -254,6 +322,7 @@ function validateAffiliateProductForCampaign(product = {}) {
   if ((product.source_type || "admin") !== "admin") throw new Error("Only admin affiliate products can use this campaign queue");
   if (!product.is_affiliate) throw new Error("Product must be an affiliate product before campaign enqueue");
   if (!product.affiliate_url) throw new Error("Affiliate product must have an affiliate URL before campaign enqueue");
+  if (product.archived_at) throw new Error("Archived affiliate products cannot create campaigns");
   if (product.status !== "active" || product.is_visible !== true) throw new Error("Only active visible affiliate products can create campaigns");
   if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) {
     throw new Error("Affiliate product must be assigned to a category before campaign enqueue");
@@ -265,12 +334,13 @@ function validateAffiliateProductForCampaign(product = {}) {
     publish_status: "ready",
     asset_urls: ["https://pinkpaisa.in/placeholder-campaign-readiness.jpg"],
   }, product, { productWasFetched: true, requireApproval: true });
-  const blockers = readiness.blockers.filter((blocker) => !["missing_assets", "non_https_media_url"].includes(blocker.code));
+  const blockers = readiness.blockers.filter((blocker) => !["missing_assets", "non_https_media_url", "pipeline_incomplete"].includes(blocker.code));
   if (blockers.length) throw new Error(blockers.map((blocker) => blocker.message).join(" "));
   return true;
 }
 
 function getSequence(agentName) {
+  if (agentName === "carousel") return ALL_SEQUENCE.length;
   return ALL_SEQUENCE.indexOf(agentName) + 1;
 }
 
@@ -308,6 +378,28 @@ function buildStaleTaskMessage(task, recoveredAt = new Date(), customMessage = "
   return `${task.agent_name} task was reset after ${elapsedMinutes} minute(s) without a heartbeat.`;
 }
 
+function buildStaleTaskRecoveryFilter(task, {
+  force = false,
+  now = new Date(),
+  olderThanMs = STALE_TASK_THRESHOLD_MS,
+} = {}) {
+  const filter = {
+    _id: task._id,
+    status: "running",
+    attempt_count: Number(task.attempt_count || 0),
+  };
+  if (force) return filter;
+  if (task.lease_expires_at) {
+    filter.lease_expires_at = { $lte: now };
+    return filter;
+  }
+  filter.$and = [
+    { $or: [{ lease_expires_at: null }, { lease_expires_at: { $exists: false } }] },
+    { started_at: { $lte: new Date(now.getTime() - olderThanMs) } },
+  ];
+  return filter;
+}
+
 function serialiseTask(task) {
   return {
     id: String(task._id),
@@ -316,6 +408,13 @@ function serialiseTask(task) {
     agent_name: task.agent_name,
     sequence: task.sequence,
     status: task.status,
+    queue_lane: task.queue_lane || getQueueLane(task.agent_name),
+    priority: Number(task.priority ?? getTaskPriority(task.agent_name)),
+    available_at: task.available_at || null,
+    lease_owner: task.lease_owner || null,
+    lease_expires_at: task.lease_expires_at || null,
+    heartbeat_at: task.heartbeat_at || null,
+    cancellation_requested: Boolean(task.cancellation_requested),
     input_json: task.input_json || null,
     output_json: task.output_json || null,
     error_message: task.error_message || null,
@@ -341,6 +440,10 @@ function serialiseRun(run, taskCounts = null) {
   const brief = run.brief_json || {};
   const briefAffiliate = brief.affiliate || {};
   const isAffiliate = Boolean(publicProduct.is_affiliate || brief.is_affiliate || run.source_event === "affiliate_product.published");
+  const publishReadiness = buildRunPublishReadinessSnapshot(run, publicProduct, {
+    productWasFetched: isPopulatedProductSnapshot(publicProduct),
+    requireApproval: true,
+  });
 
   return {
     id: String(run._id),
@@ -359,6 +462,7 @@ function serialiseRun(run, taskCounts = null) {
     affiliate_url: publicProduct.affiliate_url || brief.affiliate_url || briefAffiliate.url || null,
     affiliate_external_id: publicProduct.affiliate_external_id || brief.affiliate_external_id || briefAffiliate.external_id || null,
     affiliate_source_platform: publicProduct.affiliate_source_platform || brief.affiliate_source_platform || briefAffiliate.source_platform || null,
+    affiliate_source_mode: publicProduct.affiliate_source_mode || brief.affiliate_source_mode || briefAffiliate.source_mode || null,
     status: run.status,
     current_stage: run.current_stage,
     review_stage: run.review_stage || null,
@@ -384,14 +488,27 @@ function serialiseRun(run, taskCounts = null) {
     instagram_creation_id: run.instagram_creation_id || null,
     instagram_media_id: run.instagram_media_id || null,
     instagram_permalink: run.instagram_permalink || null,
+    archived_at: run.archived_at || null,
+    archived_by: run.archived_by?.toString?.() || run.archived_by || null,
+    archive_reason: run.archive_reason || null,
     created_at: run.created_at || null,
     updated_at: run.updated_at || null,
-    publish_readiness: buildRunPublishReadinessSnapshot(run, publicProduct, {
-      productWasFetched: isPopulatedProductSnapshot(publicProduct),
-      requireApproval: true,
-    }),
+    publish_readiness: publishReadiness,
+    next_action: getRunNextAction(run, publishReadiness),
     task_counts: taskCounts || undefined,
   };
+}
+
+function getRunNextAction(run = {}, readiness = null) {
+  if (run.archived_at || run.status === "archived") return "restore_campaign";
+  if (run.status === "published" || run.publish_status === "published") return "open_instagram";
+  if (run.status === "publishing" || run.publish_status === "publishing") return "wait_for_publish";
+  if (["queued", "running", "batch_running"].includes(run.status)) return `wait_for_${run.current_stage || "worker"}`;
+  if (run.status === "waiting_review") return "review_draft";
+  if (run.review_status === "approved" && readiness?.can_publish) return "publish_or_schedule";
+  if (run.status === "failed" || run.publish_status === "failed") return "retry_failed_task";
+  if (readiness?.blockers?.length) return "resolve_blockers";
+  return "wait_for_worker";
 }
 
 function serialiseBatchRun(batch) {
@@ -548,6 +665,7 @@ function buildTaskInput(run, agentName) {
   if (agentName === "compliance") return { brief_json: run.brief_json || null, caption_json: run.caption_json || null, creative_json: run.creative_json || null };
   if (agentName === "tracking") return { brief_json: run.brief_json || null, strategy_json: run.strategy_json || null, caption_json: run.caption_json || null, compliance_json: run.compliance_json || null, creative_json: run.creative_json || null };
   if (agentName === "publish") return { tracking_json: run.tracking_json || null, creative_json: run.creative_json || null, caption_json: run.caption_json || null };
+  if (agentName === "carousel") return { grouped_run_ids: [], actor_admin_id: null };
   return {};
 }
 
@@ -596,55 +714,8 @@ function buildBulkCarouselCaption(runs) {
   return ensureAffiliateInstagramDisclosure(caption, hasAffiliateRun);
 }
 
-async function markPublishTaskRunning(run, startedAt) {
-  await AgentTask.findOneAndUpdate(
-    { campaign_run_id: run._id, agent_name: "publish" },
-    {
-      $set: {
-        campaign_id: run.campaign_id,
-        campaign_run_id: run._id,
-        agent_name: "publish",
-        sequence: getSequence("publish"),
-        status: "running",
-        input_json: buildTaskInput(run, "publish"),
-        output_json: null,
-        error_message: null,
-        started_at: startedAt,
-        finished_at: null,
-      },
-      $inc: { attempt_count: 1 },
-    },
-    { new: true, upsert: true }
-  );
-}
-
-async function markPublishTaskOutcome(run, {
-  status,
-  output = null,
-  errorMessage = null,
-  finishedAt = new Date(),
-}) {
-  await AgentTask.findOneAndUpdate(
-    { campaign_run_id: run._id, agent_name: "publish" },
-    {
-      $set: {
-        campaign_id: run.campaign_id,
-        campaign_run_id: run._id,
-        agent_name: "publish",
-        sequence: getSequence("publish"),
-        status,
-        ...(status === "completed"
-          ? { output_json: output, error_message: null }
-          : { error_message: errorMessage || "Instagram publishing failed" }),
-        finished_at: finishedAt,
-      },
-      $setOnInsert: { attempt_count: 1 },
-    },
-    { new: true, upsert: true }
-  );
-}
-
 async function upsertTask(run, agentName, status = "queued") {
+  const now = new Date();
   const update = {
     $set: {
       campaign_id: run.campaign_id,
@@ -652,9 +723,17 @@ async function upsertTask(run, agentName, status = "queued") {
       agent_name: agentName,
       sequence: getSequence(agentName),
       status,
+      queue_lane: getQueueLane(agentName),
+      priority: getTaskPriority(agentName),
+      available_at: now,
+      idempotency_key: `${agentName}:${String(run._id)}`,
+      lease_owner: null,
+      lease_expires_at: null,
+      heartbeat_at: null,
+      cancellation_requested: false,
       input_json: buildTaskInput(run, agentName),
       error_message: null,
-      started_at: status === "running" ? new Date() : null,
+      started_at: status === "running" ? now : null,
       finished_at: null,
       ...(status === "queued" ? { output_json: null } : {}),
     },
@@ -676,6 +755,7 @@ function clearPublishState() {
     publish_attempted_at: null,
     published_at: null,
     instagram_creation_id: null,
+    instagram_child_creation_ids: [],
     instagram_media_id: null,
     instagram_permalink: null,
     published_urls: [],
@@ -712,6 +792,7 @@ function assignOutputToRunDoc(run, agentName, output) {
     run.publish_attempted_at = new Date();
     run.published_at = new Date();
     run.instagram_creation_id = output.creation_id || null;
+    run.instagram_child_creation_ids = output.child_creation_ids || [];
     run.instagram_media_id = output.media_id || null;
     run.instagram_permalink = output.permalink || null;
     run.published_urls = run.asset_urls || [];
@@ -750,12 +831,19 @@ async function applyOutputToRun(run, agentName, output) {
     updates.publish_attempted_at = new Date();
     updates.published_at = new Date();
     updates.instagram_creation_id = output.creation_id || null;
+    updates.instagram_child_creation_ids = output.child_creation_ids || [];
     updates.instagram_media_id = output.media_id || null;
     updates.instagram_permalink = output.permalink || null;
     updates.published_urls = run.asset_urls || [];
   }
+  const updatedRun = await MarketingCampaignRun.findOneAndUpdate(
+    { _id: run._id, archived_at: null, status: { $ne: "archived" } },
+    { $set: updates },
+    { new: true }
+  );
+  if (!updatedRun) return null;
   assignOutputToRunDoc(run, agentName, output);
-  await MarketingCampaignRun.findByIdAndUpdate(run._id, { $set: updates });
+  return updatedRun;
 }
 
 async function runAgentForStage(run, agentName) {
@@ -824,16 +912,27 @@ async function refreshBatchRun(batchRunId) {
 }
 
 async function markRunFailed(runId, agentName, errorMessage) {
+  const isPublishAgent = agentName === "publish" || agentName === "carousel";
   const updates = {
     status: "failed",
     current_stage: agentName,
     last_error: errorMessage,
     review_stage: null,
-    publish_status: agentName === "publish" ? "failed" : "not_ready",
+    publish_status: isPublishAgent ? "failed" : "not_ready",
   };
-  if (agentName === "publish") updates.publish_attempted_at = new Date();
+  if (isPublishAgent) updates.publish_attempted_at = new Date();
 
-  const run = await MarketingCampaignRun.findByIdAndUpdate(runId, { $set: updates }, { new: true });
+  const run = await MarketingCampaignRun.findOneAndUpdate(
+    {
+      _id: runId,
+      archived_at: null,
+      status: { $nin: ["archived", "published"] },
+      publish_status: { $ne: "published" },
+      instagram_media_id: null,
+    },
+    { $set: updates },
+    { new: true }
+  );
   await refreshBatchRun(run?.batch_run_id);
 }
 
@@ -843,10 +942,19 @@ async function recoverStaleRunningTasks({
   olderThanMs = STALE_TASK_THRESHOLD_MS,
   errorMessage = "",
 } = {}) {
+  const now = new Date();
   const query = { status: "running" };
   if (campaignRunId) query.campaign_run_id = campaignRunId;
   if (!force) {
-    query.started_at = { $lte: new Date(Date.now() - olderThanMs) };
+    query.$or = [
+      { lease_expires_at: { $lte: now } },
+      {
+        $and: [
+          { $or: [{ lease_expires_at: null }, { lease_expires_at: { $exists: false } }] },
+          { started_at: { $lte: new Date(Date.now() - olderThanMs) } },
+        ],
+      },
+    ];
   }
 
   const staleTasks = await AgentTask.find(query).sort({ started_at: 1, created_at: 1 });
@@ -856,22 +964,45 @@ async function recoverStaleRunningTasks({
 
   const recoveredAt = new Date();
   const recoveredRunIds = new Set();
+  let recoveredCount = 0;
 
   for (const task of staleTasks) {
     const message = buildStaleTaskMessage(task, recoveredAt, errorMessage);
-    await AgentTask.findByIdAndUpdate(task._id, {
+    const run = await MarketingCampaignRun.findById(task.campaign_run_id);
+    const shouldCancel = Boolean(run?.archived_at || run?.status === "archived" || task.cancellation_requested);
+    const attemptsExhausted = Number(task.attempt_count || 0) >= MAX_TASK_ATTEMPTS && !force;
+    const nextStatus = shouldCancel ? "cancelled" : attemptsExhausted ? "failed" : "queued";
+    const recoveredTask = await AgentTask.findOneAndUpdate(buildStaleTaskRecoveryFilter(task, {
+      force,
+      now: recoveredAt,
+      olderThanMs,
+    }), {
       $set: {
-        status: "failed",
+        status: nextStatus,
         error_message: message,
-        finished_at: recoveredAt,
+        finished_at: nextStatus === "queued" ? null : recoveredAt,
+        available_at: recoveredAt,
+        lease_owner: null,
+        lease_expires_at: null,
+        heartbeat_at: null,
+        cancellation_requested: false,
       },
-    });
-    await markRunFailed(task.campaign_run_id, task.agent_name, message);
+    }, { new: true });
+    if (!recoveredTask) continue;
+    recoveredCount += 1;
+    if (attemptsExhausted) {
+      await markRunFailed(task.campaign_run_id, task.agent_name, message);
+    } else if (!shouldCancel && run) {
+      run.status = task.agent_name === "publish" ? "publishing" : "batch_running";
+      run.current_stage = task.agent_name;
+      run.last_error = null;
+      await run.save();
+    }
     recoveredRunIds.add(String(task.campaign_run_id));
   }
 
   return {
-    recovered_count: staleTasks.length,
+    recovered_count: recoveredCount,
     campaign_run_ids: Array.from(recoveredRunIds),
   };
 }
@@ -879,12 +1010,18 @@ async function recoverStaleRunningTasks({
 async function advanceRun(run, agentName, output) {
   if (agentName === "publish") return;
 
+  const transitionFilter = {
+    _id: run._id,
+    archived_at: null,
+    status: { $nin: ["archived", "published"] },
+    current_stage: agentName,
+  };
   const nextAgent = getNextAutoAgent(agentName);
   if (!nextAgent) {
     const campaignSettings = await getCampaignSettings();
     const requiresManualReview = isAffiliateCampaignRun(run);
     if (campaignSettings.campaign_mode === "automatic" && !requiresManualReview) {
-      const autoApproved = await MarketingCampaignRun.findByIdAndUpdate(run._id, {
+      const autoApproved = await MarketingCampaignRun.findOneAndUpdate(transitionFilter, {
         $set: {
           status: "approved_for_publish",
           current_stage: "approved_for_publish",
@@ -895,6 +1032,7 @@ async function advanceRun(run, agentName, output) {
           last_error: null,
         },
       }, { new: true });
+      if (!autoApproved) return;
 
       void publishCampaignRunNow(autoApproved._id).catch((error) => {
         logger.error({ campaignId: autoApproved.campaign_id, err: error }, "automatic Instagram publish failed");
@@ -902,7 +1040,7 @@ async function advanceRun(run, agentName, output) {
       return;
     }
 
-    const updated = await MarketingCampaignRun.findByIdAndUpdate(run._id, {
+    const updated = await MarketingCampaignRun.findOneAndUpdate(transitionFilter, {
       $set: {
         status: "waiting_review",
         current_stage: "ready_for_review",
@@ -915,11 +1053,12 @@ async function advanceRun(run, agentName, output) {
         last_error: null,
       },
     }, { new: true });
+    if (!updated) return;
     await refreshBatchRun(updated.batch_run_id);
     return;
   }
 
-  const freshRun = await MarketingCampaignRun.findByIdAndUpdate(run._id, {
+  const freshRun = await MarketingCampaignRun.findOneAndUpdate(transitionFilter, {
     $set: {
       status: "batch_running",
       current_stage: nextAgent,
@@ -929,13 +1068,244 @@ async function advanceRun(run, agentName, output) {
       last_error: null,
     },
   }, { new: true });
+  if (!freshRun) return;
   await upsertTask(freshRun, nextAgent, "queued");
+}
+
+function normalizeRunIdList(values = []) {
+  return Array.from(new Set((Array.isArray(values) ? values : [])
+    .map((value) => getObjectIdString(value))
+    .filter(Boolean)))
+    .sort();
+}
+
+function sameRunIdSet(left = [], right = []) {
+  const normalizedLeft = normalizeRunIdList(left);
+  const normalizedRight = normalizeRunIdList(right);
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
+function buildPublishPayloadIdentity(publishPayload = {}) {
+  const contentType = publishPayload.content_type || "single_image";
+  const assetUrls = Array.isArray(publishPayload.asset_urls) ? publishPayload.asset_urls.map(String) : [];
+  const captionHash = crypto.createHash("sha256").update(String(publishPayload.caption || "")).digest("hex");
+  const payloadFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+    content_type: contentType,
+    asset_urls: assetUrls,
+    caption_hash: captionHash,
+  })).digest("hex");
+  return { contentType, assetUrls, captionHash, payloadFingerprint };
+}
+
+function hasDurablePublishedAttempt(attempt) {
+  return Boolean(attempt?.media_id);
+}
+
+function isUnresolvedPublishAttempt(attempt) {
+  return Boolean(
+    attempt
+    && !attempt.media_id
+    && ["container_created", "publishing", "uncertain"].includes(String(attempt.status || ""))
+  );
+}
+
+function buildPublishResultFromAttempt(attempt, publishPayload = {}) {
+  return {
+    content_type: attempt?.content_type || publishPayload.content_type || "single_image",
+    creation_id: attempt?.creation_id || null,
+    child_creation_ids: attempt?.child_creation_ids || [],
+    media_id: attempt?.media_id || null,
+    permalink: attempt?.permalink || null,
+    publish_payload: publishPayload,
+    resumed: true,
+    skipped_duplicate_publish: true,
+  };
+}
+
+function mergeAttemptWithRunPublishState(attempt, run = {}) {
+  if (hasDurablePublishedAttempt(attempt) || !run.instagram_media_id) return attempt;
+  const attemptSnapshot = attempt?.toObject ? attempt.toObject() : { ...(attempt || {}) };
+  return {
+    ...attemptSnapshot,
+    status: "published",
+    creation_id: attemptSnapshot.creation_id || run.instagram_creation_id || null,
+    child_creation_ids: attemptSnapshot.child_creation_ids?.length
+      ? attemptSnapshot.child_creation_ids
+      : run.instagram_child_creation_ids || [],
+    media_id: run.instagram_media_id,
+    permalink: attemptSnapshot.permalink || run.instagram_permalink || null,
+    finished_at: attemptSnapshot.finished_at || run.published_at || null,
+  };
+}
+
+async function getOrCreatePublishAttempt(run, publishPayload, { groupedRunIds = [] } = {}) {
+  const { contentType, assetUrls, captionHash, payloadFingerprint } = buildPublishPayloadIdentity(publishPayload);
+  const normalizedGroupRunIds = normalizeRunIdList(groupedRunIds);
+  let attempt = await MarketingPublishAttempt.findOne({ campaign_run_id: run._id });
+
+  if (!attempt) {
+    attempt = new MarketingPublishAttempt({
+        campaign_run_id: run._id,
+        campaign_id: run.campaign_id,
+        idempotency_key: `instagram:${String(run._id)}:${payloadFingerprint}`,
+        status: "queued",
+        content_type: contentType,
+        group_run_ids: normalizedGroupRunIds,
+        asset_urls: assetUrls,
+        caption_hash: captionHash,
+        payload_fingerprint: payloadFingerprint,
+        attempt_count: 0,
+    });
+  } else if (hasDurablePublishedAttempt(attempt)) {
+    if (attempt.payload_fingerprint && attempt.payload_fingerprint !== payloadFingerprint) {
+      throw new Error("Published Instagram attempt does not match the current campaign payload");
+    }
+    if (normalizedGroupRunIds.length && !sameRunIdSet(attempt.group_run_ids, normalizedGroupRunIds)) {
+      throw new Error("Published Instagram carousel attempt does not match the selected campaigns");
+    }
+    return attempt;
+  } else if (attempt.payload_fingerprint !== payloadFingerprint) {
+    attempt.idempotency_key = `instagram:${String(run._id)}:${payloadFingerprint}`;
+    attempt.status = "queued";
+    attempt.content_type = contentType;
+    attempt.group_run_ids = normalizedGroupRunIds;
+    attempt.asset_urls = assetUrls;
+    attempt.caption_hash = captionHash;
+    attempt.payload_fingerprint = payloadFingerprint;
+    attempt.creation_id = null;
+    attempt.child_creation_ids = [];
+    attempt.media_id = null;
+    attempt.permalink = null;
+    attempt.started_at = null;
+    attempt.finished_at = null;
+  } else {
+    attempt.status = attempt.creation_id ? "container_created" : "queued";
+    attempt.group_run_ids = normalizedGroupRunIds;
+  }
+
+  attempt.last_error = null;
+  attempt.attempt_count = Number(attempt.attempt_count || 0) + 1;
+  await attempt.save();
+  return attempt;
+}
+
+async function persistPublishProgress(run, attempt, progress = {}, { groupedRunIds = [] } = {}) {
+  const normalizedGroupRunIds = normalizeRunIdList(groupedRunIds);
+  const updates = {
+    status: progress.status || attempt.status,
+    creation_id: progress.creation_id || attempt.creation_id || null,
+    child_creation_ids: progress.child_creation_ids || attempt.child_creation_ids || [],
+    media_id: progress.media_id || attempt.media_id || null,
+    permalink: progress.permalink || attempt.permalink || null,
+    last_error: null,
+  };
+  if (["container_created", "publishing"].includes(updates.status)) updates.started_at = attempt.started_at || new Date();
+  if (updates.status === "published") updates.finished_at = new Date();
+  if (normalizedGroupRunIds.length) updates.group_run_ids = normalizedGroupRunIds;
+  Object.assign(attempt, updates);
+  await attempt.save();
+  const targetRunIds = normalizedGroupRunIds.length ? normalizedGroupRunIds : [run._id];
+  const runUpdates = {
+    instagram_creation_id: updates.creation_id,
+    instagram_child_creation_ids: updates.child_creation_ids,
+    ...(updates.media_id ? { instagram_media_id: updates.media_id } : {}),
+    ...(updates.permalink ? { instagram_permalink: updates.permalink } : {}),
+  };
+  if (updates.status === "published" && updates.media_id) {
+    Object.assign(runUpdates, {
+      status: "published",
+      current_stage: "published",
+      review_status: "approved",
+      review_stage: null,
+      publish_status: "published",
+      scheduled_for: null,
+      last_error: null,
+      published_at: updates.finished_at,
+    });
+  }
+  await MarketingCampaignRun.updateMany({ _id: { $in: targetRunIds } }, { $set: runUpdates });
+}
+
+async function reconcileDurablePublishedTask(task, run, errorMessage = "") {
+  const attempt = await MarketingPublishAttempt.findOne({ campaign_run_id: run._id });
+  const latestRun = await MarketingCampaignRun.findById(run._id);
+  const durableAttempt = mergeAttemptWithRunPublishState(attempt, latestRun || run);
+  if (!hasDurablePublishedAttempt(durableAttempt)) return false;
+
+  const publishPayload = task.output_json?.publish_payload
+    || run.tracking_json?.publish_payload
+    || {};
+  const output = buildPublishResultFromAttempt(durableAttempt, publishPayload);
+
+  try {
+    const appliedRun = latestRun?.archived_at || latestRun?.status === "archived"
+      ? latestRun
+      : await applyOutputToRun(latestRun || run, "publish", output);
+    if (attempt?._id) {
+      await MarketingPublishAttempt.updateOne(
+        { _id: attempt._id },
+        {
+          $set: {
+            status: "published",
+            creation_id: output.creation_id,
+            child_creation_ids: output.child_creation_ids,
+            media_id: output.media_id,
+            permalink: output.permalink,
+            last_error: null,
+            finished_at: durableAttempt.finished_at || new Date(),
+          },
+        }
+      );
+    }
+    await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
+      $set: {
+        status: "completed",
+        output_json: output,
+        error_message: null,
+        finished_at: new Date(),
+        lease_owner: null,
+        lease_expires_at: null,
+        heartbeat_at: new Date(),
+      },
+    });
+    await recordPublishEvent(appliedRun || latestRun || run, {
+      actionType: "publish",
+      status: "success",
+      publishResult: output,
+      metadata: {
+        task_id: String(task._id),
+        reconciled_after_error: true,
+        bookkeeping_error: errorMessage || null,
+      },
+    });
+    await refreshBatchRun((appliedRun || latestRun || run).batch_run_id);
+  } catch (reconcileError) {
+    logger.error({
+      err: reconcileError,
+      campaignId: run.campaign_id,
+      taskId: task._id,
+      instagramMediaId: durableAttempt.media_id,
+    }, "Instagram publish succeeded but local finalization must be retried");
+    await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
+      $set: {
+        status: "queued",
+        available_at: new Date(Date.now() + 5000),
+        error_message: "Instagram published successfully; retrying local finalization.",
+        finished_at: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        heartbeat_at: null,
+      },
+    }).catch(() => null);
+  }
+  return true;
 }
 
 async function executeTask(task) {
   const run = await MarketingCampaignRun.findById(task.campaign_run_id);
   if (!run) {
-    await AgentTask.findByIdAndUpdate(task._id, {
+    await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
       $set: {
         status: "failed",
         finished_at: new Date(),
@@ -945,14 +1315,29 @@ async function executeTask(task) {
     return;
   }
 
+  const freshTask = await AgentTask.findById(task._id).lean();
+  if (!ownsActiveLease(task, freshTask)) return;
+  if (run.archived_at || run.status === "archived" || freshTask?.cancellation_requested) {
+    await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
+      $set: {
+        status: "cancelled",
+        error_message: "Task cancelled because the campaign was archived.",
+        finished_at: new Date(),
+        lease_owner: null,
+        lease_expires_at: null,
+      },
+    });
+    return;
+  }
+
   try {
     await ensureRunInputs(run, task.agent_name);
 
-    let output = null;
-    if (["intake", "strategy", "creative", "caption", "compliance", "tracking"].includes(task.agent_name)) {
+    let output = task.output_json || null;
+    if (!output && ["intake", "strategy", "creative", "caption", "compliance", "tracking"].includes(task.agent_name)) {
       output = await runAgentForStage(run, task.agent_name);
     }
-    if (task.agent_name === "publish") {
+    if (!output && task.agent_name === "publish") {
       const publishPayload = await runPublishPreparationAgent(run);
       if (run.instagram_media_id || run.publish_status === "published" || run.status === "published") {
         output = {
@@ -965,59 +1350,169 @@ async function executeTask(task) {
       } else {
         const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: true, allowPublishingState: true });
         assertPublishReadiness(readiness, "Campaign is not ready for Instagram publishing");
-        const publishResult = await publishInstagramDraft({
-          contentType: publishPayload.content_type,
-          assetUrls: publishPayload.asset_urls,
-          caption: publishPayload.caption,
-        });
-        output = {
-          ...publishResult,
-          publish_payload: publishPayload,
-        };
+        const attempt = await getOrCreatePublishAttempt(run, publishPayload);
+        if (hasDurablePublishedAttempt(attempt)) {
+          output = buildPublishResultFromAttempt(attempt, publishPayload);
+        } else {
+          const publishResult = await publishInstagramDraft({
+            contentType: publishPayload.content_type,
+            assetUrls: publishPayload.asset_urls,
+            caption: publishPayload.caption,
+            resumeState: {
+              creation_id: attempt.creation_id || run.instagram_creation_id || null,
+              child_creation_ids: attempt.child_creation_ids || run.instagram_child_creation_ids || [],
+              media_id: attempt.media_id || run.instagram_media_id || null,
+              permalink: attempt.permalink || run.instagram_permalink || null,
+            },
+            onProgress: (progress) => persistPublishProgress(run, attempt, progress),
+          });
+          output = {
+            ...publishResult,
+            publish_payload: publishPayload,
+          };
+        }
       }
+    }
+    if (!output && task.agent_name === "carousel") {
+      output = await publishCampaignRunsAsCarousel(task.input_json?.grouped_run_ids || [], {
+        actorAdminId: task.input_json?.actor_admin_id || null,
+        executeNow: true,
+      });
     }
     if (!output) throw new Error(`No handler configured for agent ${task.agent_name}`);
 
-    await AgentTask.findByIdAndUpdate(task._id, {
-      $set: {
-        status: "completed",
-        output_json: output,
-        finished_at: new Date(),
-        error_message: null,
-      },
-    });
+    const [latestTaskState, latestRunState] = await Promise.all([
+      AgentTask.findById(task._id).select("cancellation_requested status lease_owner attempt_count").lean(),
+      MarketingCampaignRun.findById(run._id).select("archived_at status").lean(),
+    ]);
+    if (!ownsActiveLease(task, latestTaskState)) return;
+    if (latestTaskState?.cancellation_requested || latestRunState?.archived_at || latestRunState?.status === "archived") {
+      await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
+        $set: {
+          status: "cancelled",
+          error_message: "Task result discarded because the campaign was archived.",
+          finished_at: new Date(),
+          lease_owner: null,
+          lease_expires_at: null,
+        },
+      });
+      return;
+    }
 
-    await applyOutputToRun(run, task.agent_name, output);
+    const checkpointedTask = await AgentTask.findOneAndUpdate({
+      ...getActiveLeaseFilter(task),
+      cancellation_requested: { $ne: true },
+    }, {
+      $set: {
+        output_json: output,
+        heartbeat_at: new Date(),
+        lease_expires_at: new Date(Date.now() + TASK_LEASE_MS),
+      },
+    }, { new: true });
+    if (!checkpointedTask) return;
+
+    const appliedRun = await applyOutputToRun(run, task.agent_name, output);
+    if (!appliedRun) {
+      await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
+        $set: {
+          status: "cancelled",
+          error_message: "Task result discarded because the campaign was archived.",
+          finished_at: new Date(),
+          lease_owner: null,
+          lease_expires_at: null,
+        },
+      });
+      return;
+    }
+
+    if (task.agent_name === "publish" && output.media_id) {
+      await MarketingPublishAttempt.updateOne(
+        { campaign_run_id: run._id },
+        {
+          $set: {
+            status: "published",
+            creation_id: output.creation_id || null,
+            child_creation_ids: output.child_creation_ids || [],
+            media_id: output.media_id,
+            permalink: output.permalink || null,
+            last_error: null,
+            finished_at: new Date(),
+          },
+        }
+      );
+    }
+
+    if (!["carousel", "publish"].includes(task.agent_name)) {
+      await advanceRun(appliedRun, task.agent_name, output);
+    }
+
     if (task.agent_name === "publish") {
-      const latestRun = await MarketingCampaignRun.findById(run._id);
-      await recordPublishEvent(latestRun || run, {
+      await recordPublishEvent(appliedRun, {
         actionType: "publish",
         status: output?.skipped_duplicate_publish ? "skipped" : "success",
         publishResult: output,
-        readinessSnapshot: latestRun
-          ? await buildCurrentRunPublishReadiness(latestRun, { requireApproval: true, allowPublishingState: true }).catch(() => null)
-          : null,
+        readinessSnapshot: await buildCurrentRunPublishReadiness(appliedRun, {
+          requireApproval: true,
+          allowPublishingState: true,
+        }).catch(() => null),
         metadata: {
           task_id: String(task._id),
           automatic: task.input_json?.automatic || false,
         },
+      }).catch((error) => {
+        logger.error({ err: error, campaignId: run.campaign_id, taskId: task._id }, "failed to record successful Instagram publish event");
       });
-      await refreshBatchRun(latestRun?.batch_run_id);
+    }
+
+    const completedTask = await AgentTask.findOneAndUpdate({
+      ...getActiveLeaseFilter(task),
+      cancellation_requested: { $ne: true },
+    }, {
+      $set: {
+        status: "completed",
+        finished_at: new Date(),
+        error_message: null,
+        lease_owner: null,
+        lease_expires_at: null,
+        heartbeat_at: new Date(),
+      },
+    }, { new: true });
+    if (!completedTask) return;
+
+    if (task.agent_name === "carousel") return;
+    if (task.agent_name === "publish") {
+      await refreshBatchRun(appliedRun.batch_run_id);
       return;
     }
-    const freshRun = await MarketingCampaignRun.findById(run._id);
-    await advanceRun(freshRun, task.agent_name, output);
   } catch (error) {
     const message = describeExecutionError(error);
-    await AgentTask.findByIdAndUpdate(task._id, {
+    if (task.agent_name === "publish") {
+      const reconciled = await reconcileDurablePublishedTask(task, run, message).catch((reconcileError) => {
+        logger.error({ err: reconcileError, campaignId: run.campaign_id, taskId: task._id }, "failed to inspect durable Instagram publish state");
+        return false;
+      });
+      if (reconciled) return;
+    }
+    const failedTask = await AgentTask.findOneAndUpdate(getActiveLeaseFilter(task), {
       $set: {
         status: "failed",
         error_message: message,
         finished_at: new Date(),
+        lease_owner: null,
+        lease_expires_at: null,
+        heartbeat_at: new Date(),
       },
-    });
+    }, { new: true });
+    if (!failedTask) {
+      logger.warn({ taskId: task._id, campaignId: run.campaign_id }, "discarded failure from a worker that no longer owns the task lease");
+      return;
+    }
     await markRunFailed(run._id, task.agent_name, message);
     if (task.agent_name === "publish") {
+      await MarketingPublishAttempt.findOneAndUpdate(
+        { campaign_run_id: run._id, media_id: null, status: { $ne: "published" } },
+        { $set: { status: "failed", last_error: message, finished_at: new Date() } }
+      ).catch(() => null);
       const failedRun = await MarketingCampaignRun.findById(run._id);
       await recordPublishEvent(failedRun || run, {
         actionType: "failed_publish",
@@ -1032,64 +1527,123 @@ async function executeTask(task) {
   }
 }
 
+function buildLaneClaimQuery(lane, now = new Date()) {
+  const laneConfig = TASK_LANES[lane];
+  return {
+    status: "queued",
+    cancellation_requested: { $ne: true },
+    $and: [
+      { $or: [{ available_at: { $lte: now } }, { available_at: null }, { available_at: { $exists: false } }] },
+      {
+        $or: [
+          { queue_lane: lane },
+          { queue_lane: { $exists: false }, agent_name: { $in: laneConfig.agents } },
+          { queue_lane: null, agent_name: { $in: laneConfig.agents } },
+        ],
+      },
+    ],
+  };
+}
+
+async function claimQueuedTask(lane) {
+  const now = new Date();
+  return AgentTask.findOneAndUpdate(
+    buildLaneClaimQuery(lane, now),
+    {
+      $set: {
+        status: "running",
+        queue_lane: lane,
+        lease_owner: workerId,
+        lease_expires_at: new Date(now.getTime() + TASK_LEASE_MS),
+        heartbeat_at: now,
+        started_at: now,
+        finished_at: null,
+        error_message: null,
+      },
+      $inc: { attempt_count: 1 },
+    },
+    { sort: { priority: -1, created_at: 1 }, new: true }
+  );
+}
+
+async function executeClaimedTask(task) {
+  const executionStartedAt = Date.now();
+  const baseLog = {
+    campaignId: task.campaign_id,
+    taskId: String(task._id),
+    stage: task.agent_name,
+    queueLane: task.queue_lane || getQueueLane(task.agent_name),
+    queueAgeMs: task.created_at ? Math.max(executionStartedAt - new Date(task.created_at).getTime(), 0) : null,
+    attempt: Number(task.attempt_count || 0),
+    workerId,
+  };
+  logger.info(baseLog, "marketing task started");
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    void AgentTask.updateOne(
+      getActiveLeaseFilter(task),
+      { $set: { heartbeat_at: now, lease_expires_at: new Date(now.getTime() + TASK_LEASE_MS) } }
+    ).catch((error) => logger.error({ err: error, taskId: task._id }, "marketing task heartbeat failed"));
+  }, Math.max(Math.floor(TASK_LEASE_MS / 3), 15000));
+  heartbeat.unref?.();
+  try {
+    await executeTask(task);
+  } finally {
+    clearInterval(heartbeat);
+    const finalTask = await AgentTask.findById(task._id)
+      .select("status output_json error_message")
+      .lean()
+      .catch(() => null);
+    const creativeMetadata = finalTask?.output_json?.creative_json || {};
+    const logData = {
+      ...baseLog,
+      status: finalTask?.status || "unknown",
+      durationMs: Date.now() - executionStartedAt,
+      provider: creativeMetadata.provider || null,
+      model: creativeMetadata.model || null,
+      error: finalTask?.error_message || null,
+    };
+    if (finalTask?.status === "failed") logger.error(logData, "marketing task failed");
+    else if (finalTask?.status === "cancelled") logger.warn(logData, "marketing task cancelled");
+    else logger.info(logData, "marketing task finished");
+  }
+}
+
+async function processQueueLane(lane, limit = TASK_LANES[lane]?.concurrency || 1) {
+  if (!TASK_LANES[lane] || laneProcessing.has(lane)) return 0;
+  laneProcessing.add(lane);
+  try {
+    const claimed = [];
+    for (let index = 0; index < limit; index += 1) {
+      const task = await claimQueuedTask(lane);
+      if (!task) break;
+      claimed.push(task);
+    }
+    await Promise.all(claimed.map(executeClaimedTask));
+    return claimed.length;
+  } finally {
+    laneProcessing.delete(lane);
+  }
+}
+
 async function processQueuedTasks(maxTasks = 5) {
   await recoverStaleRunningTasks().catch((error) => {
     logger.error({ err: error }, "failed to recover stale marketing tasks");
   });
-  if (processing) return;
-  processing = true;
-  try {
-    for (let index = 0; index < maxTasks; index += 1) {
-      const task = await AgentTask.findOneAndUpdate(
-        { status: "queued" },
-        {
-          $set: {
-            status: "running",
-            started_at: new Date(),
-            finished_at: null,
-            error_message: null,
-          },
-          $inc: { attempt_count: 1 },
-        },
-        { sort: { created_at: 1 }, new: true }
-      );
-      if (!task) break;
-      await executeTask(task);
-    }
-  } finally {
-    processing = false;
-  }
+  const lanes = Object.keys(TASK_LANES);
+  const results = await Promise.all(lanes.map((lane) => processQueueLane(
+    lane,
+    Math.min(TASK_LANES[lane].concurrency, Math.max(Number(maxTasks || 1), 1))
+  )));
+  return results.reduce((sum, count) => sum + Number(count || 0), 0);
 }
 
-async function queueAndRunTaskImmediately(runId, agentName) {
+async function queueTask(runId, agentName) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
 
   await upsertTask(run, agentName, "queued");
-  const task = await AgentTask.findOneAndUpdate(
-    { campaign_run_id: runId, agent_name: agentName },
-    {
-      $set: {
-        status: "running",
-        started_at: new Date(),
-        finished_at: null,
-        error_message: null,
-        input_json: buildTaskInput(run, agentName),
-      },
-      $inc: { attempt_count: 1 },
-    },
-    { new: true }
-  );
-
-  await executeTask(task);
-  const finalTask = await AgentTask.findById(task._id).lean();
-  const detail = await getCampaignRunDetail(runId);
-
-  if (finalTask?.status === "failed") {
-    throw new Error(finalTask.error_message || detail.run?.last_error || `${agentName} task failed`);
-  }
-
-  return detail;
+  return getCampaignRunDetail(runId);
 }
 
 async function enqueueApprovedProductCampaign({ vendorProductId, publicProductId, approvedAt }) {
@@ -1289,7 +1843,6 @@ async function runDailyBatch({ triggerType = "manual", date = new Date() } = {})
     },
   }, { new: true });
 
-  void processQueuedTasks().catch((error) => logger.error({ err: error }, "marketing worker execution failed"));
   return serialiseBatchRun(batch);
 }
 
@@ -1350,11 +1903,10 @@ async function retryCampaignRun(runId, { actorAdminId = null } = {}) {
   });
 
   if (failedTask.agent_name === "publish") {
-    return queueAndRunTaskImmediately(runId, "publish");
+    return queueTask(runId, "publish");
   }
 
   await upsertTask(run, failedTask.agent_name, "queued");
-  void processQueuedTasks().catch((error) => logger.error({ err: error }, "marketing worker execution failed"));
   return serialiseRun(run);
 }
 
@@ -1428,7 +1980,6 @@ async function regenerateCampaignRun(runId, stage = "creative", { actorAdminId =
     metadata: { stage },
   });
 
-  void processQueuedTasks().catch((error) => logger.error({ err: error }, "marketing worker execution failed"));
   return getCampaignRunDetail(runId);
 }
 
@@ -1515,6 +2066,218 @@ async function scheduleCampaignRun(runId, scheduledFor, { actorAdminId = null } 
   return detail.run;
 }
 
+function buildPublishTaskMembershipQuery(runId) {
+  return {
+    agent_name: { $in: ["publish", "carousel"] },
+    $or: [
+      { campaign_run_id: runId },
+      { "input_json.grouped_run_ids": getObjectIdString(runId) },
+    ],
+  };
+}
+
+async function cancelQueuedPublishTasksForRun(run, now = new Date()) {
+  const queuedTasks = await AgentTask.find({
+    ...buildPublishTaskMembershipQuery(run._id),
+    status: "queued",
+  }).select("_id input_json");
+  const cancelledGroupRunIds = new Set();
+
+  for (const task of queuedTasks) {
+    const cancelled = await AgentTask.findOneAndUpdate(
+      { _id: task._id, status: "queued" },
+      {
+        $set: {
+          status: "cancelled",
+          cancellation_requested: true,
+          finished_at: now,
+          error_message: "Campaign archived by admin before Instagram publishing started.",
+        },
+      }
+    );
+    if (!cancelled) continue;
+    normalizeRunIdList(task.input_json?.grouped_run_ids).forEach((id) => cancelledGroupRunIds.add(id));
+  }
+
+  const otherGroupRunIds = Array.from(cancelledGroupRunIds).filter((id) => id !== String(run._id));
+  if (otherGroupRunIds.length) {
+    await MarketingCampaignRun.updateMany(
+      {
+        _id: { $in: otherGroupRunIds },
+        status: "publishing",
+        publish_status: "publishing",
+        instagram_media_id: null,
+        archived_at: null,
+      },
+      {
+        $set: {
+          status: "approved_for_publish",
+          current_stage: "approved_for_publish",
+          publish_status: "ready",
+          last_error: "Queued carousel publishing was cancelled because one selected campaign was archived.",
+          publish_attempted_at: null,
+        },
+      }
+    );
+  }
+  return queuedTasks.length;
+}
+
+async function archiveCampaignRun(runId, { actorAdminId = null, reason = "" } = {}) {
+  const run = await MarketingCampaignRun.findById(runId);
+  if (!run) throw new Error("Campaign run not found");
+  if (run.archived_at) return getCampaignRunDetail(runId);
+
+  const now = new Date();
+  await cancelQueuedPublishTasksForRun(run, now);
+  const activePublishTask = await AgentTask.findOne({
+    ...buildPublishTaskMembershipQuery(run._id),
+    status: "running",
+  }).select("_id agent_name lease_owner lease_expires_at");
+  const publishAttempt = await MarketingPublishAttempt.findOne({
+    $or: [
+      { campaign_run_id: run._id },
+      { group_run_ids: run._id },
+    ],
+  }).sort({ updated_at: -1 });
+  const durableMediaId = publishAttempt?.media_id || run.instagram_media_id || null;
+  if (!durableMediaId && (activePublishTask || isUnresolvedPublishAttempt(publishAttempt))) {
+    throw new Error("Wait for the current Instagram publish attempt to finish before archiving");
+  }
+  if (hasDurablePublishedAttempt(publishAttempt)) {
+    run.instagram_creation_id = publishAttempt.creation_id || run.instagram_creation_id || null;
+    run.instagram_child_creation_ids = publishAttempt.child_creation_ids || run.instagram_child_creation_ids || [];
+    run.instagram_media_id = publishAttempt.media_id;
+    run.instagram_permalink = publishAttempt.permalink || run.instagram_permalink || null;
+    run.publish_status = "published";
+    run.published_at = run.published_at || publishAttempt.finished_at || now;
+  }
+
+  run.archived_from_status = run.publish_status === "published" ? "published" : run.status;
+  run.archived_at = now;
+  run.archived_by = actorAdminId || null;
+  run.archive_reason = String(reason || "").trim() || null;
+  run.status = "archived";
+  run.current_stage = "archived";
+  run.scheduled_for = null;
+  if (run.publish_status !== "published") run.publish_status = "draft";
+  await run.save();
+
+  await Promise.all([
+    AgentTask.updateMany(
+      { campaign_run_id: run._id, status: "queued" },
+      { $set: { status: "cancelled", cancellation_requested: true, finished_at: now, error_message: "Campaign archived by admin." } }
+    ),
+    AgentTask.updateMany(
+      { campaign_run_id: run._id, status: "running" },
+      { $set: { cancellation_requested: true } }
+    ),
+  ]);
+  await recordPublishEvent(run, {
+    actionType: "archive",
+    status: "success",
+    actorAdminId,
+    metadata: { reason: run.archive_reason, archived_from_status: run.archived_from_status },
+  });
+  return getCampaignRunDetail(runId);
+}
+
+async function restoreCampaignRun(runId, { actorAdminId = null } = {}) {
+  const run = await MarketingCampaignRun.findById(runId);
+  if (!run) throw new Error("Campaign run not found");
+  if (!run.archived_at) throw new Error("Campaign is not archived");
+
+  const priorStatus = run.archived_from_status || "queued";
+  if (run.instagram_media_id || run.publish_status === "published") {
+    run.status = "published";
+    run.current_stage = "published";
+    run.publish_status = "published";
+  } else if (priorStatus === "waiting_review") {
+    run.status = "waiting_review";
+    run.current_stage = "ready_for_review";
+    run.publish_status = "draft";
+  } else if (["approved_for_publish", "scheduled"].includes(priorStatus)) {
+    run.status = "approved_for_publish";
+    run.current_stage = "approved_for_publish";
+    run.publish_status = "ready";
+    run.scheduled_for = null;
+  } else if (["failed", "rejected"].includes(priorStatus)) {
+    run.status = priorStatus;
+    run.current_stage = priorStatus;
+  } else {
+    run.status = "queued";
+    run.current_stage = "queued_for_daily_batch";
+    run.batch_key = null;
+    run.batch_run_id = null;
+    run.review_status = "pending";
+    run.review_stage = null;
+    run.publish_status = "not_ready";
+    await AgentTask.deleteMany({ campaign_run_id: run._id, status: { $ne: "completed" } });
+  }
+  run.archived_at = null;
+  run.archived_by = null;
+  run.archive_reason = null;
+  run.archived_from_status = null;
+  run.last_error = null;
+  await run.save();
+  await recordPublishEvent(run, {
+    actionType: "restore",
+    status: "success",
+    actorAdminId,
+    metadata: { restored_from_status: priorStatus },
+  });
+  return getCampaignRunDetail(runId);
+}
+
+function buildCampaignAssetReferenceQuery(assetUrl, excludedRunId) {
+  return {
+    _id: { $ne: excludedRunId },
+    $or: [
+      { asset_urls: assetUrl },
+      { published_urls: assetUrl },
+      { "creative_json.primary_asset_url": assetUrl },
+      { "creative_json.asset_urls": assetUrl },
+      { "tracking_json.publish_payload.asset_urls": assetUrl },
+    ],
+  };
+}
+
+async function purgeCampaignRun(runId, { actorAdminId = null } = {}) {
+  const run = await MarketingCampaignRun.findById(runId);
+  if (!run) throw new Error("Campaign run not found");
+  if (!run.archived_at || run.status !== "archived") throw new Error("Archive the campaign before permanent deletion");
+  if (run.instagram_media_id || run.published_at || run.publish_status === "published") {
+    throw new Error("Published campaigns must remain as audit records and can only be archived");
+  }
+  const runningTasks = await AgentTask.countDocuments({ campaign_run_id: run._id, status: "running" });
+  if (runningTasks) throw new Error("Wait for running campaign tasks to stop before permanent deletion");
+
+  const assets = await MarketingAsset.find({ campaign_run_id: run._id, deleted_at: null });
+  for (const asset of assets) {
+    const referencedRun = await MarketingCampaignRun.findOne(
+      buildCampaignAssetReferenceQuery(asset.url, run._id)
+    ).select("_id campaign_id").lean();
+    if (referencedRun) {
+      asset.campaign_run_id = referencedRun._id;
+      asset.campaign_id = referencedRun.campaign_id;
+      await asset.save();
+      continue;
+    }
+    await deleteCampaignAsset(asset.toObject());
+    asset.deleted_at = new Date();
+    await asset.save();
+  }
+  logger.info({ campaignId: run.campaign_id, actorAdminId, assetCount: assets.length }, "campaign permanently purged");
+  await Promise.all([
+    AgentTask.deleteMany({ campaign_run_id: run._id }),
+    MarketingCampaignPublishEvent.deleteMany({ campaign_run_id: run._id }),
+    MarketingPublishAttempt.deleteMany({ campaign_run_id: run._id }),
+    MarketingAsset.deleteMany({ campaign_run_id: run._id }),
+  ]);
+  await MarketingCampaignRun.deleteOne({ _id: run._id });
+  return { deleted: true, id: String(run._id), campaign_id: run.campaign_id };
+}
+
 async function publishCampaignRunNow(runId, { actorAdminId = null } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
@@ -1552,10 +2315,82 @@ async function publishCampaignRunNow(runId, { actorAdminId = null } = {}) {
     readinessSnapshot: readiness,
   });
 
-  return queueAndRunTaskImmediately(runId, "publish");
+  return queueTask(runId, "publish");
 }
 
-async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null } = {}) {
+function isMatchingDurableCarouselAttempt(attempt, runIds, publishPayload) {
+  if (!hasDurablePublishedAttempt(attempt) || attempt.content_type !== "carousel") return false;
+  const { payloadFingerprint } = buildPublishPayloadIdentity(publishPayload);
+  return attempt.payload_fingerprint === payloadFingerprint
+    && sameRunIdSet(attempt.group_run_ids, runIds);
+}
+
+async function reconcileCarouselPublishedRuns({
+  orderedRuns,
+  uniqueRunIds,
+  assetUrls,
+  caption,
+  publishResult,
+  actorAdminId,
+  startedAt,
+}) {
+  const finishedAt = new Date();
+  const sharedPublishNote = `Published in grouped carousel post with ${orderedRuns.length} products.`;
+  const commonUpdates = {
+    status: "published",
+    current_stage: "published",
+    review_status: "approved",
+    review_stage: null,
+    review_notes: sharedPublishNote,
+    publish_status: "published",
+    scheduled_for: null,
+    last_error: null,
+    publish_attempted_at: startedAt,
+    published_at: finishedAt,
+    instagram_creation_id: publishResult.creation_id || null,
+    instagram_child_creation_ids: publishResult.child_creation_ids || [],
+    instagram_media_id: publishResult.media_id,
+    instagram_permalink: publishResult.permalink || null,
+    published_urls: assetUrls,
+    content_type: "carousel",
+  };
+
+  await MarketingCampaignRun.updateMany(
+    { _id: { $in: uniqueRunIds } },
+    { $set: commonUpdates }
+  );
+
+  for (let index = 0; index < orderedRuns.length; index += 1) {
+    const run = orderedRuns[index];
+    Object.assign(run, commonUpdates);
+    await recordPublishEvent(run, {
+      actionType: "carousel_publish",
+      status: "success",
+      actorAdminId,
+      publishResult,
+      readinessSnapshot: await buildCurrentRunPublishReadiness(run, {
+        requireApproval: true,
+        allowPublishingState: true,
+        allowPublishedState: true,
+      }).catch(() => null),
+      metadata: {
+        total_items: orderedRuns.length,
+        position: index + 1,
+        selected_run_ids: uniqueRunIds,
+      },
+    });
+  }
+
+  const batchIds = Array.from(new Set(orderedRuns.map((run) => getObjectIdString(run.batch_run_id)).filter(Boolean)));
+  await Promise.all(batchIds.map((batchId) => refreshBatchRun(batchId)));
+  return {
+    publish_result: publishResult,
+    caption,
+    runs: orderedRuns.map((run) => serialiseRun(run)),
+  };
+}
+
+async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null, executeNow = false } = {}) {
   const uniqueRunIds = Array.from(new Set(
     (Array.isArray(runIds) ? runIds : []).map((id) => String(id || "").trim()).filter(Boolean)
   ));
@@ -1580,7 +2415,23 @@ async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null 
   const productIds = Array.from(new Set(orderedRuns.map((run) => getObjectIdString(run.public_product_id)).filter(Boolean)));
   const products = productIds.length ? await Product.find({ _id: { $in: productIds } }).lean() : [];
   const productMap = new Map(products.map((product) => [String(product._id), product]));
-  const readinessBlockers = buildCarouselReadinessBlockers(orderedRuns, productMap);
+  const primaryRun = orderedRuns[0];
+  const assetUrls = orderedRuns.map((run) => getRunPrimaryAssetUrl(run));
+  const caption = buildBulkCarouselCaption(orderedRuns);
+  const publishPayload = {
+    content_type: "carousel",
+    asset_urls: assetUrls,
+    caption,
+  };
+  const existingAttempt = executeNow
+    ? await MarketingPublishAttempt.findOne({ campaign_run_id: primaryRun._id })
+    : null;
+  const durableExistingAttempt = mergeAttemptWithRunPublishState(existingAttempt, primaryRun);
+  const isDurableRecovery = isMatchingDurableCarouselAttempt(durableExistingAttempt, uniqueRunIds, publishPayload);
+  const readinessBlockers = buildCarouselReadinessBlockers(orderedRuns, productMap, {
+    allowPublishingState: executeNow,
+    allowPublishedState: isDurableRecovery,
+  });
   if (readinessBlockers.length) {
     const message = readinessBlockers
       .slice(0, 8)
@@ -1593,10 +2444,10 @@ async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null 
     if (run.review_status !== "approved") {
       throw new Error(`${run.product_title || run.campaign_id} must be review approved before carousel posting`);
     }
-    if (run.instagram_media_id || run.publish_status === "published" || run.status === "published") {
+    if (!isDurableRecovery && (run.instagram_media_id || run.publish_status === "published" || run.status === "published")) {
       throw new Error(`${run.product_title || run.campaign_id} has already been published`);
     }
-    if (run.publish_status === "publishing" || run.status === "publishing") {
+    if (!executeNow && (run.publish_status === "publishing" || run.status === "publishing")) {
       throw new Error(`${run.product_title || run.campaign_id} is already publishing`);
     }
     if (!getRunPrimaryAssetUrl(run)) {
@@ -1605,92 +2456,130 @@ async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null 
   }
 
   const startedAt = new Date();
-  const assetUrls = orderedRuns.map((run) => getRunPrimaryAssetUrl(run));
-  const caption = buildBulkCarouselCaption(orderedRuns);
 
-  for (const run of orderedRuns) {
-    run.status = "publishing";
-    run.current_stage = "publish";
-    run.publish_status = "publishing";
-    run.scheduled_for = null;
-    run.last_error = null;
-    run.publish_attempted_at = startedAt;
-    await run.save();
-    await markPublishTaskRunning(run, startedAt);
-  }
-
-  try {
-    const publishResult = await publishInstagramDraft({
-      contentType: "carousel",
-      assetUrls,
-      caption,
-    });
-
-    const finishedAt = new Date();
-    const sharedPublishNote = `Published in grouped carousel post with ${orderedRuns.length} products.`;
-
-    for (let index = 0; index < orderedRuns.length; index += 1) {
-      const run = orderedRuns[index];
-      run.status = "published";
-      run.current_stage = "published";
-      run.review_status = "approved";
-      run.review_stage = null;
-      run.review_notes = sharedPublishNote;
-      run.publish_status = "published";
+  if (!executeNow) {
+    for (const run of orderedRuns) {
+      run.status = "publishing";
+      run.current_stage = "publish";
+      run.publish_status = "publishing";
       run.scheduled_for = null;
       run.last_error = null;
       run.publish_attempted_at = startedAt;
-      run.published_at = finishedAt;
-      run.instagram_creation_id = publishResult.creation_id || null;
-      run.instagram_media_id = publishResult.media_id || null;
-      run.instagram_permalink = publishResult.permalink || null;
-      run.published_urls = assetUrls;
-      run.content_type = "carousel";
       await run.save();
-
-      await markPublishTaskOutcome(run, {
-        status: "completed",
-        finishedAt,
-        output: {
-          ...publishResult,
-          grouped_publish: true,
-          total_items: orderedRuns.length,
-          position: index + 1,
-          source_asset_url: assetUrls[index],
-          tracked_url: getRunTrackedUrl(run),
-          selected_run_ids: uniqueRunIds,
-          publish_payload: {
-            channel: "instagram",
-            content_type: "carousel",
-            asset_urls: assetUrls,
-            caption,
-          },
-        },
-      });
       await recordPublishEvent(run, {
         actionType: "carousel_publish",
-        status: "success",
+        status: "started",
         actorAdminId,
-        publishResult,
-        readinessSnapshot: await buildCurrentRunPublishReadiness(run, { requireApproval: true, allowPublishingState: true }).catch(() => null),
-        metadata: {
-          total_items: orderedRuns.length,
-          position: index + 1,
-          selected_run_ids: uniqueRunIds,
-        },
+        metadata: { selected_run_ids: uniqueRunIds, queued: true },
       });
-
-      await refreshBatchRun(run.batch_run_id);
     }
-
+    const primaryRun = orderedRuns[0];
+    await upsertTask(primaryRun, "carousel", "queued");
+    await AgentTask.updateOne(
+      { campaign_run_id: primaryRun._id, agent_name: "carousel" },
+      {
+        $set: {
+          input_json: { grouped_run_ids: uniqueRunIds, actor_admin_id: actorAdminId ? String(actorAdminId) : null },
+          idempotency_key: `carousel:${uniqueRunIds.slice().sort().join(":")}`,
+        },
+      }
+    );
     return {
-      publish_result: publishResult,
+      queued: true,
       caption,
       runs: orderedRuns.map((run) => serialiseRun(run)),
     };
+  }
+
+  if (!isDurableRecovery) {
+    for (const run of orderedRuns) {
+      run.status = "publishing";
+      run.current_stage = "publish";
+      run.publish_status = "publishing";
+      run.scheduled_for = null;
+      run.last_error = null;
+      run.publish_attempted_at = startedAt;
+      await run.save();
+    }
+  }
+
+  let confirmedPublishResult = null;
+  try {
+    const publishAttempt = await getOrCreatePublishAttempt(primaryRun, publishPayload, {
+      groupedRunIds: uniqueRunIds,
+    });
+    const durablePublishAttempt = mergeAttemptWithRunPublishState(publishAttempt, primaryRun);
+    const publishResult = hasDurablePublishedAttempt(durablePublishAttempt)
+      ? buildPublishResultFromAttempt(durablePublishAttempt, publishPayload)
+      : await publishInstagramDraft({
+        contentType: "carousel",
+        assetUrls,
+        caption,
+        resumeState: {
+          creation_id: publishAttempt.creation_id || primaryRun.instagram_creation_id || null,
+          child_creation_ids: publishAttempt.child_creation_ids || primaryRun.instagram_child_creation_ids || [],
+          media_id: publishAttempt.media_id || primaryRun.instagram_media_id || null,
+          permalink: publishAttempt.permalink || primaryRun.instagram_permalink || null,
+        },
+        onProgress: (progress) => persistPublishProgress(primaryRun, publishAttempt, progress, {
+          groupedRunIds: uniqueRunIds,
+        }),
+      });
+    confirmedPublishResult = publishResult;
+    await MarketingPublishAttempt.updateOne(
+      { _id: publishAttempt._id },
+      {
+        $set: {
+          status: "published",
+          creation_id: publishResult.creation_id || null,
+          child_creation_ids: publishResult.child_creation_ids || [],
+          media_id: publishResult.media_id,
+          permalink: publishResult.permalink || null,
+          group_run_ids: uniqueRunIds,
+          last_error: null,
+          finished_at: new Date(),
+        },
+      }
+    ).catch((persistError) => {
+      logger.error({ err: persistError, campaignId: primaryRun.campaign_id, instagramMediaId: publishResult.media_id }, "carousel published but attempt finalization failed");
+    });
+
+    return reconcileCarouselPublishedRuns({
+      orderedRuns,
+      uniqueRunIds,
+      assetUrls,
+      caption,
+      publishResult,
+      actorAdminId,
+      startedAt,
+    });
   } catch (error) {
     const message = describeExecutionError(error);
     const finishedAt = new Date();
+    const durableAttempt = await MarketingPublishAttempt.findOne({ campaign_run_id: primaryRun._id }).catch(() => null);
+    const durableRecoveryAttempt = confirmedPublishResult?.media_id
+      ? {
+        ...(durableAttempt?.toObject ? durableAttempt.toObject() : durableAttempt || {}),
+        content_type: "carousel",
+        group_run_ids: uniqueRunIds,
+        payload_fingerprint: buildPublishPayloadIdentity(publishPayload).payloadFingerprint,
+        creation_id: confirmedPublishResult.creation_id || null,
+        child_creation_ids: confirmedPublishResult.child_creation_ids || [],
+        media_id: confirmedPublishResult.media_id,
+        permalink: confirmedPublishResult.permalink || null,
+      }
+      : mergeAttemptWithRunPublishState(durableAttempt, primaryRun);
+    if (isMatchingDurableCarouselAttempt(durableRecoveryAttempt, uniqueRunIds, publishPayload)) {
+      return reconcileCarouselPublishedRuns({
+        orderedRuns,
+        uniqueRunIds,
+        assetUrls,
+        caption,
+        publishResult: buildPublishResultFromAttempt(durableRecoveryAttempt, publishPayload),
+        actorAdminId,
+        startedAt,
+      });
+    }
 
     for (const run of orderedRuns) {
       run.status = "failed";
@@ -1699,11 +2588,6 @@ async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null 
       run.last_error = message;
       run.publish_attempted_at = startedAt;
       await run.save();
-      await markPublishTaskOutcome(run, {
-        status: "failed",
-        finishedAt,
-        errorMessage: message,
-      });
       await recordPublishEvent(run, {
         actionType: "carousel_publish",
         status: "failed",
@@ -1717,6 +2601,11 @@ async function publishCampaignRunsAsCarousel(runIds = [], { actorAdminId = null 
       });
       await refreshBatchRun(run.batch_run_id);
     }
+
+    await MarketingPublishAttempt.findOneAndUpdate(
+      { campaign_run_id: primaryRun._id, media_id: null, status: { $ne: "published" } },
+      { $set: { status: "failed", last_error: message, finished_at: finishedAt } }
+    ).catch(() => null);
 
     throw new Error(message);
   }
@@ -1733,7 +2622,11 @@ async function processDueScheduledPublishes(limit = 3) {
     try {
       await publishCampaignRunNow(run._id);
     } catch (error) {
-      await MarketingCampaignRun.findByIdAndUpdate(run._id, {
+      const failedRun = await MarketingCampaignRun.findOneAndUpdate({
+        _id: run._id,
+        status: "scheduled",
+        publish_status: "scheduled",
+      }, {
         $set: {
           status: "failed",
           current_stage: "publish",
@@ -1741,7 +2634,12 @@ async function processDueScheduledPublishes(limit = 3) {
           last_error: error.message,
           publish_attempted_at: new Date(),
         },
-      });
+      }, { new: true });
+      if (failedRun) {
+        logger.error({ campaignId: failedRun.campaign_id, err: error }, "scheduled campaign could not be queued for publishing");
+      } else {
+        logger.info({ campaignId: run.campaign_id }, "scheduled publish was already claimed or changed");
+      }
     }
   }
 }
@@ -1753,8 +2651,11 @@ function buildCampaignRunListQuery({
   date_from: dateFrom = "",
   date_to: dateTo = "",
   affiliate_only: affiliateOnly = false,
+  include_archived: includeArchived = false,
 } = {}) {
   const query = {};
+  if (includeArchived === "only") query.archived_at = { $ne: null };
+  else if (!(includeArchived === true || includeArchived === "true" || includeArchived === "1")) query.archived_at = null;
   const trimmedSearch = String(search || "").trim();
   if (status !== "all") query.status = status;
   if (sourceEvent && sourceEvent !== "all") query.source_event = sourceEvent;
@@ -1811,6 +2712,7 @@ async function listCampaignRuns({
   date_from: dateFrom = "",
   date_to: dateTo = "",
   affiliate_only: affiliateOnly = false,
+  include_archived: includeArchived = false,
 } = {}) {
   const query = buildCampaignRunListQuery({
     search,
@@ -1819,6 +2721,7 @@ async function listCampaignRuns({
     date_from: dateFrom,
     date_to: dateTo,
     affiliate_only: affiliateOnly,
+    include_archived: includeArchived,
   });
 
   const safePage = Math.max(Number(page || 1), 1);
@@ -1839,12 +2742,13 @@ async function listCampaignRuns({
       .populate("public_product_id", PUBLIC_PRODUCT_CAMPAIGN_FIELDS)
       .lean();
 
-  const [rawItems, totalWithoutReadiness, groupedCounts, latestBatch, countItems] = await Promise.all([
+  const [rawItems, totalWithoutReadiness, groupedCounts, latestBatch, countItems, archivedCount] = await Promise.all([
     baseFind,
     MarketingCampaignRun.countDocuments(query),
-    MarketingCampaignRun.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]),
+    MarketingCampaignRun.aggregate([{ $match: query }, { $group: { _id: "$status", count: { $sum: 1 } } }]),
     DailyBatchRun.findOne().sort({ created_at: -1 }).lean(),
     countFind,
+    MarketingCampaignRun.countDocuments({ archived_at: { $ne: null } }),
   ]);
 
   const filteredItems = usesReadinessFilter
@@ -1881,6 +2785,7 @@ async function listCampaignRuns({
     published: 0,
     failed: 0,
     rejected: 0,
+    archived: archivedCount,
   };
   groupedCounts.forEach((row) => {
     if (counts[row._id] != null) counts[row._id] = row.count;
@@ -1916,6 +2821,7 @@ async function listCampaignCatalogProducts({
   const query = {
     status: "active",
     is_visible: { $ne: false },
+    archived_at: null,
   };
   const trimmedSearch = String(search || "").trim();
   if (trimmedSearch) {
@@ -2045,6 +2951,7 @@ async function listCampaignCalendar({ from = "", to = "" } = {}) {
     : new Date(now.getFullYear(), now.getMonth(), now.getDate() + 21);
 
   const runs = await MarketingCampaignRun.find({
+    archived_at: null,
     $or: [
       { scheduled_for: { $gte: fromDate, $lte: toDate } },
       { published_at: { $gte: fromDate, $lte: toDate } },
@@ -2175,6 +3082,84 @@ async function getCampaignRunDetail(runId) {
   };
 }
 
+async function updateWorkerHeartbeat() {
+  const now = new Date();
+  await MarketingWorkerHeartbeat.findOneAndUpdate(
+    { worker_key: "marketing-agent-worker" },
+    {
+      $set: {
+        worker_id: workerId,
+        heartbeat_at: now,
+        metadata_json: {
+          pid: process.pid,
+          host: os.hostname(),
+          lanes: Object.fromEntries(Object.entries(TASK_LANES).map(([lane, config]) => [lane, config.concurrency])),
+        },
+      },
+    },
+    { upsert: true, new: true }
+  );
+}
+
+function accumulateQueueLaneCounts(lanes, rows = []) {
+  rows.forEach((row) => {
+    const lane = row._id.lane || getQueueLane(row._id.agent_name);
+    const status = row._id.status;
+    if (lanes[lane] && status) {
+      lanes[lane][status] = Number(lanes[lane][status] || 0) + Number(row.count || 0);
+    }
+  });
+  return lanes;
+}
+
+async function getMarketingQueueHealth() {
+  const [heartbeat, counts, oldestRows] = await Promise.all([
+    MarketingWorkerHeartbeat.findOne({ worker_key: "marketing-agent-worker" }).lean(),
+    AgentTask.aggregate([
+      { $match: { status: { $in: ["queued", "running", "failed"] } } },
+      { $group: { _id: { lane: "$queue_lane", agent_name: "$agent_name", status: "$status" }, count: { $sum: 1 } } },
+    ]),
+    AgentTask.aggregate([
+      { $match: { status: "queued" } },
+      { $group: { _id: { lane: "$queue_lane", agent_name: "$agent_name" }, oldest_at: { $min: "$created_at" } } },
+    ]),
+  ]);
+  const now = Date.now();
+  const lanes = {};
+  Object.keys(TASK_LANES).forEach((lane) => {
+    lanes[lane] = {
+      concurrency: TASK_LANES[lane].concurrency,
+      queued: 0,
+      running: 0,
+      failed: 0,
+      oldest_queued_at: null,
+      oldest_queue_age_seconds: 0,
+    };
+  });
+  accumulateQueueLaneCounts(lanes, counts);
+  oldestRows.forEach((row) => {
+    const lane = row._id.lane || getQueueLane(row._id.agent_name);
+    if (!lanes[lane] || !row.oldest_at) return;
+    const current = lanes[lane].oldest_queued_at;
+    if (!current || new Date(row.oldest_at).getTime() < new Date(current).getTime()) {
+      lanes[lane].oldest_queued_at = row.oldest_at;
+      lanes[lane].oldest_queue_age_seconds = Math.max(Math.round((now - new Date(row.oldest_at).getTime()) / 1000), 0);
+    }
+  });
+  const heartbeatAgeMs = heartbeat?.heartbeat_at ? now - new Date(heartbeat.heartbeat_at).getTime() : Infinity;
+  return {
+    status: heartbeatAgeMs <= Math.max(WORKER_INTERVAL_MS * 3, 30000) ? "healthy" : "stale",
+    worker: heartbeat ? {
+      worker_id: heartbeat.worker_id,
+      heartbeat_at: heartbeat.heartbeat_at,
+      heartbeat_age_seconds: Math.max(Math.round(heartbeatAgeMs / 1000), 0),
+      metadata: heartbeat.metadata_json || null,
+    } : null,
+    lanes,
+    checked_at: new Date().toISOString(),
+  };
+}
+
 function startMarketingAgentWorker() {
   if (workerStarted) return;
   workerStarted = true;
@@ -2182,10 +3167,15 @@ function startMarketingAgentWorker() {
     void processQueuedTasks().catch((error) => logger.error({ err: error }, "marketing worker execution failed"));
   }, WORKER_INTERVAL_MS);
   void processQueuedTasks().catch((error) => logger.error({ err: error }, "marketing worker execution failed"));
-  logger.info({ pollMs: WORKER_INTERVAL_MS }, "marketing agent worker started");
+  setInterval(() => {
+    void updateWorkerHeartbeat().catch((error) => logger.error({ err: error }, "marketing worker heartbeat failed"));
+  }, Math.max(WORKER_INTERVAL_MS, 10000)).unref?.();
+  void updateWorkerHeartbeat().catch((error) => logger.error({ err: error }, "marketing worker heartbeat failed"));
+  logger.info({ pollMs: WORKER_INTERVAL_MS, workerId, lanes: TASK_LANES }, "marketing agent worker started");
 }
 
 module.exports = {
+  archiveCampaignRun,
   enqueueAdminProductCampaign,
   enqueueAffiliateProductCampaign,
   enqueueApprovedProductCampaign,
@@ -2193,17 +3183,21 @@ module.exports = {
   getDailyBatchRunDetail,
   getCampaignRunDetail,
   getLatestDailyBatchRun,
+  getMarketingQueueHealth,
   listCampaignCalendar,
   listCampaignCatalogProducts,
   listCampaignRuns,
   processDueScheduledPublishes,
   processQueuedTasks,
+  processQueueLane,
   publishCampaignRunsAsCarousel,
   publishCampaignRunNow,
+  purgeCampaignRun,
   recoverStaleRunningTasks,
   regenerateCampaignRun,
   resetStuckCampaignRun,
   reviewCampaignRun,
+  restoreCampaignRun,
   retryFailedBatchRuns,
   retryCampaignRun,
   runDailyBatch,
@@ -2217,10 +3211,25 @@ module.exports = {
   updateCampaignDraft,
   validateAffiliateProductForCampaign,
   _private: {
+    accumulateQueueLaneCounts,
+    buildCampaignAssetReferenceQuery,
     buildBulkCarouselCaption,
     buildCarouselReadinessBlockers,
+    buildPublishPayloadIdentity,
+    buildPublishResultFromAttempt,
+    buildPublishTaskMembershipQuery,
+    buildStaleTaskRecoveryFilter,
+    getActiveLeaseFilter,
     buildRunPublishReadinessSnapshot,
+    buildLaneClaimQuery,
+    getQueueLane,
+    getRunNextAction,
     getRunPublishAssetUrls,
+    hasDurablePublishedAttempt,
+    isMatchingDurableCarouselAttempt,
+    isUnresolvedPublishAttempt,
+    mergeAttemptWithRunPublishState,
+    sameRunIdSet,
     shouldReturnExistingRunningBatch,
   },
 };

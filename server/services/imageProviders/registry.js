@@ -15,6 +15,7 @@ const IMAGE_PROVIDER_REGISTRY = [
         label: "GPT Image 1 Mini",
         supports_reference_image: true,
         supports_text_to_image: true,
+        capabilities: { input_fidelity: false, flexible_size: false, transparent_background: true },
         cost_tier: "low",
       },
       {
@@ -22,6 +23,7 @@ const IMAGE_PROVIDER_REGISTRY = [
         label: "GPT Image 1",
         supports_reference_image: true,
         supports_text_to_image: true,
+        capabilities: { input_fidelity: true, flexible_size: false, transparent_background: true },
         cost_tier: "medium",
       },
       {
@@ -29,6 +31,7 @@ const IMAGE_PROVIDER_REGISTRY = [
         label: "GPT Image 1.5",
         supports_reference_image: true,
         supports_text_to_image: true,
+        capabilities: { input_fidelity: true, flexible_size: false, transparent_background: true },
         cost_tier: "medium",
       },
       {
@@ -36,6 +39,7 @@ const IMAGE_PROVIDER_REGISTRY = [
         label: "GPT Image 2",
         supports_reference_image: true,
         supports_text_to_image: true,
+        capabilities: { input_fidelity: false, flexible_size: true, transparent_background: false },
         cost_tier: "high",
       },
     ],

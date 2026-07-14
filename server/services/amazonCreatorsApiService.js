@@ -178,9 +178,17 @@ function applyCreatorsApiDataToProduct(product, normalizedData) {
   product.mrp = Number.isFinite(normalizedData.mrp) && normalizedData.mrp >= 0 ? normalizedData.mrp : null;
   product.stock_quantity = 0;
   product.affiliate_data_source = APPROVED_API_SOURCE;
+  product.affiliate_source_mode = "creators_api";
   product.affiliate_data_last_refreshed_at = normalizedData.fetched_at;
   product.affiliate_data_expires_at = normalizedData.expires_at;
   product.affiliate_api_error = null;
+  product.price_status = normalizedData.price > 0 ? "verified" : "unavailable";
+  product.price_verified_at = normalizedData.price > 0 ? normalizedData.fetched_at : null;
+  if (normalizedData.image_url) {
+    product.affiliate_image_provenance = "creators_api";
+    product.affiliate_campaign_usage_rights = "api_permitted";
+    product.affiliate_campaign_asset_url = normalizedData.image_url;
+  }
   product.attributes = {
     ...(product.attributes && typeof product.attributes === "object" ? product.attributes : {}),
     affiliate_api_currency: normalizedData.currency,

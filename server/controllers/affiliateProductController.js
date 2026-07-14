@@ -1,7 +1,11 @@
 const Product = require("../models/Product");
+const AffiliateEvent = require("../models/AffiliateEvent");
+const MarketingCampaignRun = require("../models/MarketingCampaignRun");
+const OrderItem = require("../models/OrderItem");
 const { parseAffiliateExcelBuffer } = require("../services/affiliateExcelCatalog");
 const {
   buildComplianceStatus,
+  canonicalizeAmazonAffiliateUrl,
   validateAmazonAffiliateUrl,
 } = require("../services/amazonAffiliateCompliance");
 const {
@@ -28,11 +32,12 @@ const toFlat = (doc) => ({
   id: doc._id.toString(),
   category_id: doc.category_id?.toString?.() || doc.category_id || null,
   subcategory_id: doc.subcategory_id?.toString?.() || doc.subcategory_id || null,
+  price_available: doc.price_status === "verified" && Number(doc.price || 0) > 0,
 });
 
 const AFFILIATE_LIST_DEFAULT_LIMIT = 25;
 const AFFILIATE_LIST_MAX_LIMIT = 100;
-const AFFILIATE_QUICK_FILTERS = ["all", "needs_review", "published", "draft", "paused", "uncategorized", "missing_image", "link_issue"];
+const AFFILIATE_QUICK_FILTERS = ["all", "needs_review", "published", "draft", "paused", "uncategorized", "missing_image", "link_issue", "archived"];
 
 function escapeRegex(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -79,6 +84,8 @@ function buildAffiliateListBaseQuery(query = {}) {
 
 function applyAffiliateQuickFilter(filter = {}, quickFilter = "all") {
   const nextFilter = { ...filter };
+  if (quickFilter === "archived") nextFilter.archived_at = { $ne: null };
+  else nextFilter.archived_at = null;
   if (quickFilter === "needs_review") nextFilter.affiliate_compliance_status = { $ne: "compliant" };
   if (quickFilter === "published") {
     nextFilter.status = "active";
@@ -235,9 +242,9 @@ function buildPreservedApiContent(existing = null, dataSource = "manual") {
       images: [],
       image_items: [],
       featured_image: null,
-      price: 0,
+      price: null,
       sale_price: null,
-      effective_price: 0,
+      effective_price: null,
       mrp: null,
       stock_quantity: 0,
       affiliate_data_last_refreshed_at: null,
@@ -270,9 +277,9 @@ function buildAffiliateImageContent(source = {}, existing = null, dataSource = "
     const manualImageUrl = normalizeManualAffiliateImageUrl(resolveManualAffiliateImageUrl(source));
     return {
       ...buildImagePayload(manualImageUrl, title),
-      price: 0,
+      price: null,
       sale_price: null,
-      effective_price: 0,
+      effective_price: null,
       mrp: null,
       stock_quantity: 0,
       affiliate_data_last_refreshed_at: null,
@@ -282,6 +289,19 @@ function buildAffiliateImageContent(source = {}, existing = null, dataSource = "
   } catch (error) {
     throw fieldError(error.message, { image_url: error.message });
   }
+}
+
+function detectAffiliateImageProvenance(value, dataSource = "manual") {
+  if (dataSource === "creators_api" || dataSource === "pa_api") return "creators_api";
+  try {
+    const host = new URL(String(value || "")).hostname.toLowerCase();
+    if (host.includes("media-amazon") || host.includes("images-amazon") || host.endsWith("amazon.com") || host.endsWith("amazon.in")) {
+      return "amazon_import";
+    }
+  } catch {
+    // Local uploads and missing URLs are classified below.
+  }
+  return value ? "admin_provided" : "unknown";
 }
 
 function buildRequiredAffiliateFieldErrors(payload = {}, raw = {}) {
@@ -545,8 +565,13 @@ async function buildAffiliatePayload(item, existing = null) {
   const requestedSlug = normalizeString(source.slug || title || source.external_id || "affiliate-product");
   const slug = await ensureUniqueProductSlug(requestedSlug, existing?._id || null);
   const affiliateUrl = normalizeString(source.affiliate_url || source.source_url);
-  const validation = validateAmazonAffiliateUrl(affiliateUrl, {
-    marketplace: normalizeMarketplace(source.affiliate_marketplace || source.marketplace),
+  const requestedMarketplace = normalizeMarketplace(source.affiliate_marketplace || source.marketplace);
+  const canonical = canonicalizeAmazonAffiliateUrl(affiliateUrl, {
+    marketplace: requestedMarketplace,
+    appendConfiguredTag: true,
+  });
+  const validation = validateAmazonAffiliateUrl(canonical.canonicalUrl, {
+    marketplace: requestedMarketplace,
     requireConfiguredTag: true,
   });
   const dataSource = normalizeAdminAffiliateDataSource(source, existing);
@@ -561,6 +586,24 @@ async function buildAffiliatePayload(item, existing = null) {
     && complianceStatus === "compliant"
     && !taxonomy.isUncategorized
     && parseBoolean(source.is_visible, Boolean(existing?.is_visible));
+  const observedPrice = parseCurrencyNumber(source.list_price ?? source.price, 0) || null;
+  const observedSalePrice = parseCurrencyNumber(source.sale_price, 0) || null;
+  const apiPriceAvailable = APPROVED_AFFILIATE_DATA_SOURCES.has(dataSource) && Number(apiContent.price || 0) > 0;
+  const priceStatus = apiPriceAvailable
+    ? "verified"
+    : (observedPrice || observedSalePrice ? "manual_unverified" : "unavailable");
+  const campaignAssetUrl = normalizeString(source.affiliate_campaign_asset_url) || apiContent.featured_image || null;
+  const requestedRights = normalizeString(source.affiliate_campaign_usage_rights);
+  const campaignRights = ["unknown", "admin_confirmed", "owned", "licensed", "api_permitted"].includes(String(requestedRights || ""))
+    ? requestedRights
+    : (parseBoolean(source.confirm_campaign_usage_rights, false) ? "admin_confirmed" : existing?.affiliate_campaign_usage_rights || "unknown");
+  const sourceMode = dataSource === "creators_api" || dataSource === "pa_api"
+    ? "creators_api"
+    : dataSource === "excel-upload" ? "manual_upload" : "manual_entry";
+  const existingCanonicalUrl = normalizeString(existing?.affiliate_url);
+  const originalAffiliateUrl = existingCanonicalUrl === affiliateUrl
+    ? normalizeString(existing?.affiliate_original_url) || canonical.originalUrl
+    : canonical.originalUrl;
 
   const payload = {
     title,
@@ -593,8 +636,8 @@ async function buildAffiliatePayload(item, existing = null) {
     attributes: {
       ...(existing?.attributes && typeof existing.attributes === "object" ? existing.attributes : {}),
       affiliate_currency: validation.marketplace === "amazon_us" ? "USD" : "INR",
-      imported_price_observed: parseCurrencyNumber(source.list_price ?? source.price, 0) || null,
-      imported_sale_price_observed: parseCurrencyNumber(source.sale_price, 0) || null,
+      imported_price_observed: observedPrice,
+      imported_sale_price_observed: observedSalePrice,
       imported_rating_observed: normalizeString(source.rating_text),
     },
     status: requestedStatus === "active" && complianceStatus !== "compliant" ? "draft" : requestedStatus,
@@ -609,8 +652,11 @@ async function buildAffiliatePayload(item, existing = null) {
     vendor_id: null,
     is_affiliate: true,
     affiliate_url: validation.normalizedUrl,
+    affiliate_original_url: originalAffiliateUrl,
+    affiliate_canonical_url: validation.normalizedUrl,
     affiliate_external_id: normalizeString(source.external_id || source.affiliate_external_id) || validation.asin,
     affiliate_source_platform: normalizeString(source.affiliate_source_platform || source.source_platform) || "manual",
+    affiliate_source_mode: sourceMode,
     affiliate_payload: affiliatePayload,
     affiliate_asin: validation.asin,
     affiliate_marketplace: validation.marketplace,
@@ -619,6 +665,11 @@ async function buildAffiliatePayload(item, existing = null) {
     affiliate_data_last_refreshed_at: apiContent.affiliate_data_last_refreshed_at,
     affiliate_data_expires_at: apiContent.affiliate_data_expires_at,
     affiliate_api_error: apiContent.affiliate_api_error,
+    price_status: priceStatus,
+    price_verified_at: apiPriceAvailable ? (apiContent.affiliate_data_last_refreshed_at || new Date()) : null,
+    affiliate_image_provenance: detectAffiliateImageProvenance(apiContent.featured_image, dataSource),
+    affiliate_campaign_usage_rights: campaignRights,
+    affiliate_campaign_asset_url: campaignAssetUrl,
     affiliate_compliance_status: complianceStatus,
     affiliate_compliance_flags: validation.flags,
     buying_intent: normalizeString(source.buying_intent),
@@ -644,6 +695,7 @@ async function buildAffiliatePayload(item, existing = null) {
 
 async function assertPublishable(product) {
   if (!product) throw fieldError("Affiliate product not found");
+  if (product.archived_at) throw fieldError("Restore the affiliate product before publishing");
   const validation = validateAmazonAffiliateUrl(product.affiliate_url, {
     marketplace: product.affiliate_marketplace,
     requireConfiguredTag: true,
@@ -668,7 +720,7 @@ async function assertPublishable(product) {
 const listAffiliateProducts = async (req, res) => {
   try {
     if (!wantsPaginatedAffiliateList(req.query || {})) {
-      const products = await Product.find({ is_affiliate: true, source_type: "admin" })
+      const products = await Product.find({ is_affiliate: true, source_type: "admin", archived_at: null })
         .sort({ affiliate_sort_order: 1, createdAt: -1 })
         .lean();
       return res.json(products.map(toFlat));
@@ -740,11 +792,53 @@ const updateAffiliateProduct = async (req, res) => {
 
 const deleteAffiliateProduct = async (req, res) => {
   try {
-    const product = await Product.findOneAndDelete({ _id: req.params.id, is_affiliate: true, source_type: "admin" });
+    const product = await Product.findOne({ _id: req.params.id, is_affiliate: true, source_type: "admin" });
     if (!product) return res.status(404).json({ message: "Affiliate product not found" });
-    res.json({ message: "Affiliate product deleted" });
+    product.archived_at = new Date();
+    product.archived_by = req.user?._id || null;
+    product.status = "draft";
+    product.is_visible = false;
+    await product.save();
+    res.json({ message: "Affiliate product archived", product: toFlat(product.toObject()) });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+const restoreAffiliateProduct = async (req, res) => {
+  try {
+    const product = await Product.findOneAndUpdate(
+      { _id: req.params.id, is_affiliate: true, source_type: "admin", archived_at: { $ne: null } },
+      { $set: { archived_at: null, archived_by: null, status: "draft", is_visible: false } },
+      { new: true }
+    ).lean();
+    if (!product) return res.status(404).json({ message: "Archived affiliate product not found" });
+    res.json({ message: "Affiliate product restored as a draft", product: toFlat(product) });
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+const purgeAffiliateProduct = async (req, res) => {
+  try {
+    const product = await Product.findOne({ _id: req.params.id, is_affiliate: true, source_type: "admin" }).lean();
+    if (!product) return res.status(404).json({ message: "Affiliate product not found" });
+    if (!product.archived_at) return res.status(409).json({ message: "Archive the affiliate product before permanent deletion" });
+    const [campaigns, orderItems, events] = await Promise.all([
+      MarketingCampaignRun.countDocuments({ public_product_id: product._id }),
+      OrderItem.countDocuments({ product_id: product._id }),
+      AffiliateEvent.countDocuments({ product_id: product._id }),
+    ]);
+    if (campaigns || orderItems || events) {
+      return res.status(409).json({
+        message: "Affiliate product is referenced and cannot be permanently deleted",
+        references: { campaigns, order_items: orderItems, affiliate_events: events },
+      });
+    }
+    await Product.deleteOne({ _id: product._id });
+    return res.json({ message: "Affiliate product permanently deleted" });
+  } catch (err) {
+    return res.status(400).json({ message: err.message });
   }
 };
 
@@ -1031,11 +1125,11 @@ async function applyAffiliateBulkAction(product, action, payload = {}) {
   }
 
   if (action === "delete") {
-    if (product.status === "active" || product.is_visible) {
-      return serializeBulkResult({ id: product._id, action, ok: false, message: "Unpublish before deleting", product });
-    }
-    await Product.deleteOne({ _id: product._id, is_affiliate: true, source_type: "admin" });
-    return serializeBulkResult({ id: product._id, action, ok: true, message: "Deleted" });
+    product.archived_at = new Date();
+    product.status = "draft";
+    product.is_visible = false;
+    await product.save();
+    return serializeBulkResult({ id: product._id, action, ok: true, message: "Archived", product });
   }
 
   return serializeBulkResult({ id: product._id, action, ok: false, message: "Unsupported bulk action", product });
@@ -1348,6 +1442,8 @@ module.exports = {
   createAffiliateProduct,
   updateAffiliateProduct,
   deleteAffiliateProduct,
+  restoreAffiliateProduct,
+  purgeAffiliateProduct,
   previewAffiliateProducts,
   uploadAffiliateProducts,
   assignAffiliateCategory,

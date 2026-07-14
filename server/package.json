@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
+    "worker:marketing": "node workers/marketingWorker.js",
+    "migrate:affiliate-prices": "node scripts/migrateAffiliatePriceState.js",
     "test": "node --test"
   },
   "dependencies": {

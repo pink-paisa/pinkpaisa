@@ -144,6 +144,7 @@ const normalizeStoredImageItems = (doc = {}) => normalizeImageItems({
 });
 
 const computeEffectivePrice = (price, salePrice) => {
+  if ((price == null || price === "") && (salePrice == null || salePrice === "")) return null;
   const normalizedPrice = normalizeNumber(price, 0);
   const normalizedSalePrice = normalizeNullableNumber(salePrice);
   return normalizedSalePrice != null ? normalizedSalePrice : normalizedPrice;
@@ -237,6 +238,11 @@ const isEligibleForAdminCampaignQueue = (product = {}) => (
 
 const toFlat = (doc, { publicView = false } = {}) => {
   const imageItems = normalizeStoredImageItems(doc);
+  const hasFreshAffiliateApiData = canShowAffiliateProductAdvertisingContent(doc);
+  const storedPriceStatus = doc.price_status || (doc.is_affiliate ? "unavailable" : "verified");
+  const priceStatus = doc.is_affiliate && storedPriceStatus === "verified" && !hasFreshAffiliateApiData
+    ? "stale"
+    : storedPriceStatus;
   const flat = {
     ...doc,
     id: doc._id.toString(),
@@ -248,12 +254,22 @@ const toFlat = (doc, { publicView = false } = {}) => {
     image_items: imageItems,
     featured_image: normalizeString(doc.featured_image) || imageItems[0]?.url || null,
     effective_price: computeEffectivePrice(doc.price, doc.sale_price),
+    price_status: priceStatus,
   };
+  flat.price_available = flat.is_affiliate
+    ? flat.price_status === "verified" && hasFreshAffiliateApiData && Number(flat.price || 0) > 0
+    : Number(flat.price || 0) > 0;
 
   if (publicView) {
     delete flat.cost_price;
     delete flat.affiliate_tag;
     delete flat.affiliate_payload;
+    delete flat.affiliate_original_url;
+    delete flat.affiliate_canonical_url;
+    delete flat.affiliate_campaign_asset_url;
+    delete flat.affiliate_campaign_usage_rights;
+    delete flat.affiliate_image_provenance;
+    delete flat.price_verified_at;
     delete flat.__v;
     if (flat.attributes && typeof flat.attributes === "object") {
       flat.attributes = sanitizePublicAttributes(flat.attributes);
@@ -271,11 +287,19 @@ const toFlat = (doc, { publicView = false } = {}) => {
       flat.image_items = manualImages.image_items;
       flat.featured_image = manualImages.featured_image;
     }
-    flat.price = 0;
+    flat.price = null;
     flat.sale_price = null;
     flat.mrp = null;
-    flat.effective_price = 0;
+    flat.effective_price = null;
+    flat.price_available = false;
     flat.stock_quantity = 0;
+  }
+
+  if (publicView && flat.is_affiliate && !flat.price_available) {
+    flat.price = null;
+    flat.sale_price = null;
+    flat.mrp = null;
+    flat.effective_price = null;
   }
 
   return flat;
@@ -670,6 +694,7 @@ const getProductsFacets = async (req, res) => {
             { $sort: { _id: 1 } },
           ],
           price_buckets: [
+            { $match: { effective_price: { $type: "number" } } },
             {
               $bucket: {
                 groupBy: "$effective_price",

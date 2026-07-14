@@ -7,6 +7,7 @@ const {
   markInstagramConnectionError,
   markInstagramPublishSuccess,
 } = require("./instagramConnectionService");
+const logger = require("../utils/logger");
 
 const INSTAGRAM_GRAPH_BASE = "https://graph.instagram.com";
 
@@ -168,16 +169,42 @@ async function getMediaInfo(mediaId, userAccessToken) {
   }, userAccessToken);
 }
 
-async function publishSingleImage({ connection, assetUrls, caption }) {
+async function publishSingleImage({ connection, assetUrls, caption, resumeState = {}, onProgress = null }) {
   const imageUrl = assetUrls[0];
-  const creation = await createImageContainer(connection.instagram_user_id, connection.user_access_token, {
-    imageUrl,
-    caption,
-  });
+  const creation = resumeState.creation_id
+    ? { id: resumeState.creation_id }
+    : await createImageContainer(connection.instagram_user_id, connection.user_access_token, { imageUrl, caption });
+
+  if (!resumeState.creation_id && onProgress) {
+    await onProgress({ status: "container_created", creation_id: creation.id, child_creation_ids: [] });
+  }
 
   await pollPublishStatus(creation.id, connection.user_access_token);
+  if (resumeState.media_id) {
+    const mediaInfo = await getMediaInfo(resumeState.media_id, connection.user_access_token).catch(() => ({ id: resumeState.media_id }));
+    return {
+      content_type: "single_image",
+      creation_id: creation.id,
+      media_id: resumeState.media_id,
+      permalink: resumeState.permalink || mediaInfo?.permalink || null,
+      media_info: mediaInfo,
+      resumed: true,
+    };
+  }
+  if (onProgress) await onProgress({ status: "publishing", creation_id: creation.id, child_creation_ids: [] });
   const published = await publishContainer(connection.instagram_user_id, connection.user_access_token, creation.id);
   const mediaInfo = await getMediaInfo(published.id, connection.user_access_token).catch(() => ({ id: published.id }));
+  if (onProgress) {
+    await onProgress({
+      status: "published",
+      creation_id: creation.id,
+      child_creation_ids: [],
+      media_id: published.id,
+      permalink: mediaInfo?.permalink || null,
+    }).catch((error) => {
+      logger.error({ err: error, instagramMediaId: published.id }, "Instagram media published but final progress persistence failed");
+    });
+  }
 
   return {
     content_type: "single_image",
@@ -188,26 +215,54 @@ async function publishSingleImage({ connection, assetUrls, caption }) {
   };
 }
 
-async function publishCarousel({ connection, assetUrls, caption }) {
-  const childIds = [];
+async function publishCarousel({ connection, assetUrls, caption, resumeState = {}, onProgress = null }) {
+  const childIds = Array.isArray(resumeState.child_creation_ids) ? [...resumeState.child_creation_ids] : [];
 
-  for (const assetUrl of assetUrls.slice(0, 10)) {
+  for (const assetUrl of assetUrls.slice(childIds.length, 10)) {
     const child = await createImageContainer(connection.instagram_user_id, connection.user_access_token, {
       imageUrl: assetUrl,
       isCarouselItem: true,
     });
     childIds.push(child.id);
+    if (onProgress) await onProgress({ status: "container_created", creation_id: resumeState.creation_id || null, child_creation_ids: childIds });
     await pollPublishStatus(child.id, connection.user_access_token, { maxAttempts: 6, delayMs: 2500 }).catch(() => null);
   }
 
-  const parent = await createCarouselContainer(connection.instagram_user_id, connection.user_access_token, {
-    children: childIds,
-    caption,
-  });
+  const parent = resumeState.creation_id
+    ? { id: resumeState.creation_id }
+    : await createCarouselContainer(connection.instagram_user_id, connection.user_access_token, { children: childIds, caption });
+
+  if (!resumeState.creation_id && onProgress) {
+    await onProgress({ status: "container_created", creation_id: parent.id, child_creation_ids: childIds });
+  }
 
   await pollPublishStatus(parent.id, connection.user_access_token, { maxAttempts: 8, delayMs: 3000 }).catch(() => null);
+  if (resumeState.media_id) {
+    const mediaInfo = await getMediaInfo(resumeState.media_id, connection.user_access_token).catch(() => ({ id: resumeState.media_id }));
+    return {
+      content_type: "carousel",
+      creation_id: parent.id,
+      child_creation_ids: childIds,
+      media_id: resumeState.media_id,
+      permalink: resumeState.permalink || mediaInfo?.permalink || null,
+      media_info: mediaInfo,
+      resumed: true,
+    };
+  }
+  if (onProgress) await onProgress({ status: "publishing", creation_id: parent.id, child_creation_ids: childIds });
   const published = await publishContainer(connection.instagram_user_id, connection.user_access_token, parent.id);
   const mediaInfo = await getMediaInfo(published.id, connection.user_access_token).catch(() => ({ id: published.id }));
+  if (onProgress) {
+    await onProgress({
+      status: "published",
+      creation_id: parent.id,
+      child_creation_ids: childIds,
+      media_id: published.id,
+      permalink: mediaInfo?.permalink || null,
+    }).catch((error) => {
+      logger.error({ err: error, instagramMediaId: published.id }, "Instagram carousel published but final progress persistence failed");
+    });
+  }
 
   return {
     content_type: "carousel",
@@ -219,7 +274,7 @@ async function publishCarousel({ connection, assetUrls, caption }) {
   };
 }
 
-async function publishInstagramDraft({ contentType, assetUrls, caption }) {
+async function publishInstagramDraft({ contentType, assetUrls, caption, resumeState = {}, onProgress = null }) {
   const connection = await getActiveInstagramConnection({ withTokens: true, refreshIfNeeded: true });
   assertPublishableUrls(assetUrls);
 
@@ -234,27 +289,30 @@ async function publishInstagramDraft({ contentType, assetUrls, caption }) {
     throw new Error("Instagram API publishing limit reached for the last 24 hours");
   }
 
+  let result;
   try {
-    const result = contentType === "carousel"
-      ? await publishCarousel({ connection, assetUrls, caption })
-      : await publishSingleImage({ connection, assetUrls, caption });
-
-    await markInstagramPublishSuccess();
-
-    return {
-      ...result,
-      publishing_limit: publishingLimit || null,
-      connection: {
-        instagram_user_id: connection.instagram_user_id,
-        instagram_username: connection.instagram_username,
-        account_type: connection.account_type || null,
-        login_type: connection.login_type || "instagram_business_login",
-      },
-    };
+    result = contentType === "carousel"
+      ? await publishCarousel({ connection, assetUrls, caption, resumeState, onProgress })
+      : await publishSingleImage({ connection, assetUrls, caption, resumeState, onProgress });
   } catch (error) {
     await markInstagramConnectionError(describeInstagramApiError(error));
     throw error;
   }
+
+  await markInstagramPublishSuccess().catch((error) => {
+    logger.error({ err: error, instagramMediaId: result?.media_id || null }, "Instagram publish succeeded but connection bookkeeping failed");
+  });
+
+  return {
+    ...result,
+    publishing_limit: publishingLimit || null,
+    connection: {
+      instagram_user_id: connection.instagram_user_id,
+      instagram_username: connection.instagram_username,
+      account_type: connection.account_type || null,
+      login_type: connection.login_type || "instagram_business_login",
+    },
+  };
 }
 
 module.exports = {

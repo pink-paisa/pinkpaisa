@@ -1,19 +1,23 @@
 const {
+  archiveCampaignRun,
   enqueueAffiliateProductCampaign,
   enqueueAdminProductCampaign,
   enqueueApprovedProductCampaign,
   getDailyBatchRunDetail,
   getCampaignRunDetail,
   getLatestDailyBatchRun,
+  getMarketingQueueHealth,
   listCampaignCalendar,
   listCampaignCatalogProducts,
   listCampaignRuns,
   publishCampaignRunsAsCarousel,
   publishCampaignRunNow,
+  purgeCampaignRun,
   recoverStaleRunningTasks,
   regenerateCampaignRun,
   resetStuckCampaignRun,
   reviewCampaignRun,
+  restoreCampaignRun,
   retryCampaignRun,
   retryFailedBatchRuns,
   runDailyBatch,
@@ -36,10 +40,53 @@ const listMarketingCampaignRuns = async (req, res) => {
       date_from: req.query.date_from || "",
       date_to: req.query.date_to || "",
       affiliate_only: req.query.affiliate_only || false,
+      include_archived: req.query.include_archived || false,
     });
     res.json(result);
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+const getMarketingQueueHealthController = async (_req, res) => {
+  try {
+    res.json(await getMarketingQueueHealth());
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const archiveMarketingCampaignController = async (req, res) => {
+  try {
+    const result = await archiveCampaignRun(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+      reason: req.body?.reason || "",
+    });
+    res.json({ message: "Campaign archived", ...result });
+  } catch (error) {
+    res.status(409).json({ message: error.message });
+  }
+};
+
+const restoreMarketingCampaignController = async (req, res) => {
+  try {
+    const result = await restoreCampaignRun(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.json({ message: "Campaign restored", ...result });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+const purgeMarketingCampaignController = async (req, res) => {
+  try {
+    const result = await purgeCampaignRun(req.params.id, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.json({ message: "Campaign permanently deleted", ...result });
+  } catch (error) {
+    res.status(409).json({ message: error.message });
   }
 };
 
@@ -195,7 +242,7 @@ const publishMarketingCampaignController = async (req, res) => {
     const updated = await publishCampaignRunNow(req.params.id, {
       actorAdminId: req.user?._id || req.user?.id || null,
     });
-    res.json({ message: "Instagram publish completed", ...updated });
+    res.status(202).json({ message: "Instagram publish queued", queued: true, ...updated });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
@@ -206,8 +253,8 @@ const publishMarketingCarouselController = async (req, res) => {
     const result = await publishCampaignRunsAsCarousel(req.body.run_ids || [], {
       actorAdminId: req.user?._id || req.user?.id || null,
     });
-    res.json({
-      message: `Instagram carousel published for ${result.runs.length} reviewed product${result.runs.length === 1 ? "" : "s"}`,
+    res.status(202).json({
+      message: `Instagram carousel queued for ${result.runs.length} reviewed product${result.runs.length === 1 ? "" : "s"}`,
       ...result,
     });
   } catch (error) {
@@ -302,20 +349,24 @@ const createMarketingCampaignFromProductSource = async (req, res) => {
 };
 
 module.exports = {
+  archiveMarketingCampaignController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
   getMarketingBatchDetail,
   getMarketingCampaignCalendar,
   listMarketingCampaignCatalogProducts,
   getLatestMarketingBatch,
+  getMarketingQueueHealthController,
   getMarketingCampaignRun,
   listMarketingCampaignRuns,
   publishMarketingCarouselController,
   publishMarketingCampaignController,
+  purgeMarketingCampaignController,
   recoverStaleMarketingTasksController,
   regenerateMarketingCampaign,
   resetStuckMarketingCampaignController,
   reviewMarketingCampaignRun,
+  restoreMarketingCampaignController,
   retryFailedMarketingBatchItems,
   retryMarketingCampaign,
   runDailyMarketingBatchController,

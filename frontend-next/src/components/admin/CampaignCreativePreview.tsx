@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Maximize2 } from "lucide-react";
 
 const CampaignCreativePreview = ({
   title,
@@ -7,12 +9,14 @@ const CampaignCreativePreview = ({
   contentType,
   ctaText,
   trackedUrl,
+  onPreview,
 }: {
   title: string;
   assetUrls: string[];
   contentType: string | null | undefined;
   ctaText: string | null | undefined;
   trackedUrl: string | null | undefined;
+  onPreview?: (index: number) => void;
 }) => {
   const urls = Array.isArray(assetUrls) ? assetUrls.filter(Boolean) : [];
   const [activeIndex, setActiveIndex] = useState(0);
@@ -25,18 +29,38 @@ const CampaignCreativePreview = ({
 
   return (
     <div className="rounded-2xl border border-border p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Instagram creative</p>
-        {contentType ? <Badge variant="outline" className="rounded-full capitalize">{contentType.replace(/_/g, " ")}</Badge> : null}
-        {ctaText ? <Badge className="rounded-full bg-[#B54777]">{ctaText}</Badge> : null}
-        {urls.length > 1 ? <p className="text-xs text-muted-foreground">{urls.length} slides</p> : null}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Instagram creative</p>
+          {contentType ? <Badge variant="outline" className="rounded-full capitalize">{contentType.replace(/_/g, " ")}</Badge> : null}
+          {ctaText ? <Badge className="rounded-full bg-[#B54777]">{ctaText}</Badge> : null}
+          {urls.length > 1 ? <p className="text-xs text-muted-foreground">{urls.length} slides</p> : null}
+        </div>
+        {selectedUrl && onPreview ? (
+          <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={() => onPreview(activeIndex)}>
+            <Maximize2 className="mr-2 h-4 w-4" /> Preview post
+          </Button>
+        ) : null}
       </div>
 
       {selectedUrl ? (
         <div className="mt-4 space-y-3">
-          <div className="overflow-hidden rounded-[28px] border border-border/70 bg-[#fff8fa]">
+          <button
+            type="button"
+            onClick={() => onPreview?.(activeIndex)}
+            className="group relative block w-full overflow-hidden rounded-lg border border-border/70 bg-[#fff8fa] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            aria-label={`Preview ${title} creative slide ${activeIndex + 1}`}
+            disabled={!onPreview}
+          >
             <img src={selectedUrl} alt={`${title} creative ${activeIndex + 1}`} className="aspect-[4/5] w-full max-h-[34rem] object-cover object-center" />
-          </div>
+            {onPreview ? (
+              <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-all group-hover:bg-black/25 group-hover:opacity-100 group-focus-visible:bg-black/25 group-focus-visible:opacity-100">
+                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-black/70" aria-hidden="true">
+                  <Maximize2 className="h-5 w-5" />
+                </span>
+              </span>
+            ) : null}
+          </button>
 
           {urls.length > 1 ? (
             <div className="-mx-1 overflow-x-auto pb-1">

@@ -1,13 +1,15 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 import { EmptyState, LoadingSpinner, StatusBadge } from "./AdminShared";
-import { AlertTriangle, CalendarDays, CheckCircle2, Copy, Eye, Link as LinkIcon, Search, Sparkles, Wand2 } from "lucide-react";
+import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Copy, Eye, ExternalLink, Link as LinkIcon, Maximize2, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import InstagramConnectionPanel from "./InstagramConnectionPanel";
 import CampaignAutomationPanel, {
@@ -17,7 +19,11 @@ import CampaignAutomationPanel, {
   type CampaignImageProviderRegistry,
 } from "./CampaignAutomationPanel";
 import CampaignCreativePreview from "./CampaignCreativePreview";
+import CampaignPostLightbox, { type CampaignPostPreview } from "./CampaignPostLightbox";
 import CampaignPublishActions from "./CampaignPublishActions";
+import CampaignQueueHealth, { type CampaignQueueHealthData } from "./CampaignQueueHealth";
+import CampaignTimeline, { type CampaignPublishEvent, type CampaignTask } from "./CampaignTimeline";
+import { useCampaignPolling } from "@/hooks/useCampaignPolling";
 
 type TaskCounts = { queued?: number; running?: number; completed?: number; failed?: number; cancelled?: number };
 type PublishReadinessIssue = { code: string; message: string };
@@ -39,6 +45,7 @@ type CampaignRun = {
   affiliate_url?: string | null;
   affiliate_external_id?: string | null;
   affiliate_source_platform?: string | null;
+  affiliate_source_mode?: string | null;
   status: string;
   current_stage: string;
   review_stage: string | null;
@@ -56,6 +63,9 @@ type CampaignRun = {
   published_at?: string | null;
   instagram_media_id?: string | null;
   instagram_permalink?: string | null;
+  archived_at?: string | null;
+  archive_reason?: string | null;
+  next_action?: string | null;
   last_error: string | null;
   publish_readiness?: PublishReadiness | null;
   brief_json?: {
@@ -65,10 +75,12 @@ type CampaignRun = {
     affiliate_url?: string | null;
     affiliate_external_id?: string | null;
     affiliate_source_platform?: string | null;
+    affiliate_source_mode?: string | null;
     affiliate?: {
       url?: string | null;
       external_id?: string | null;
       source_platform?: string | null;
+      source_mode?: string | null;
       source_label?: string | null;
     } | null;
   } | null;
@@ -82,18 +94,6 @@ type CampaignRun = {
     publish_payload?: { tracked_url?: string; asset_urls?: string[]; caption?: string };
   } | null;
   task_counts?: TaskCounts;
-};
-type CampaignTask = {
-  id: string;
-  agent_name: string;
-  sequence: number;
-  status: string;
-  attempt_count: number;
-  input_json: unknown;
-  output_json: unknown;
-  error_message: string | null;
-  started_at: string | null;
-  finished_at: string | null;
 };
 type BatchRun = {
   id: string;
@@ -165,24 +165,13 @@ type CampaignListResponse = {
     published: number;
     failed: number;
     rejected: number;
+    archived: number;
     ready_to_post?: number;
     blocked?: number;
     affiliate?: number;
   };
   latest_batch: BatchRun | null;
   pagination: { page: number; limit: number; total: number; total_pages: number };
-};
-type PublishEvent = {
-  id: string;
-  action_type: string;
-  status: string;
-  product_title?: string | null;
-  instagram_media_id?: string | null;
-  instagram_permalink?: string | null;
-  error_message?: string | null;
-  readiness_snapshot?: PublishReadiness | null;
-  metadata_json?: Record<string, unknown> | null;
-  created_at: string | null;
 };
 type CampaignDetailResponse = {
   run: CampaignRun & {
@@ -215,7 +204,7 @@ type CampaignDetailResponse = {
   };
   batch: BatchRun | null;
   tasks: CampaignTask[];
-  publish_events?: PublishEvent[];
+  publish_events?: CampaignPublishEvent[];
 };
 type CatalogProductListResponse = {
   items: CatalogProduct[];
@@ -266,10 +255,18 @@ const getProductImageUrl = (run: CampaignRun) => {
   return run.brief_json?.primary_image || images?.find(Boolean) || run.product_image_url || fallbackImages.find(Boolean) || null;
 };
 
-const getCreativeImageUrl = (run: CampaignRun) => (
-  run.asset_urls?.find(Boolean)
-  || run.creative_json?.primary_asset_url
-  || run.creative_json?.asset_urls?.find(Boolean)
+const getCreativeAssetUrls = (run: CampaignRun) => Array.from(new Set([
+  ...(run.tracking_json?.publish_payload?.asset_urls || []),
+  ...(run.asset_urls || []),
+  ...(run.creative_json?.asset_urls || []),
+  run.creative_json?.primary_asset_url || "",
+].map((url) => String(url || "").trim()).filter(Boolean)));
+
+const getCreativeImageUrl = (run: CampaignRun) => getCreativeAssetUrls(run)[0] || null;
+
+const getCampaignTrackedUrl = (run: CampaignRun) => (
+  run.tracking_json?.links?.instagram_feed
+  || run.tracking_json?.publish_payload?.tracked_url
   || null
 );
 
@@ -289,6 +286,8 @@ const getAffiliateUrl = (run: CampaignRun) => run.affiliate_url || run.brief_jso
 const getAffiliateExternalId = (run: CampaignRun) => run.affiliate_external_id || run.brief_json?.affiliate_external_id || run.brief_json?.affiliate?.external_id || null;
 
 const getAffiliateSourcePlatform = (run: CampaignRun) => run.affiliate_source_platform || run.brief_json?.affiliate_source_platform || run.brief_json?.affiliate?.source_platform || null;
+
+const getAffiliateSourceMode = (run: CampaignRun) => run.affiliate_source_mode || run.brief_json?.affiliate_source_mode || run.brief_json?.affiliate?.source_mode || null;
 
 const truncateText = (value: string | null | undefined, maxLength = 140) => {
   if (!value) return EMPTY_PLACEHOLDER;
@@ -323,6 +322,7 @@ const getQuickFilterParams = (quickFilter: string): Record<string, string> => {
   if (quickFilter === "published") return { status: "published" };
   if (quickFilter === "failed") return { status: "failed" };
   if (quickFilter === "affiliate") return { affiliate_only: "true" };
+  if (quickFilter === "archived") return { include_archived: "only" };
   return {};
 };
 
@@ -339,6 +339,7 @@ const AdminCampaigns = () => {
       published: 0,
       failed: 0,
       rejected: 0,
+      archived: 0,
       ready_to_post: 0,
       blocked: 0,
       affiliate: 0,
@@ -347,6 +348,7 @@ const AdminCampaigns = () => {
     pagination: { page: 1, limit: 10, total: 0, total_pages: 1 },
   });
   const [connection, setConnection] = useState<ConnectionSummary | null>(null);
+  const [queueHealth, setQueueHealth] = useState<CampaignQueueHealthData | null>(null);
   const [campaignSettings, setCampaignSettings] = useState<CampaignAutomationSettings>(DEFAULT_CAMPAIGN_SETTINGS);
   const [imageRegistry, setImageRegistry] = useState<CampaignImageProviderRegistry>(DEFAULT_CAMPAIGN_IMAGE_PROVIDER_REGISTRY);
   const [loading, setLoading] = useState(true);
@@ -385,6 +387,10 @@ const AdminCampaigns = () => {
   const [calendarLoading, setCalendarLoading] = useState(false);
   const [batchDetail, setBatchDetail] = useState<BatchDetailResponse | null>(null);
   const [batchDetailLoading, setBatchDetailLoading] = useState(false);
+  const [lifecycleAction, setLifecycleAction] = useState<"archive" | "restore" | "purge" | null>(null);
+  const [postPreview, setPostPreview] = useState<CampaignPostPreview | null>(null);
+  const previousDetailState = useRef<string | null>(null);
+  const previousListStates = useRef<Map<string, string>>(new Map());
 
   const loadCatalogProducts = async () => {
     try {
@@ -406,9 +412,9 @@ const AdminCampaigns = () => {
     }
   };
 
-  const loadCampaigns = async () => {
+  const loadCampaigns = async ({ silent = false }: { silent?: boolean } = {}) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const quickParams = getQuickFilterParams(quickFilter);
       const params = new URLSearchParams({
         search: debouncedSearch,
@@ -418,12 +424,13 @@ const AdminCampaigns = () => {
       });
       if (quickParams.readiness) params.set("readiness", quickParams.readiness);
       if (quickParams.affiliate_only) params.set("affiliate_only", quickParams.affiliate_only);
+      if (quickParams.include_archived) params.set("include_archived", quickParams.include_archived);
       const response = await apiFetch<CampaignListResponse>(`/marketing-campaigns/admin?${params.toString()}`);
       setData(response);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load campaign runs");
+      if (!silent) toast.error(error instanceof Error ? error.message : "Could not load campaign runs");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -470,6 +477,15 @@ const AdminCampaigns = () => {
     }
   };
 
+  const loadQueueHealth = async ({ silent = false }: { silent?: boolean } = {}) => {
+    try {
+      const response = await apiFetch<CampaignQueueHealthData>("/marketing-campaigns/admin/queue-health");
+      setQueueHealth(response);
+    } catch (error) {
+      if (!silent) toast.error(error instanceof Error ? error.message : "Could not load marketing worker health");
+    }
+  };
+
   const loadCalendar = async () => {
     try {
       setCalendarLoading(true);
@@ -506,18 +522,18 @@ const AdminCampaigns = () => {
     }
   };
 
-  const loadDetail = async (id: string) => {
+  const loadDetail = async (id: string, { silent = false, open = true }: { silent?: boolean; open?: boolean } = {}) => {
     try {
-      setDetailLoading(true);
+      if (!silent) setDetailLoading(true);
       setSelectedId(id);
-      setDetailOpen(true);
+      if (open) setDetailOpen(true);
       const response = await apiFetch<CampaignDetailResponse>(`/marketing-campaigns/admin/${id}`);
       setDetail(response);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not load campaign detail");
-      setDetailOpen(false);
+      if (!silent) toast.error(error instanceof Error ? error.message : "Could not load campaign detail");
+      if (open) setDetailOpen(false);
     } finally {
-      setDetailLoading(false);
+      if (!silent) setDetailLoading(false);
     }
   };
 
@@ -543,6 +559,7 @@ const AdminCampaigns = () => {
 
   useEffect(() => {
     loadConnection();
+    loadQueueHealth();
     loadCampaignSettings();
     loadImageRegistry();
     loadCalendar();
@@ -577,6 +594,48 @@ const AdminCampaigns = () => {
     loadCatalogProducts();
   }, [catalogOpen, catalogDebouncedSearch, catalogSource, catalogReadiness, catalogPage]);
 
+  const detailPollingActive = Boolean(
+    detailOpen
+    && selectedId
+    && detail?.run
+    && ["queued", "running", "batch_running", "publishing", "scheduled"].includes(detail.run.status)
+  );
+
+  useCampaignPolling({
+    pollList: () => Promise.all([loadCampaigns({ silent: true }), loadQueueHealth({ silent: true })]).then(() => undefined),
+    pollDetail: () => selectedId ? loadDetail(selectedId, { silent: true, open: false }) : undefined,
+    detailEnabled: detailPollingActive,
+  });
+
+  useEffect(() => {
+    if (!detail?.run) return;
+    const stateKey = `${detail.run.id}:${detail.run.status}:${detail.run.publish_status || ""}`;
+    if (previousDetailState.current && previousDetailState.current !== stateKey) {
+      if (detail.run.status === "waiting_review") {
+        toast.success(`${detail.run.product_title || "Campaign"} is ready for review`);
+      }
+      if (detail.run.status === "failed" || detail.run.publish_status === "failed") {
+        toast.error(`${detail.run.product_title || "Campaign"} needs attention`);
+      }
+    }
+    previousDetailState.current = stateKey;
+  }, [detail?.run.id, detail?.run.product_title, detail?.run.publish_status, detail?.run.status]);
+
+  useEffect(() => {
+    const previous = previousListStates.current;
+    const next = new Map<string, string>();
+    data.items.forEach((run) => {
+      const state = `${run.status}:${run.publish_status || ""}`;
+      const prior = previous.get(run.id);
+      if (prior && prior !== state && !(detailOpen && selectedId === run.id)) {
+        if (run.status === "waiting_review") toast.success(`${run.product_title || "Campaign"} is ready for review`);
+        if (run.status === "failed" || run.publish_status === "failed") toast.error(`${run.product_title || "Campaign"} needs attention`);
+      }
+      next.set(run.id, state);
+    });
+    previousListStates.current = next;
+  }, [data.items, detailOpen, selectedId]);
+
   const eligibleVisibleRuns = useMemo(() => data.items.filter(canBulkPublishRun), [data.items]);
   const selectedVisibleRuns = useMemo(
     () => data.items.filter((run) => selectedRunIds.includes(run.id)),
@@ -600,7 +659,23 @@ const AdminCampaigns = () => {
   };
 
   const refreshAll = async () => {
-    await Promise.all([loadCampaigns(), loadConnection(), loadCampaignSettings(), loadImageRegistry(), loadCalendar(), selectedId ? refreshDetail() : Promise.resolve()]);
+    await Promise.all([loadCampaigns(), loadConnection(), loadQueueHealth(), loadCampaignSettings(), loadImageRegistry(), loadCalendar(), selectedId ? refreshDetail() : Promise.resolve()]);
+  };
+
+  const openPostPreview = (run: CampaignRun, startIndex = 0) => {
+    const assetUrls = getCreativeAssetUrls(run);
+    if (!assetUrls.length) {
+      toast.info("The generated creative is not available yet");
+      return;
+    }
+    setPostPreview({
+      title: run.product_title || "Campaign creative",
+      assetUrls,
+      startIndex,
+      contentType: run.content_type || null,
+      ctaText: run.cta_text || null,
+      trackedUrl: getCampaignTrackedUrl(run),
+    });
   };
 
   const handleConnectInstagram = async () => {
@@ -848,7 +923,7 @@ const AdminCampaigns = () => {
         method: "POST",
         body: JSON.stringify({}),
       });
-      toast.success("Instagram publish completed");
+      toast.success("Instagram publish queued");
       await refreshAll();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not publish to Instagram");
@@ -904,7 +979,7 @@ const AdminCampaigns = () => {
         method: "POST",
         body: JSON.stringify({ run_ids: selectedRunIds }),
       });
-      toast.success(response.message || "Instagram carousel published");
+      toast.success(response.message || "Instagram carousel queued");
       setSelectedRunIds([]);
       await refreshAll();
     } catch (error) {
@@ -1023,6 +1098,7 @@ const AdminCampaigns = () => {
     { id: "published", label: "Published" },
     { id: "failed", label: "Failed" },
     { id: "affiliate", label: "Affiliate only" },
+    { id: "archived", label: "Archived" },
   ]), []);
 
   const statusCards = useMemo(() => ([
@@ -1034,6 +1110,7 @@ const AdminCampaigns = () => {
     { label: "Published this week", value: data.counts.published, tone: "text-emerald-700" },
     { label: "Failed publishes", value: data.counts.failed, tone: "text-rose-600" },
     { label: "Affiliate runs", value: data.counts.affiliate ?? 0, tone: "text-amber-700" },
+    { label: "Archived", value: data.counts.archived ?? 0, tone: "text-muted-foreground" },
   ]), [data.counts]);
 
   const connectionSummary = useMemo(() => {
@@ -1126,6 +1203,34 @@ const AdminCampaigns = () => {
     }
     await navigator.clipboard.writeText(trackedUrl);
     toast.success("Tracked link copied");
+  };
+
+  const runLifecycleAction = async () => {
+    if (!selectedId || !lifecycleAction) return;
+    const action = lifecycleAction;
+    try {
+      setActionLoading(true);
+      if (action === "purge") {
+        await apiFetch(`/marketing-campaigns/admin/${selectedId}`, { method: "DELETE" });
+        toast.success("Campaign permanently deleted from Pink Paisa");
+        setDetailOpen(false);
+        setDetail(null);
+        setSelectedId(null);
+      } else {
+        await apiFetch(`/marketing-campaigns/admin/${selectedId}/${action}`, {
+          method: "POST",
+          body: JSON.stringify(action === "archive" ? { reason: "Archived from campaign admin" } : {}),
+        });
+        toast.success(action === "archive" ? "Campaign archived" : "Campaign restored");
+        await loadDetail(selectedId, { silent: true, open: false });
+      }
+      setLifecycleAction(null);
+      await loadCampaigns({ silent: true });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Campaign lifecycle action failed");
+    } finally {
+      setActionLoading(false);
+    }
   };
 
   const finalCaptionPreview = useMemo(() => {
@@ -1408,6 +1513,8 @@ const AdminCampaigns = () => {
         </div>
       </div>
 
+      <CampaignQueueHealth health={queueHealth} />
+
       <div className="rounded-3xl border border-border bg-card p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -1519,7 +1626,18 @@ const AdminCampaigns = () => {
                     <div className="flex min-w-[12rem] gap-3">
                       <div className="h-16 w-14 shrink-0 overflow-hidden rounded-2xl border border-border/70 bg-[#fff8fa]">
                         {getCreativeImageUrl(run) ? (
-                          <img src={getCreativeImageUrl(run)!} alt={`${run.product_title || "Campaign"} creative`} className="h-full w-full object-cover" />
+                          <button
+                            type="button"
+                            onClick={() => openPostPreview(run)}
+                            className="group relative block h-full w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            aria-label={`Preview ${run.product_title || "campaign"} post`}
+                            title="Preview generated post"
+                          >
+                            <img src={getCreativeImageUrl(run)!} alt={`${run.product_title || "Campaign"} creative`} className="h-full w-full object-cover" />
+                            <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-all group-hover:bg-black/30 group-hover:opacity-100 group-focus-visible:bg-black/30 group-focus-visible:opacity-100" aria-hidden="true">
+                              <Maximize2 className="h-4 w-4" />
+                            </span>
+                          </button>
                         ) : (
                           <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">Draft</div>
                         )}
@@ -1529,9 +1647,16 @@ const AdminCampaigns = () => {
                           {getCreativeImageUrl(run) ? "Creative ready" : "No generated creative"}
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          {run.asset_urls?.length ? `${run.asset_urls.length} asset${run.asset_urls.length === 1 ? "" : "s"}` : "Waiting for creative stage"}
+                          {getCreativeAssetUrls(run).length
+                            ? `${getCreativeAssetUrls(run).length} asset${getCreativeAssetUrls(run).length === 1 ? "" : "s"}`
+                            : "Waiting for creative stage"}
                         </p>
                         {run.content_type ? <div><StatusBadge status={run.content_type} /></div> : null}
+                        {getCreativeImageUrl(run) ? (
+                          <button type="button" onClick={() => openPostPreview(run)} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+                            <Maximize2 className="h-3.5 w-3.5" /> Preview post
+                          </button>
+                        ) : null}
                       </div>
                     </div>
                   </td>
@@ -1799,7 +1924,7 @@ const AdminCampaigns = () => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+      <Dialog open={detailOpen} onOpenChange={setDetailOpen} modal={!postPreview}>
         <DialogContent className="w-[min(96vw,1400px)] max-w-none overflow-hidden rounded-[28px] border border-border/80 p-0 shadow-2xl">
           <div className="flex max-h-[92vh] flex-col bg-background">
           <DialogHeader className="shrink-0 border-b border-border/70 bg-background px-6 py-5 pr-14">
@@ -1822,6 +1947,39 @@ const AdminCampaigns = () => {
                 <div className="rounded-2xl border border-border p-4"><p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Status</p><div className="mt-2"><StatusBadge status={detail.run.status} /></div></div>
                 <div className="rounded-2xl border border-border p-4"><p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Review</p><div className="mt-2"><StatusBadge status={detail.run.review_status || "pending"} /></div></div>
                 <div className="rounded-2xl border border-border p-4"><p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Publish</p><div className="mt-2"><StatusBadge status={detail.run.publish_status || "not_ready"} /></div></div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-4 border-y border-border/70 py-4">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Next action</p>
+                  <p className="mt-1 font-medium capitalize">{(detail.run.next_action || detail.run.current_stage || "wait_for_worker").replace(/_/g, " ")}</p>
+                  {detail.run.archived_at ? <p className="mt-1 text-xs text-muted-foreground">Archived {formatDateTime(detail.run.archived_at)}</p> : null}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {detail.run.instagram_permalink ? (
+                    <Button asChild variant="outline" className="rounded-xl">
+                      <a href={detail.run.instagram_permalink} target="_blank" rel="noreferrer">
+                        <ExternalLink className="mr-2 h-4 w-4" /> Open Instagram
+                      </a>
+                    </Button>
+                  ) : null}
+                  {detail.run.archived_at ? (
+                    <>
+                      <Button variant="outline" className="rounded-xl" onClick={() => setLifecycleAction("restore")} disabled={actionLoading}>
+                        <RotateCcw className="mr-2 h-4 w-4" /> Restore
+                      </Button>
+                      {!detail.run.instagram_media_id && !detail.run.published_at ? (
+                        <Button variant="destructive" className="rounded-xl" onClick={() => setLifecycleAction("purge")} disabled={actionLoading}>
+                          <Trash2 className="mr-2 h-4 w-4" /> Delete permanently
+                        </Button>
+                      ) : null}
+                    </>
+                  ) : (
+                    <Button variant="outline" className="rounded-xl" onClick={() => setLifecycleAction("archive")} disabled={actionLoading || detail.run.publish_status === "publishing"}>
+                      <Archive className="mr-2 h-4 w-4" /> Archive
+                    </Button>
+                  )}
+                </div>
               </div>
 
               {detail.run.review_notes && (
@@ -1857,7 +2015,7 @@ const AdminCampaigns = () => {
                     </div>
                     <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800">Affiliate</span>
                   </div>
-                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                  <div className="mt-4 grid gap-3 md:grid-cols-4">
                     <div className="rounded-xl bg-background/70 p-3">
                       <p className="text-xs uppercase tracking-[0.12em] text-amber-800">Affiliate URL</p>
                       {getAffiliateUrl(detail.run) ? (
@@ -1875,6 +2033,10 @@ const AdminCampaigns = () => {
                     <div className="rounded-xl bg-background/70 p-3">
                       <p className="text-xs uppercase tracking-[0.12em] text-amber-800">Source platform</p>
                       <p className="mt-2 break-all font-medium">{getAffiliateSourcePlatform(detail.run) || detail.run.vendor_shop_name || EMPTY_PLACEHOLDER}</p>
+                    </div>
+                    <div className="rounded-xl bg-background/70 p-3">
+                      <p className="text-xs uppercase tracking-[0.12em] text-amber-800">Source mode</p>
+                      <p className="mt-2 break-all font-medium capitalize">{(getAffiliateSourceMode(detail.run) || EMPTY_PLACEHOLDER).replace(/_/g, " ")}</p>
                     </div>
                   </div>
                 </div>
@@ -1999,10 +2161,11 @@ const AdminCampaigns = () => {
                 <div className="min-w-0 space-y-6">
                   <CampaignCreativePreview
                     title={detail.run.product_title || "Campaign creative"}
-                    assetUrls={detail.run.asset_urls || detail.run.creative_json?.asset_urls || detail.run.creative_json?.creative_json?.slides?.map((slide) => slide.url || "").filter(Boolean) || []}
+                    assetUrls={getCreativeAssetUrls(detail.run)}
                     contentType={detail.run.content_type || detail.run.creative_json?.content_type}
                     ctaText={detail.run.cta_text || detail.run.creative_json?.cta_text}
                     trackedUrl={trackedUrl}
+                    onPreview={(index) => openPostPreview(detail.run, index)}
                   />
 
                   <div className="rounded-2xl border border-border p-4">
@@ -2146,60 +2309,7 @@ const AdminCampaigns = () => {
                     </div>
                   </div>
 
-                  <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Publish history</p>
-                      <p className="mt-1 text-sm text-muted-foreground">Audit trail for schedules, retries, carousel posts, and Instagram publish attempts.</p>
-                    </div>
-                    <div className="mt-4 max-h-72 space-y-3 overflow-y-auto pr-1">
-                      {!detail.publish_events?.length ? (
-                        <p className="rounded-2xl bg-background/50 p-3 text-sm text-muted-foreground">No publish events recorded yet.</p>
-                      ) : detail.publish_events.map((event) => (
-                        <div key={event.id} className="rounded-2xl border border-border/70 bg-background/50 p-3 text-sm">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2">
-                              <StatusBadge status={event.status} />
-                              <span className="font-medium">{event.action_type.replace(/_/g, " ")}</span>
-                            </div>
-                            <span className="text-xs text-muted-foreground">{formatDateTime(event.created_at)}</span>
-                          </div>
-                          {event.instagram_permalink ? (
-                            <a href={event.instagram_permalink} target="_blank" rel="noreferrer" className="mt-2 block break-all text-xs text-primary underline-offset-4 hover:underline">
-                              {event.instagram_permalink}
-                            </a>
-                          ) : null}
-                          {event.error_message ? <p className="mt-2 text-xs text-rose-700">{event.error_message}</p> : null}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Agent tasks</p>
-                        <p className="mt-1 text-sm text-muted-foreground">Inspect retries, errors, and task payloads only when you need them.</p>
-                      </div>
-                    </div>
-                    <Accordion type="multiple" className="mt-4 max-h-[420px] space-y-3 overflow-y-auto pr-1">
-                      {detail.tasks.map((task) => (
-                        <AccordionItem key={task.id} value={task.id} className="rounded-2xl border border-border/70 px-4">
-                          <AccordionTrigger className="py-4 text-left hover:no-underline">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <p className="font-medium capitalize">{task.sequence}. {task.agent_name}</p>
-                              <StatusBadge status={task.status} />
-                              <span className="text-xs text-muted-foreground">Attempts: {task.attempt_count}</span>
-                            </div>
-                          </AccordionTrigger>
-                          <AccordionContent className="pb-0">
-                          <p className="mt-2 text-xs text-muted-foreground">Started: {formatDateTime(task.started_at)} | Finished: {formatDateTime(task.finished_at)}</p>
-                          {task.error_message ? <p className="mb-3 text-sm text-rose-700">{task.error_message}</p> : null}
-                          {task.output_json ? <JsonBlock value={task.output_json} /> : null}
-                          </AccordionContent>
-                        </AccordionItem>
-                      ))}
-                    </Accordion>
-                  </div>
+                  <CampaignTimeline events={detail.publish_events || []} tasks={detail.tasks} />
                   </div>
                 </div>
               </div>
@@ -2209,6 +2319,27 @@ const AdminCampaigns = () => {
           </div>
         </DialogContent>
       </Dialog>
+      {postPreview ? (
+        <CampaignPostLightbox
+          open
+          onClose={() => setPostPreview(null)}
+          {...postPreview}
+        />
+      ) : null}
+      <ConfirmActionDialog
+        open={lifecycleAction !== null}
+        onOpenChange={(open) => !open && setLifecycleAction(null)}
+        title={lifecycleAction === "purge" ? "Delete campaign permanently" : lifecycleAction === "restore" ? "Restore campaign" : "Archive campaign"}
+        description={lifecycleAction === "purge"
+          ? "This removes the unpublished campaign, task history, and unreferenced generated assets from Pink Paisa. This cannot be undone."
+          : lifecycleAction === "restore"
+            ? "Restore this campaign to its previous workflow state. Scheduled campaigns return as ready to publish and are not automatically rescheduled."
+            : "Archive this campaign and cancel queued work. Published Instagram media remains live and available through its permalink."}
+        confirmLabel={lifecycleAction === "purge" ? "Delete permanently" : lifecycleAction === "restore" ? "Restore campaign" : "Archive campaign"}
+        destructive={lifecycleAction === "purge"}
+        pending={actionLoading}
+        onConfirm={runLifecycleAction}
+      />
     </div>
   );
 };

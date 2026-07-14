@@ -3,6 +3,8 @@ type AffiliateProductData = {
   affiliate_data_source?: string | null;
   affiliate_data_last_refreshed_at?: string | null;
   affiliate_data_expires_at?: string | null;
+  price_status?: "unavailable" | "manual_unverified" | "verified" | "stale" | null;
+  price_available?: boolean;
   price?: number | null;
   sale_price?: number | null;
 };
@@ -17,6 +19,7 @@ export function hasFreshAffiliateApiData(product?: AffiliateProductData | null) 
 
 export function hasVisibleAffiliatePrice(product?: AffiliateProductData | null) {
   if (!hasFreshAffiliateApiData(product)) return false;
+  if (product?.price_status !== "verified" || product.price_available !== true) return false;
   const value = Number(product?.sale_price ?? product?.price ?? 0);
   return Number.isFinite(value) && value > 0;
 }

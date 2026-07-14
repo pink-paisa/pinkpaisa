@@ -1,8 +1,9 @@
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
+const MarketingAsset = require("../models/MarketingAsset");
+const { createCampaignAssetVersion, storeCampaignAsset } = require("./campaignAssetStorage");
 
-const OUTPUT_DIR = path.join(__dirname, "..", "uploads", "generated", "campaigns");
 const DEFAULT_SERVER_URL = "http://localhost:5000";
 const CANVAS_WIDTH = 1080;
 const CANVAS_HEIGHT = 1350;
@@ -30,10 +31,6 @@ function slugify(value) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || "campaign";
-}
-
-function ensureOutputDir() {
-  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
 function getSharp() {
@@ -237,7 +234,7 @@ function buildFeatureSlideSvg({ headline, bullets, footerLabel }) {
   `);
 }
 
-function buildClosingSlideSvg({ ctaText, priceLabel, footerLabel }) {
+function buildClosingSlideSvg({ ctaText, priceLabel, actionLabel, footerLabel }) {
   return Buffer.from(`
     <svg width="${CANVAS_WIDTH}" height="${CANVAS_HEIGHT}" viewBox="0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}" xmlns="http://www.w3.org/2000/svg">
       <defs>
@@ -253,7 +250,7 @@ function buildClosingSlideSvg({ ctaText, priceLabel, footerLabel }) {
       <text x="84" y="380" fill="#FFFFFF" font-size="110" font-weight="700" font-family="'Georgia','Times New Roman',serif">${escapeXml(ctaText)}</text>
       <text x="84" y="500" fill="#FFE8F0" font-size="42" font-weight="600" font-family="'Arial','Helvetica',sans-serif">${escapeXml(priceLabel)}</text>
       <rect x="84" y="980" width="540" height="110" rx="55" fill="#FFFFFF" />
-      <text x="152" y="1050" fill="#B54777" font-size="44" font-weight="700" font-family="'Arial','Helvetica',sans-serif">Tap to shop</text>
+      <text x="152" y="1050" fill="#B54777" font-size="44" font-weight="700" font-family="'Arial','Helvetica',sans-serif">${escapeXml(actionLabel)}</text>
       <text x="84" y="1210" fill="#FFE8F0" font-size="30" font-weight="500" font-family="'Arial','Helvetica',sans-serif">${escapeXml(footerLabel)}</text>
     </svg>
   `);
@@ -261,10 +258,12 @@ function buildClosingSlideSvg({ ctaText, priceLabel, footerLabel }) {
 
 async function renderBaseSlide({ overlaySvg, productBuffer, productWidth = 700, productHeight = 700, productTop = 520, productLeft = 190 }) {
   const sharp = getSharp();
-  const resizedProduct = await sharp(productBuffer)
-    .resize(productWidth, productHeight, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 0 } })
-    .png()
-    .toBuffer();
+  const resizedProduct = productBuffer
+    ? await sharp(productBuffer)
+      .resize(productWidth, productHeight, { fit: "contain", background: { r: 255, g: 255, b: 255, alpha: 0 } })
+      .png()
+      .toBuffer()
+    : null;
 
   return sharp({
     create: {
@@ -276,23 +275,42 @@ async function renderBaseSlide({ overlaySvg, productBuffer, productWidth = 700, 
   })
     .composite([
       { input: overlaySvg, top: 0, left: 0 },
-      { input: resizedProduct, top: productTop, left: productLeft },
+      ...(resizedProduct ? [{ input: resizedProduct, top: productTop, left: productLeft }] : []),
     ])
     .jpeg({ quality: 92, mozjpeg: true })
     .toBuffer();
 }
 
-async function writeOutput(fileName, buffer) {
-  ensureOutputDir();
-  const filePath = path.join(OUTPUT_DIR, fileName);
-  await fs.promises.writeFile(filePath, buffer);
-  return {
-    file_path: filePath,
-    public_url: `${getServerBaseUrl()}/uploads/generated/campaigns/${fileName}`,
-  };
+async function writeOutput({ run, brief, fileName, buffer }) {
+  const stored = await storeCampaignAsset({ fileName, buffer });
+  const sourceAsset = brief?.campaign_asset || {};
+  await MarketingAsset.findOneAndUpdate(
+    { url: stored.url },
+    {
+      $set: {
+        campaign_run_id: run._id,
+        campaign_id: run.campaign_id,
+        asset_type: "creative",
+        url: stored.url,
+        storage_provider: stored.storage_provider,
+        storage_key: stored.storage_key,
+        checksum_sha256: stored.checksum_sha256,
+        source_url: sourceAsset.approved ? sourceAsset.url : null,
+        source_provenance: sourceAsset.approved
+          ? "generated_from_approved_source"
+          : "generated_without_reference",
+        usage_rights_status: sourceAsset.rights_status || "unknown",
+        provider: "template",
+        model: null,
+        deleted_at: null,
+      },
+    },
+    { upsert: true, new: true }
+  );
+  return { file_path: stored.file_path || null, public_url: stored.url };
 }
 
-async function renderSingleImage({ campaignId, brief, strategy, productBuffer }) {
+async function renderSingleImage({ run, brief, strategy, productBuffer, assetVersion }) {
   const headline = buildHeadline(brief, strategy);
   const ctaText = chooseCtaText(brief);
   const supportingLine = buildSupportingLine(brief);
@@ -313,7 +331,7 @@ async function renderSingleImage({ campaignId, brief, strategy, productBuffer })
     productBuffer,
   });
 
-  const output = await writeOutput(`${slugify(campaignId)}-hero.jpg`, imageBuffer);
+  const output = await writeOutput({ run, brief, fileName: `${slugify(run.campaign_id)}-${assetVersion}-hero.jpg`, buffer: imageBuffer });
   return {
     content_type: "single_image",
     cta_text: ctaText,
@@ -330,7 +348,7 @@ async function renderSingleImage({ campaignId, brief, strategy, productBuffer })
   };
 }
 
-async function renderCarousel({ campaignId, brief, strategy, productBuffer }) {
+async function renderCarousel({ run, brief, strategy, productBuffer, assetVersion }) {
   const headline = buildHeadline(brief, strategy);
   const ctaText = chooseCtaText(brief);
   const priceLabel = buildPriceLabel(brief);
@@ -353,7 +371,11 @@ async function renderCarousel({ campaignId, brief, strategy, productBuffer }) {
   const slide2 = await renderBaseSlide({
     overlaySvg: buildFeatureSlideSvg({
       headline: trimText(brief?.title || "Pink Paisa Pick"),
-      bullets: bullets.length ? bullets : ["Chosen for an everyday routine", "Made to feel premium without being loud", "Ready to shop on Pink Paisa"],
+      bullets: bullets.length
+        ? bullets
+        : brief?.is_affiliate
+          ? ["Curated for an everyday routine", "Selected for thoughtful discovery", "Explore this partner pick on Pink Paisa"]
+          : ["Chosen for an everyday routine", "Made to feel premium without being loud", "Ready to shop on Pink Paisa"],
       footerLabel: "Smart, warm, and women-first picks",
     }),
     productBuffer,
@@ -367,7 +389,8 @@ async function renderCarousel({ campaignId, brief, strategy, productBuffer }) {
     overlaySvg: buildClosingSlideSvg({
       ctaText,
       priceLabel,
-      footerLabel: "Open Pink Paisa and shop the full product page",
+      actionLabel: brief?.is_affiliate ? "Explore partner pick" : "Tap to shop",
+      footerLabel: brief?.is_affiliate ? "Check current price on Amazon" : "Open Pink Paisa and shop the full product page",
     }),
     productBuffer,
     productWidth: 520,
@@ -377,9 +400,9 @@ async function renderCarousel({ campaignId, brief, strategy, productBuffer }) {
   });
 
   const outputs = await Promise.all([
-    writeOutput(`${slugify(campaignId)}-carousel-1.jpg`, slide1),
-    writeOutput(`${slugify(campaignId)}-carousel-2.jpg`, slide2),
-    writeOutput(`${slugify(campaignId)}-carousel-3.jpg`, slide3),
+    writeOutput({ run, brief, fileName: `${slugify(run.campaign_id)}-${assetVersion}-carousel-1.jpg`, buffer: slide1 }),
+    writeOutput({ run, brief, fileName: `${slugify(run.campaign_id)}-${assetVersion}-carousel-2.jpg`, buffer: slide2 }),
+    writeOutput({ run, brief, fileName: `${slugify(run.campaign_id)}-${assetVersion}-carousel-3.jpg`, buffer: slide3 }),
   ]);
 
   return {
@@ -405,27 +428,32 @@ async function renderCarousel({ campaignId, brief, strategy, productBuffer }) {
 
 async function generateInstagramCreative(run, brief, strategy) {
   if (!brief) throw new Error("Product brief missing for creative generation");
+  const assetVersion = createCampaignAssetVersion();
 
-  const primaryImage = Array.isArray(brief.images) ? brief.images.find(Boolean) : null;
-  if (!primaryImage) throw new Error("At least one product image is required to generate Instagram creative");
+  const primaryImage = brief?.campaign_asset?.approved
+    ? brief.campaign_asset.url
+    : (!brief?.is_affiliate && Array.isArray(brief.images) ? brief.images.find(Boolean) : null);
+  if (!primaryImage && !brief.is_affiliate) throw new Error("At least one product image is required to generate Instagram creative");
 
-  const productBuffer = await readImageBuffer(primaryImage);
+  const productBuffer = primaryImage ? await readImageBuffer(primaryImage) : null;
   const contentType = chooseContentType(brief, strategy);
 
   if (contentType === "carousel") {
     return renderCarousel({
-      campaignId: run.campaign_id,
+      run,
       brief,
       strategy,
       productBuffer,
+      assetVersion,
     });
   }
 
   return renderSingleImage({
-    campaignId: run.campaign_id,
+    run,
     brief,
     strategy,
     productBuffer,
+    assetVersion,
   });
 }
 

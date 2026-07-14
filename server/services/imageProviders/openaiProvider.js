@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { getModelDefinition } = require("./registry");
 
 const OPENAI_IMAGE_API_BASE = String(process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
 const DEFAULT_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || "1024x1536";
@@ -12,7 +13,33 @@ function trimText(value) {
 }
 
 function supportsInputFidelity(model) {
-  return /^gpt-image-1$/i.test(trimText(model));
+  return getModelDefinition("openai", trimText(model))?.capabilities?.input_fidelity === true;
+}
+
+function buildEditRequestParameters({ model, prompt, size, quality }) {
+  const parameters = {
+    model: trimText(model),
+    prompt,
+    size: trimText(size || DEFAULT_IMAGE_SIZE),
+    quality: quality || "medium",
+    output_format: DEFAULT_IMAGE_FORMAT,
+    output_compression: String(DEFAULT_IMAGE_COMPRESSION),
+  };
+  if (DEFAULT_IMAGE_INPUT_FIDELITY && supportsInputFidelity(parameters.model)) {
+    parameters.input_fidelity = DEFAULT_IMAGE_INPUT_FIDELITY;
+  }
+  return parameters;
+}
+
+function buildGenerationRequestBody({ model, prompt, size, quality }) {
+  return {
+    model: trimText(model),
+    prompt,
+    size: trimText(size || DEFAULT_IMAGE_SIZE),
+    quality: quality || "medium",
+    output_format: DEFAULT_IMAGE_FORMAT,
+    output_compression: DEFAULT_IMAGE_COMPRESSION,
+  };
 }
 
 async function parseGeneratedImageBuffer(responseJson) {
@@ -44,15 +71,8 @@ async function generateImage({ model, prompt, sourceImageBuffer, size, quality }
 
   if (sourceImageBuffer) {
     const form = new FormData();
-    form.append("model", resolvedModel);
-    form.append("prompt", prompt);
-    form.append("size", trimText(size || DEFAULT_IMAGE_SIZE));
-    form.append("quality", quality || "medium");
-    form.append("output_format", DEFAULT_IMAGE_FORMAT);
-    form.append("output_compression", String(DEFAULT_IMAGE_COMPRESSION));
-    if (DEFAULT_IMAGE_INPUT_FIDELITY && supportsInputFidelity(resolvedModel)) {
-      form.append("input_fidelity", DEFAULT_IMAGE_INPUT_FIDELITY);
-    }
+    const requestParameters = buildEditRequestParameters({ model: resolvedModel, prompt, size, quality });
+    Object.entries(requestParameters).forEach(([key, value]) => form.append(key, String(value)));
     form.append("image", new Blob([sourceImageBuffer], { type: DEFAULT_SOURCE_IMAGE_MIME }), "product-reference.jpg");
 
     const response = await fetch(`${OPENAI_IMAGE_API_BASE}/images/edits`, {
@@ -78,14 +98,7 @@ async function generateImage({ model, prompt, sourceImageBuffer, size, quality }
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: resolvedModel,
-      prompt,
-      size: trimText(size || DEFAULT_IMAGE_SIZE),
-      quality: quality || "medium",
-      output_format: DEFAULT_IMAGE_FORMAT,
-      output_compression: DEFAULT_IMAGE_COMPRESSION,
-    }),
+    body: JSON.stringify(buildGenerationRequestBody({ model: resolvedModel, prompt, size, quality })),
   });
 
   const json = await response.json().catch(() => null);
@@ -100,6 +113,8 @@ async function generateImage({ model, prompt, sourceImageBuffer, size, quality }
 module.exports = {
   generateImage,
   _private: {
+    buildEditRequestParameters,
+    buildGenerationRequestBody,
     supportsInputFidelity,
   },
 };
