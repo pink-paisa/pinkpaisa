@@ -67,11 +67,6 @@ const affiliateEventLimiter = createRateLimiter({
   max: 120,
   message: "Too many affiliate tracking requests. Please wait a bit and try again.",
 });
-const adminWriteLimiter = createRateLimiter({
-  keyPrefix: "admin-write",
-  max: 120,
-  message: "Too many admin requests. Please wait a bit and try again.",
-});
 const uploadLimiter = createRateLimiter({
   keyPrefix: "uploads",
   max: 40,
@@ -93,7 +88,7 @@ app.use("/api/delivery-partners", require("./routes/deliveryPartners"));
 app.use("/api/blogs", require("./routes/blogs"));
 app.use("/api/workshops", require("./routes/workshops"));
 app.use("/api/products", require("./routes/products"));
-app.use("/api/affiliate-products", adminWriteLimiter, require("./routes/affiliateProducts"));
+app.use("/api/affiliate-products", require("./routes/affiliateProducts"));
 app.use("/api/affiliate-events", affiliateEventLimiter, require("./routes/affiliateEvents"));
 app.use("/api/categories", require("./routes/categories"));
 app.use("/api/virtual-products", require("./routes/virtualProducts"));
@@ -109,12 +104,12 @@ app.use("/api/phonepe", paymentLimiter, require("./routes/phonepe"));
 app.use("/api/uploads", uploadLimiter, require("./routes/uploads"));
 app.use("/api/vendors", require("./routes/vendors"));
 app.use("/api/admin/analytics", require("./routes/adminAnalytics"));
-app.use("/api/admin/amazon-reports", adminWriteLimiter, require("./routes/adminAmazonReports"));
-app.use("/api/admin/backups", adminWriteLimiter, require("./routes/adminBackups"));
-app.use("/api/admin", adminWriteLimiter, require("./routes/adminSettings"));
+app.use("/api/admin/amazon-reports", require("./routes/adminAmazonReports"));
+app.use("/api/admin/backups", require("./routes/adminBackups"));
+app.use("/api/admin", require("./routes/adminSettings"));
 app.use("/api/vendor-products", require("./routes/vendorProducts"));
 app.use("/api/vendor-orders", require("./routes/vendorOrders"));
-app.use("/api/marketing-campaigns", adminWriteLimiter, require("./routes/marketingCampaigns"));
+app.use("/api/marketing-campaigns", require("./routes/marketingCampaigns"));
 app.use("/api/instagram", instagramLimiter, require("./routes/instagram"));
 
 app.get("/api/health", (_req, res) => {
