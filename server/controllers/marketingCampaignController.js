@@ -1,5 +1,6 @@
 const {
   archiveCampaignRun,
+  archiveCampaignRuns,
   enqueueAffiliateProductCampaign,
   enqueueAdminProductCampaign,
   enqueueApprovedProductCampaign,
@@ -65,6 +66,23 @@ const archiveMarketingCampaignController = async (req, res) => {
     res.json({ message: "Campaign archived", ...result });
   } catch (error) {
     res.status(409).json({ message: error.message });
+  }
+};
+
+const bulkArchiveMarketingCampaignsController = async (req, res) => {
+  try {
+    const result = await archiveCampaignRuns(req.body?.run_ids, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+      reason: req.body?.reason || "Removed from campaign admin",
+    });
+    res.json({
+      message: result.failed
+        ? `${result.archived} campaign(s) removed; ${result.failed} could not be removed`
+        : `${result.archived} campaign(s) removed from Pink Paisa`,
+      ...result,
+    });
+  } catch (error) {
+    res.status(400).json({ message: error.message });
   }
 };
 
@@ -350,6 +368,7 @@ const createMarketingCampaignFromProductSource = async (req, res) => {
 
 module.exports = {
   archiveMarketingCampaignController,
+  bulkArchiveMarketingCampaignsController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
   getMarketingBatchDetail,

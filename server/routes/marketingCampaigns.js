@@ -3,6 +3,7 @@ const router = express.Router();
 const { protect, adminOnly } = require("../middleware/auth");
 const {
   archiveMarketingCampaignController,
+  bulkArchiveMarketingCampaignsController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
   getMarketingBatchDetail,
@@ -39,6 +40,7 @@ router.post("/admin/readiness-scan", protect, adminOnly, scanMarketingCampaignRe
 router.post("/admin/run-daily-batch", protect, adminOnly, runDailyMarketingBatchController);
 router.post("/admin/recover-stale-tasks", protect, adminOnly, recoverStaleMarketingTasksController);
 router.post("/admin/post-carousel", protect, adminOnly, publishMarketingCarouselController);
+router.post("/admin/bulk-archive", protect, adminOnly, bulkArchiveMarketingCampaignsController);
 router.post("/admin/from-product/:productId", protect, adminOnly, createMarketingCampaignFromProductSource);
 router.post("/admin/from-vendor-product/:vendorProductId", protect, adminOnly, createMarketingCampaignFromApprovedProduct);
 router.get("/admin/:id", protect, adminOnly, getMarketingCampaignRun);

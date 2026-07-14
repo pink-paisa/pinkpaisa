@@ -299,6 +299,21 @@ test("archive membership includes queued grouped carousel tasks", () => {
   ]);
 });
 
+test("bulk campaign archive selection is required, deduplicated, and bounded", () => {
+  assert.deepEqual(
+    marketingPrivate.normalizeBulkCampaignRunIds(["run-2", "run-1", "run-2"]),
+    ["run-1", "run-2"]
+  );
+  assert.throws(
+    () => marketingPrivate.normalizeBulkCampaignRunIds([]),
+    /Select at least one campaign/
+  );
+  assert.throws(
+    () => marketingPrivate.normalizeBulkCampaignRunIds(Array.from({ length: 101 }, (_, index) => `run-${index}`)),
+    /Select no more than 100 campaigns/
+  );
+});
+
 test("orphaned publish recovery never republishes and returns unaccepted requests to review", () => {
   const recoveredAt = new Date("2026-07-14T12:00:00.000Z");
   assert.deepEqual(marketingPrivate.buildOrphanPublishRecoveryUpdates({

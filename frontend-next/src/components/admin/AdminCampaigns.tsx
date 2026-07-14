@@ -247,6 +247,12 @@ const canBulkPublishRun = (run: CampaignRun) => (
   && ["ready", "draft", "failed", "scheduled"].includes(run.publish_status || "")
 );
 
+const canSelectCampaignRun = (run: CampaignRun) => (
+  !run.archived_at
+  && run.status !== "publishing"
+  && run.publish_status !== "publishing"
+);
+
 const getReadinessBlockers = (run: CampaignRun | null | undefined) => run?.publish_readiness?.blockers || [];
 
 const getProductImageUrl = (run: CampaignRun) => {
@@ -388,6 +394,7 @@ const AdminCampaigns = () => {
   const [batchDetail, setBatchDetail] = useState<BatchDetailResponse | null>(null);
   const [batchDetailLoading, setBatchDetailLoading] = useState(false);
   const [lifecycleAction, setLifecycleAction] = useState<"archive" | "restore" | "purge" | null>(null);
+  const [bulkArchiveOpen, setBulkArchiveOpen] = useState(false);
   const [postPreview, setPostPreview] = useState<CampaignPostPreview | null>(null);
   const previousDetailState = useRef<string | null>(null);
   const previousListStates = useRef<Map<string, string>>(new Map());
@@ -586,7 +593,7 @@ const AdminCampaigns = () => {
   }, [detail]);
 
   useEffect(() => {
-    setSelectedRunIds((current) => current.filter((id) => data.items.some((run) => run.id === id && canBulkPublishRun(run))));
+    setSelectedRunIds((current) => current.filter((id) => data.items.some((run) => run.id === id && canSelectCampaignRun(run))));
   }, [data.items]);
 
   useEffect(() => {
@@ -636,7 +643,7 @@ const AdminCampaigns = () => {
     previousListStates.current = next;
   }, [data.items, detailOpen, selectedId]);
 
-  const eligibleVisibleRuns = useMemo(() => data.items.filter(canBulkPublishRun), [data.items]);
+  const selectableVisibleRuns = useMemo(() => data.items.filter(canSelectCampaignRun), [data.items]);
   const selectedVisibleRuns = useMemo(
     () => data.items.filter((run) => selectedRunIds.includes(run.id)),
     [data.items, selectedRunIds],
@@ -647,7 +654,14 @@ const AdminCampaigns = () => {
       blocker,
     })))
   ), [selectedVisibleRuns]);
-  const allEligibleVisibleSelected = eligibleVisibleRuns.length > 0 && eligibleVisibleRuns.every((run) => selectedRunIds.includes(run.id));
+  const selectedRunsCarouselEligible = selectedVisibleRuns.length === selectedRunIds.length
+    && selectedVisibleRuns.length >= 2
+    && selectedVisibleRuns.length <= 10
+    && selectedVisibleRuns.every(canBulkPublishRun);
+  const selectedPublishedCount = selectedVisibleRuns.filter((run) => (
+    run.publish_status === "published" || run.status === "published" || Boolean(run.instagram_media_id)
+  )).length;
+  const allSelectableVisibleSelected = selectableVisibleRuns.length > 0 && selectableVisibleRuns.every((run) => selectedRunIds.includes(run.id));
   const filteredCatalogProducts = useMemo(() => {
     return catalogProducts;
   }, [catalogProducts]);
@@ -937,25 +951,16 @@ const AdminCampaigns = () => {
       if (current.includes(runId)) {
         return current.filter((id) => id !== runId);
       }
-      if (current.length >= 10) {
-        toast.error("You can select up to 10 reviewed drafts for one carousel post");
-        return current;
-      }
       return [...current, runId];
     });
   };
 
-  const toggleSelectAllEligible = () => {
-    if (allEligibleVisibleSelected) {
-      setSelectedRunIds((current) => current.filter((id) => !eligibleVisibleRuns.some((run) => run.id === id)));
+  const toggleSelectAllVisible = () => {
+    if (allSelectableVisibleSelected) {
+      setSelectedRunIds((current) => current.filter((id) => !selectableVisibleRuns.some((run) => run.id === id)));
       return;
     }
-
-    const merged = Array.from(new Set([...selectedRunIds, ...eligibleVisibleRuns.map((run) => run.id)]));
-    if (merged.length > 10) {
-      toast.info("Only the first 10 eligible reviewed drafts can be included in one Instagram carousel");
-    }
-    setSelectedRunIds(merged.slice(0, 10));
+    setSelectedRunIds(Array.from(new Set([...selectedRunIds, ...selectableVisibleRuns.map((run) => run.id)])));
   };
 
   const publishSelectedCarousel = async () => {
@@ -965,6 +970,10 @@ const AdminCampaigns = () => {
     }
     if (selectedRunIds.length < 2) {
       toast.error("Select at least 2 reviewed drafts to publish one carousel");
+      return;
+    }
+    if (!selectedRunsCarouselEligible) {
+      toast.error("Carousel publishing requires 2 to 10 selected, review-approved campaigns that are ready to publish");
       return;
     }
     if (selectedRunBlockers.length) {
@@ -1195,6 +1204,11 @@ const AdminCampaigns = () => {
   const selectedRunHasRunningTask = useMemo(() => (
     detail?.tasks?.some((task) => task.status === "running") || false
   ), [detail]);
+  const detailIsPublished = Boolean(
+    detail?.run.publish_status === "published"
+    || detail?.run.status === "published"
+    || detail?.run.instagram_media_id
+  );
 
   const copyTrackedUrl = async () => {
     if (!trackedUrl) {
@@ -1228,6 +1242,43 @@ const AdminCampaigns = () => {
       await loadCampaigns({ silent: true });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Campaign lifecycle action failed");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const archiveSelectedCampaigns = async () => {
+    if (!selectedRunIds.length) return;
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{
+        message?: string;
+        archived: number;
+        failed: number;
+        results: Array<{ id: string; ok: boolean; message?: string }>;
+      }>("/marketing-campaigns/admin/bulk-archive", {
+        method: "POST",
+        body: JSON.stringify({
+          run_ids: selectedRunIds,
+          reason: "Removed using bulk campaign management",
+        }),
+      });
+      const archivedIds = new Set(response.results.filter((result) => result.ok).map((result) => result.id));
+      if (response.archived) toast.success(response.message || `${response.archived} campaign(s) removed from Pink Paisa`);
+      if (response.failed) {
+        const firstFailure = response.results.find((result) => !result.ok)?.message;
+        toast.error(`${response.failed} campaign(s) could not be removed${firstFailure ? `: ${firstFailure}` : ""}`);
+      }
+      setSelectedRunIds((current) => current.filter((id) => !archivedIds.has(id)));
+      if (selectedId && archivedIds.has(selectedId)) {
+        setDetailOpen(false);
+        setDetail(null);
+        setSelectedId(null);
+      }
+      setBulkArchiveOpen(false);
+      await Promise.all([loadCampaigns({ silent: true }), loadCalendar()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not remove selected campaigns");
     } finally {
       setActionLoading(false);
     }
@@ -1412,9 +1463,11 @@ const AdminCampaigns = () => {
           </div>
           <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-dashed border-border/70 bg-muted/20 p-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <p className="text-sm font-medium">Bulk carousel publishing</p>
-              <p className="text-xs text-muted-foreground">Select up to 10 review-approved drafts with ready creatives, then publish them as one Instagram carousel post.</p>
-              {!connection?.is_connected ? (
+              <p className="text-sm font-medium">Selected campaign actions</p>
+              <p className="text-xs text-muted-foreground">Published campaigns can be removed from Pink Paisa; their Instagram posts remain live until removed on Instagram.</p>
+              {selectedPublishedCount > 0 ? (
+                <p className="mt-1 text-xs font-medium text-amber-700">{selectedPublishedCount} published campaign{selectedPublishedCount === 1 ? "" : "s"} selected.</p>
+              ) : !connection?.is_connected ? (
                 <p className="mt-1 text-xs font-medium text-amber-700">Instagram must be connected before carousel publishing.</p>
               ) : selectedRunBlockers.length ? (
                 <p className="mt-1 text-xs font-medium text-rose-700">
@@ -1427,23 +1480,26 @@ const AdminCampaigns = () => {
                 <input
                   type="checkbox"
                   className="h-4 w-4 rounded border-input text-primary"
-                  checked={allEligibleVisibleSelected}
-                  onChange={toggleSelectAllEligible}
-                  disabled={eligibleVisibleRuns.length === 0}
+                  checked={allSelectableVisibleSelected}
+                  onChange={toggleSelectAllVisible}
+                  disabled={selectableVisibleRuns.length === 0}
                 />
-                Select eligible visible
+                Select visible
               </label>
               <span className="rounded-xl bg-background px-3 py-2 text-xs font-medium text-muted-foreground">
-                {selectedRunIds.length}/10 selected
+                {selectedRunIds.length} selected
               </span>
               <Button variant="outline" className="rounded-xl" onClick={() => setSelectedRunIds([])} disabled={!selectedRunIds.length || actionLoading}>
                 Clear
               </Button>
-              <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length}>
+              <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length || !selectedVisibleRuns.every(canBulkPublishRun)}>
                 Scan readiness
               </Button>
-              <Button className="rounded-xl" onClick={publishSelectedCarousel} disabled={actionLoading || selectedRunIds.length < 2 || !connection?.is_connected || selectedRunBlockers.length > 0}>
+              <Button className="rounded-xl" onClick={publishSelectedCarousel} disabled={actionLoading || !selectedRunsCarouselEligible || !connection?.is_connected || selectedRunBlockers.length > 0}>
                 Post selected carousel
+              </Button>
+              <Button variant="destructive" className="rounded-xl" onClick={() => setBulkArchiveOpen(true)} disabled={actionLoading || !selectedRunIds.length}>
+                <Trash2 className="mr-2 h-4 w-4" /> Remove selected
               </Button>
             </div>
           </div>
@@ -1566,10 +1622,10 @@ const AdminCampaigns = () => {
                   <input
                     type="checkbox"
                     className="h-4 w-4 rounded border-input text-primary"
-                    checked={allEligibleVisibleSelected}
-                    onChange={toggleSelectAllEligible}
-                    disabled={eligibleVisibleRuns.length === 0}
-                    aria-label="Select eligible visible runs"
+                    checked={allSelectableVisibleSelected}
+                    onChange={toggleSelectAllVisible}
+                    disabled={selectableVisibleRuns.length === 0}
+                    aria-label="Select visible campaigns"
                   />
                 </th>
                 <th className="px-4 py-4">Product</th>
@@ -1594,8 +1650,8 @@ const AdminCampaigns = () => {
                       className="h-4 w-4 rounded border-input text-primary"
                       checked={selectedRunIds.includes(run.id)}
                       onChange={() => toggleRunSelection(run.id)}
-                      disabled={!canBulkPublishRun(run)}
-                      aria-label={`Select ${run.product_title || run.campaign_id} for carousel publishing`}
+                      disabled={!canSelectCampaignRun(run)}
+                      aria-label={`Select ${run.product_title || run.campaign_id}`}
                     />
                   </td>
                   <td className="px-4 py-4">
@@ -1975,8 +2031,9 @@ const AdminCampaigns = () => {
                       ) : null}
                     </>
                   ) : (
-                    <Button variant="outline" className="rounded-xl" onClick={() => setLifecycleAction("archive")} disabled={actionLoading || detail.run.publish_status === "publishing"}>
-                      <Archive className="mr-2 h-4 w-4" /> Archive
+                    <Button variant={detailIsPublished ? "destructive" : "outline"} className="rounded-xl" onClick={() => setLifecycleAction("archive")} disabled={actionLoading || detail.run.publish_status === "publishing"}>
+                      {detailIsPublished ? <Trash2 className="mr-2 h-4 w-4" /> : <Archive className="mr-2 h-4 w-4" />}
+                      {detailIsPublished ? "Remove from Pink Paisa" : "Archive"}
                     </Button>
                   )}
                 </div>
@@ -2329,16 +2386,40 @@ const AdminCampaigns = () => {
       <ConfirmActionDialog
         open={lifecycleAction !== null}
         onOpenChange={(open) => !open && setLifecycleAction(null)}
-        title={lifecycleAction === "purge" ? "Delete campaign permanently" : lifecycleAction === "restore" ? "Restore campaign" : "Archive campaign"}
+        title={lifecycleAction === "purge"
+          ? "Delete campaign permanently"
+          : lifecycleAction === "restore"
+            ? "Restore campaign"
+            : detailIsPublished
+              ? "Remove published campaign from Pink Paisa"
+              : "Archive campaign"}
         description={lifecycleAction === "purge"
           ? "This removes the unpublished campaign, task history, and unreferenced generated assets from Pink Paisa. This cannot be undone."
           : lifecycleAction === "restore"
             ? "Restore this campaign to its previous workflow state. Scheduled campaigns return as ready to publish and are not automatically rescheduled."
-            : "Archive this campaign and cancel queued work. Published Instagram media remains live and available through its permalink."}
-        confirmLabel={lifecycleAction === "purge" ? "Delete permanently" : lifecycleAction === "restore" ? "Restore campaign" : "Archive campaign"}
-        destructive={lifecycleAction === "purge"}
+            : detailIsPublished
+              ? "This removes the campaign from active Pink Paisa views and keeps its audit record in Archived. The Instagram post remains live and must be removed on Instagram."
+              : "Archive this campaign and cancel queued work."}
+        confirmLabel={lifecycleAction === "purge"
+          ? "Delete permanently"
+          : lifecycleAction === "restore"
+            ? "Restore campaign"
+            : detailIsPublished
+              ? "Remove from Pink Paisa"
+              : "Archive campaign"}
+        destructive={lifecycleAction === "purge" || (lifecycleAction === "archive" && detailIsPublished)}
         pending={actionLoading}
         onConfirm={runLifecycleAction}
+      />
+      <ConfirmActionDialog
+        open={bulkArchiveOpen}
+        onOpenChange={setBulkArchiveOpen}
+        title="Remove selected campaigns from Pink Paisa"
+        description={`Remove ${selectedRunIds.length} selected campaign${selectedRunIds.length === 1 ? "" : "s"} from active Pink Paisa views?${selectedPublishedCount ? ` ${selectedPublishedCount} Instagram post${selectedPublishedCount === 1 ? "" : "s"} will remain live and must be removed on Instagram.` : ""}`}
+        confirmLabel="Remove selected"
+        destructive
+        pending={actionLoading}
+        onConfirm={archiveSelectedCampaigns}
       />
     </div>
   );

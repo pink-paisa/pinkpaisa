@@ -34,6 +34,7 @@ const STALE_TASK_THRESHOLD_MS = Math.max(parseInt(process.env.MARKETING_STALE_TA
 const TASK_LEASE_MS = Math.max(parseInt(process.env.MARKETING_TASK_LEASE_MS || String(5 * 60 * 1000), 10), 60 * 1000);
 const MAX_TASK_ATTEMPTS = Math.max(parseInt(process.env.MARKETING_MAX_TASK_ATTEMPTS || "3", 10), 1);
 const MIN_SCHEDULE_DELAY_MS = Math.max(parseInt(process.env.MARKETING_MIN_SCHEDULE_DELAY_MS || String(5 * 60 * 1000), 10), 60 * 1000);
+const MAX_BULK_CAMPAIGN_ACTIONS = 100;
 const CAMPAIGN_OPEN_STATUSES = ["queued", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing"];
 const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = [
   "title slug status is_visible category subcategory category_id subcategory_id featured_image images",
@@ -1162,6 +1163,15 @@ function normalizeRunIdList(values = []) {
     .sort();
 }
 
+function normalizeBulkCampaignRunIds(values = []) {
+  const runIds = normalizeRunIdList(values);
+  if (!runIds.length) throw new Error("Select at least one campaign");
+  if (runIds.length > MAX_BULK_CAMPAIGN_ACTIONS) {
+    throw new Error(`Select no more than ${MAX_BULK_CAMPAIGN_ACTIONS} campaigns at once`);
+  }
+  return runIds;
+}
+
 function sameRunIdSet(left = [], right = []) {
   const normalizedLeft = normalizeRunIdList(left);
   const normalizedRight = normalizeRunIdList(right);
@@ -2268,6 +2278,32 @@ async function archiveCampaignRun(runId, { actorAdminId = null, reason = "" } = 
   return getCampaignRunDetail(runId);
 }
 
+async function archiveCampaignRuns(runIds, { actorAdminId = null, reason = "" } = {}) {
+  const normalizedRunIds = normalizeBulkCampaignRunIds(runIds);
+  const results = [];
+
+  for (const runId of normalizedRunIds) {
+    try {
+      const detail = await archiveCampaignRun(runId, { actorAdminId, reason });
+      results.push({
+        id: runId,
+        campaign_id: detail.run?.campaign_id || null,
+        published: detail.run?.publish_status === "published" || Boolean(detail.run?.instagram_media_id),
+        ok: true,
+      });
+    } catch (error) {
+      results.push({ id: runId, ok: false, message: error.message });
+    }
+  }
+
+  return {
+    requested: normalizedRunIds.length,
+    archived: results.filter((result) => result.ok).length,
+    failed: results.filter((result) => !result.ok).length,
+    results,
+  };
+}
+
 async function restoreCampaignRun(runId, { actorAdminId = null } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
@@ -3262,6 +3298,7 @@ function startMarketingAgentWorker() {
 
 module.exports = {
   archiveCampaignRun,
+  archiveCampaignRuns,
   enqueueAdminProductCampaign,
   enqueueAffiliateProductCampaign,
   enqueueApprovedProductCampaign,
@@ -3317,6 +3354,7 @@ module.exports = {
     isMatchingDurableCarouselAttempt,
     isUnresolvedPublishAttempt,
     mergeAttemptWithRunPublishState,
+    normalizeBulkCampaignRunIds,
     sameRunIdSet,
     shouldReturnExistingRunningBatch,
   },
