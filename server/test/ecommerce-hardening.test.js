@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const sharp = require("sharp");
+const axios = require("axios");
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || "test-secret-with-enough-length";
 
@@ -10,6 +11,7 @@ const OrderItem = require("../models/OrderItem");
 const AmazonReportRow = require("../models/AmazonReportRow");
 const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
+const Product = require("../models/Product");
 const AgentTask = require("../models/AgentTask");
 const MarketingAsset = require("../models/MarketingAsset");
 const MarketingPublishAttempt = require("../models/MarketingPublishAttempt");
@@ -41,6 +43,10 @@ const { getCreatorsApiEnvStatus } = require("../utils/affiliateDataSettings");
 const creatorsApiService = require("../services/amazonCreatorsApiService");
 const affiliateProductController = require("../controllers/affiliateProductController");
 const marketingCampaignController = require("../controllers/marketingCampaignController");
+const marketingCampaignRoutes = require("../routes/marketingCampaigns");
+const campaignLinkRoutes = require("../routes/campaignLinks");
+const { buildAffiliateCarouselCaption } = require("../services/affiliateCarouselCaption");
+const instagramPublishService = require("../services/instagramPublishService");
 const wishlistController = require("../controllers/wishlistController");
 const authPrivate = authRoute._private;
 const productPrivate = productController._private;
@@ -177,6 +183,9 @@ test("marketing campaign schema supports affiliate product source events", () =>
     "admin_product.published",
     "affiliate_product.published",
   ]);
+  assert.equal(MarketingCampaignRun.schema.path("carousel_task_id").instance, "ObjectId");
+  assert.equal(MarketingCampaignRun.schema.path("carousel_position").instance, "Number");
+  assert.equal(MarketingCampaignRun.schema.path("carousel_size").instance, "Number");
 });
 
 test("marketing publish event schema records audit fields", () => {
@@ -186,14 +195,18 @@ test("marketing publish event schema records audit fields", () => {
   assert.ok(actionPath.enumValues.includes("publish"));
   assert.ok(actionPath.enumValues.includes("schedule"));
   assert.ok(actionPath.enumValues.includes("carousel_publish"));
+  assert.ok(actionPath.enumValues.includes("carousel_cancel"));
   assert.ok(actionPath.enumValues.includes("failed_publish"));
+  assert.ok(actionPath.enumValues.includes("review"));
   assert.deepEqual(statusPath.enumValues, ["started", "success", "failed", "skipped"]);
 
   const indexes = MarketingCampaignPublishEvent.schema.indexes().map(([index]) => JSON.stringify(index));
   assert.ok(indexes.includes(JSON.stringify({ campaign_run_id: 1, created_at: -1 })));
 });
 
-test("new carousel publishing is disabled while historical carousel data remains readable", async () => {
+test("affiliate carousel endpoints are enabled and reject an invalid selection", async () => {
+  const previousFlag = process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED;
+  process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED = "true";
   let statusCode = null;
   let payload = null;
   const response = {
@@ -207,9 +220,421 @@ test("new carousel publishing is disabled while historical carousel data remains
     },
   };
 
-  await marketingCampaignController.publishMarketingCarouselController({}, response);
-  assert.equal(statusCode, 410);
-  assert.equal(payload.code, "carousel_creation_disabled");
+  try {
+    await marketingCampaignController.publishMarketingCarouselController({ body: {}, user: {} }, response);
+    assert.equal(statusCode, 400);
+    assert.equal(payload.code, "carousel_selection_invalid");
+  } finally {
+    if (previousFlag === undefined) delete process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED;
+    else process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED = previousFlag;
+  }
+});
+
+test("affiliate carousel feature flag blocks new composition", async () => {
+  const previousFlag = process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED;
+  process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED = "false";
+  let statusCode = null;
+  let payload = null;
+  const response = {
+    status(value) {
+      statusCode = value;
+      return this;
+    },
+    json(value) {
+      payload = value;
+      return value;
+    },
+  };
+
+  try {
+    await marketingCampaignController.previewMarketingCarouselController({ body: {} }, response);
+    assert.equal(statusCode, 400);
+    assert.equal(payload.code, "carousel_creation_disabled");
+  } finally {
+    if (previousFlag === undefined) delete process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED;
+    else process.env.MARKETING_AFFILIATE_CAROUSEL_ENABLED = previousFlag;
+  }
+});
+
+test("affiliate carousel routes expose preview, queue, lifecycle, and compact links", () => {
+  const routeSignatures = marketingCampaignRoutes.stack
+    .filter((layer) => layer.route)
+    .map((layer) => `${Object.keys(layer.route.methods).find((method) => layer.route.methods[method]).toUpperCase()} ${layer.route.path}`);
+  assert.ok(routeSignatures.includes("POST /admin/carousels/preview"));
+  assert.ok(routeSignatures.includes("POST /admin/post-carousel"));
+  assert.ok(routeSignatures.includes("GET /admin/carousels/:taskId"));
+  assert.ok(routeSignatures.includes("PATCH /admin/carousels/:taskId/schedule"));
+  assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/cancel"));
+  assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/retry"));
+  assert.ok(routeSignatures.includes("POST /admin/bulk-review"));
+  assert.equal(campaignLinkRoutes.stack.find((layer) => layer.route)?.route.path, "/:campaignId");
+});
+
+test("affiliate carousel caption preserves slide order, compact links, and one affiliate notice", () => {
+  const result = buildAffiliateCarouselCaption({
+    captionBody: "A considered edit of partner picks.",
+    items: [
+      { run_id: "run-b", product_title: "Second selected product", tracked_url: "https://pinkpaisa.in/api/c/cmp-b" },
+      { run_id: "run-a", product_title: "First selected product", tracked_url: "https://pinkpaisa.in/api/c/cmp-a" },
+    ],
+    hashtags: ["Pink_Paisa", "PartnerPicks", "#Ad"],
+  });
+
+  assert.deepEqual(result.items.map((item) => item.run_id), ["run-b", "run-a"]);
+  assert.ok(result.final_caption.indexOf("1. Second selected product") < result.final_caption.indexOf("2. First selected product"));
+  assert.ok(result.final_caption.indexOf("https://pinkpaisa.in/api/c/cmp-b") < result.final_caption.indexOf("https://pinkpaisa.in/api/c/cmp-a"));
+  assert.deepEqual(result.hashtags, ["#Pink_Paisa", "#PartnerPicks"]);
+  assert.equal(result.disclosure, marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE);
+  assert.equal(result.final_caption.endsWith(marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE), true);
+  assert.equal((result.final_caption.match(/#Ad\b/gi) || []).length, 1);
+  assert.ok(result.caption_character_count <= 2200);
+});
+
+test("affiliate carousel caption blocks unsafe body, hashtags, and product titles", () => {
+  const items = [
+    { run_id: "run-1", product_title: "Partner serum", tracked_url: "https://pinkpaisa.in/api/c/cmp-1" },
+    { run_id: "run-2", product_title: "Partner cleanser", tracked_url: "https://pinkpaisa.in/api/c/cmp-2" },
+  ];
+  assert.throws(
+    () => buildAffiliateCarouselCaption({ captionBody: "Limited sale available now", items }),
+    (error) => error.code === "affiliate_discount_claim" || error.code === "affiliate_availability_claim"
+  );
+  assert.throws(
+    () => buildAffiliateCarouselCaption({ captionBody: "Explore these picks", items, hashtags: ["#ClinicallyProven"] }),
+    (error) => error.code === "blocked_claim"
+  );
+  assert.throws(
+    () => buildAffiliateCarouselCaption({
+      captionBody: "Explore these picks",
+      items: [{ ...items[0], product_title: "Miracle cure serum" }, items[1]],
+    }),
+    (error) => error.code === "blocked_claim"
+  );
+  assert.throws(
+    () => buildAffiliateCarouselCaption({ captionBody: "Explore at https://amazon.in/example", items }),
+    (error) => error.code === "carousel_caption_invalid" && /links.*automatically/i.test(error.message)
+  );
+  assert.throws(
+    () => buildAffiliateCarouselCaption({ captionBody: "Explore these picks #Sale", items }),
+    (error) => error.code === "carousel_caption_invalid" && /hashtag field/i.test(error.message)
+  );
+});
+
+test("affiliate carousel caption allows ingredient concentrations but blocks discount percentages", () => {
+  const baseItems = [
+    { run_id: "run-1", product_title: "Minimalist 10% Niacinamide Serum", tracked_url: "https://pinkpaisa.in/api/c/cmp-1" },
+    { run_id: "run-2", product_title: "Salicylic Acid 2% Face Serum", tracked_url: "https://pinkpaisa.in/api/c/cmp-2" },
+  ];
+  assert.doesNotThrow(() => buildAffiliateCarouselCaption({
+    captionBody: "Explore these partner picks.",
+    items: baseItems,
+  }));
+  assert.throws(
+    () => buildAffiliateCarouselCaption({
+      captionBody: "Explore these partner picks.",
+      items: [{ ...baseItems[0], product_title: "Niacinamide Serum 50% Off" }, baseItems[1]],
+    }),
+    (error) => error.code === "affiliate_discount_claim",
+  );
+});
+
+test("affiliate carousel caption rejects admin content that would exceed 2200 characters", () => {
+  assert.throws(
+    () => buildAffiliateCarouselCaption({
+      captionBody: "Curated editorial partner selection ".repeat(90),
+      items: [
+        { run_id: "run-1", product_title: "Partner serum", tracked_url: "https://pinkpaisa.in/api/c/cmp-1" },
+        { run_id: "run-2", product_title: "Partner cleanser", tracked_url: "https://pinkpaisa.in/api/c/cmp-2" },
+      ],
+    }),
+    (error) => error.code === "instagram_caption_too_long"
+  );
+});
+
+test("affiliate carousel caption enforces normalized hashtag limits", () => {
+  const items = [
+    { run_id: "run-1", product_title: "Partner serum", tracked_url: "https://pinkpaisa.in/api/c/cmp-1" },
+    { run_id: "run-2", product_title: "Partner cleanser", tracked_url: "https://pinkpaisa.in/api/c/cmp-2" },
+  ];
+  assert.throws(
+    () => buildAffiliateCarouselCaption({ captionBody: "Explore these picks", items, hashtags: Array.from({ length: 9 }, (_, index) => `Tag${index}`) }),
+    /no more than eight/i
+  );
+  assert.throws(
+    () => buildAffiliateCarouselCaption({ captionBody: "Explore these picks", items, hashtags: [`#${"A".repeat(41)}`] }),
+    /40-character hashtag limit/i
+  );
+});
+
+test("carousel run selection enforces limits, uniqueness, and preserves order", () => {
+  const runA = "507f1f77bcf86cd799439011";
+  const runB = "507f191e810c19729de860ea";
+  assert.deepEqual(marketingPrivate.normalizeOrderedCarouselRunIds([runB, runA]), [runB, runA]);
+  assert.equal(marketingPrivate.buildCarouselGroupIdentity([runA, runB]), marketingPrivate.buildCarouselGroupIdentity([runB, runA]));
+  assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds([runA]), /between 2 and 10/);
+  assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds([runA, runA]), /only once/);
+  assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds(Array.from({ length: 11 }, (_, index) => `${index}`.padStart(24, "0"))), /between 2 and 10/);
+});
+
+test("carousel scheduling rejects invalid and near-term times", () => {
+  assert.throws(
+    () => marketingPrivate.parseCarouselScheduleDate("not-a-date"),
+    (error) => error.code === "invalid_schedule_time"
+  );
+  assert.throws(
+    () => marketingPrivate.parseCarouselScheduleDate(new Date(Date.now() + 60_000).toISOString()),
+    (error) => error.code === "invalid_schedule_time"
+  );
+  const scheduled = marketingPrivate.parseCarouselScheduleDate(new Date(Date.now() + (10 * 60_000)).toISOString());
+  assert.ok(scheduled instanceof Date);
+});
+
+test("carousel compact links are server-owned Pink Paisa campaign routes", () => {
+  const previousPublicUrl = process.env.PUBLIC_APP_URL;
+  process.env.PUBLIC_APP_URL = "https://pinkpaisa.in";
+  try {
+    assert.equal(
+      marketingPrivate.buildCarouselTrackingUrl({ campaign_id: "cmp-carousel-1" }),
+      "https://pinkpaisa.in/api/c/cmp-carousel-1"
+    );
+  } finally {
+    if (previousPublicUrl === undefined) delete process.env.PUBLIC_APP_URL;
+    else process.env.PUBLIC_APP_URL = previousPublicUrl;
+  }
+});
+
+test("carousel compact redirect ignores user destinations and stays on the Pink Paisa product page", async () => {
+  const originalRunFindOne = MarketingCampaignRun.findOne;
+  const originalProductFindOne = Product.findOne;
+  const previousPublicUrl = process.env.PUBLIC_APP_URL;
+  process.env.PUBLIC_APP_URL = "https://pinkpaisa.in";
+  MarketingCampaignRun.findOne = () => ({
+    lean: async () => ({ campaign_id: "cmp-carousel-1", public_product_id: "product-1", carousel_position: 2 }),
+  });
+  Product.findOne = () => ({
+    select() { return this; },
+    lean: async () => ({ slug: "partner-serum" }),
+  });
+  let redirectStatus = null;
+  let redirectUrl = null;
+
+  try {
+    await marketingCampaignController.redirectMarketingCampaignLinkController({
+      params: { campaignId: "cmp-carousel-1" },
+      query: { destination: "https://amazon.in/unsafe" },
+    }, {
+      redirect(status, url) {
+        redirectStatus = status;
+        redirectUrl = url;
+      },
+    });
+    const destination = new URL(redirectUrl);
+    assert.equal(redirectStatus, 302);
+    assert.equal(destination.origin, "https://pinkpaisa.in");
+    assert.equal(destination.pathname, "/product/partner-serum");
+    assert.equal(destination.searchParams.get("utm_content"), "carousel_slide_2");
+    assert.equal(destination.href.includes("amazon.in"), false);
+  } finally {
+    MarketingCampaignRun.findOne = originalRunFindOne;
+    Product.findOne = originalProductFindOne;
+    if (previousPublicUrl === undefined) delete process.env.PUBLIC_APP_URL;
+    else process.env.PUBLIC_APP_URL = previousPublicUrl;
+  }
+});
+
+test("carousel compact redirect falls back to the existing product catalog", async () => {
+  const originalRunFindOne = MarketingCampaignRun.findOne;
+  const previousPublicUrl = process.env.PUBLIC_APP_URL;
+  process.env.PUBLIC_APP_URL = "https://pinkpaisa.in";
+  MarketingCampaignRun.findOne = () => ({ lean: async () => null });
+  let redirectUrl = null;
+
+  try {
+    await marketingCampaignController.redirectMarketingCampaignLinkController({
+      params: { campaignId: "missing-campaign" },
+    }, {
+      redirect(_status, url) {
+        redirectUrl = url;
+      },
+    });
+    assert.equal(new URL(redirectUrl).pathname, "/products");
+  } finally {
+    MarketingCampaignRun.findOne = originalRunFindOne;
+    if (previousPublicUrl === undefined) delete process.env.PUBLIC_APP_URL;
+    else process.env.PUBLIC_APP_URL = previousPublicUrl;
+  }
+});
+
+test("Instagram carousel child containers preserve selected asset order", async () => {
+  const originalPost = axios.post;
+  const originalGet = axios.get;
+  const imageUrls = [];
+  let parentChildren = null;
+  let childNumber = 0;
+  axios.post = async (url, body) => {
+    if (url.endsWith("/media_publish")) return { data: { id: "media-1" } };
+    if (body.get("media_type") === "CAROUSEL") {
+      parentChildren = body.get("children");
+      return { data: { id: "parent-1" } };
+    }
+    imageUrls.push(body.get("image_url"));
+    childNumber += 1;
+    return { data: { id: `child-${childNumber}` } };
+  };
+  axios.get = async (url, options) => {
+    if (options?.params?.fields?.includes("permalink")) return { data: { id: "media-1", permalink: "https://instagram.com/p/example" } };
+    return { data: { id: url.split("/").at(-1), status_code: "FINISHED" } };
+  };
+
+  try {
+    const result = await instagramPublishService.publishCarousel({
+      connection: { instagram_user_id: "ig-user", user_access_token: "token" },
+      assetUrls: ["https://cdn.example.com/slide-2.jpg", "https://cdn.example.com/slide-1.jpg"],
+      caption: "Carousel caption",
+    });
+    assert.deepEqual(imageUrls, ["https://cdn.example.com/slide-2.jpg", "https://cdn.example.com/slide-1.jpg"]);
+    assert.equal(parentChildren, "child-1,child-2");
+    assert.deepEqual(result.child_creation_ids, ["child-1", "child-2"]);
+  } finally {
+    axios.post = originalPost;
+    axios.get = originalGet;
+  }
+});
+
+test("Instagram carousel retry removes the first terminal child checkpoint", async () => {
+  const originalPost = axios.post;
+  const originalGet = axios.get;
+  let postCalls = 0;
+  axios.post = async () => {
+    postCalls += 1;
+    throw new Error("No new container should be created before resumed children are checked");
+  };
+  axios.get = async (url) => {
+    const containerId = url.split("/").at(-1);
+    return {
+      data: containerId === "child-2"
+        ? { id: containerId, status_code: "ERROR", status: "Invalid media" }
+        : { id: containerId, status_code: "FINISHED" },
+    };
+  };
+
+  try {
+    let publishError = null;
+    try {
+      await instagramPublishService.publishCarousel({
+        connection: { instagram_user_id: "ig-user", user_access_token: "token" },
+        assetUrls: ["https://cdn.example.com/slide-1.jpg", "https://cdn.example.com/slide-2.jpg"],
+        caption: "Carousel caption",
+        resumeState: { child_creation_ids: ["child-1", "child-2"] },
+      });
+    } catch (error) {
+      publishError = error;
+    }
+
+    assert.ok(publishError);
+    assert.equal(publishError.code, "instagram_container_failed");
+    assert.equal(publishError.details.failed_child_index, 1);
+    assert.equal(postCalls, 0);
+    const updates = marketingPrivate.buildPublishAttemptFailureUpdates(
+      publishError,
+      { status: "container_created", child_creation_ids: ["child-1", "child-2"] },
+      publishError.message,
+    );
+    assert.equal(updates.status, "failed");
+    assert.equal(updates.creation_id, null);
+    assert.deepEqual(updates.child_creation_ids, ["child-1"]);
+  } finally {
+    axios.post = originalPost;
+    axios.get = originalGet;
+  }
+});
+
+test("Instagram media publish errors are quarantined as uncertain", async () => {
+  const originalPost = axios.post;
+  const originalGet = axios.get;
+  let childNumber = 0;
+  axios.post = async (url, body) => {
+    if (url.endsWith("/media_publish")) throw new Error("Connection closed before Meta replied");
+    if (body.get("media_type") === "CAROUSEL") return { data: { id: "parent-1" } };
+    childNumber += 1;
+    return { data: { id: `child-${childNumber}` } };
+  };
+  axios.get = async (url) => ({ data: { id: url.split("/").at(-1), status_code: "FINISHED" } });
+
+  try {
+    let publishError = null;
+    try {
+      await instagramPublishService.publishCarousel({
+        connection: { instagram_user_id: "ig-user", user_access_token: "token" },
+        assetUrls: ["https://cdn.example.com/slide-1.jpg", "https://cdn.example.com/slide-2.jpg"],
+        caption: "Carousel caption",
+      });
+    } catch (error) {
+      publishError = error;
+    }
+
+    assert.ok(publishError);
+    assert.equal(publishError.code, "instagram_publish_outcome_uncertain");
+    assert.equal(publishError.details.instagram_outcome_uncertain, true);
+    const updates = marketingPrivate.buildPublishAttemptFailureUpdates(
+      publishError,
+      { status: "publishing", creation_id: "parent-1", child_creation_ids: ["child-1", "child-2"] },
+      publishError.message,
+    );
+    assert.equal(updates.status, "uncertain");
+    const checkpointFailure = Object.assign(new Error("Database checkpoint failed"), {
+      details: { instagram_publish_stage: "pre_media_publish", instagram_outcome_uncertain: false },
+    });
+    assert.equal(marketingPrivate.buildPublishAttemptFailureUpdates(
+      checkpointFailure,
+      { status: "publishing", creation_id: "parent-1", child_creation_ids: ["child-1", "child-2"] },
+      checkpointFailure.message,
+    ).status, "failed");
+    assert.equal(marketingPrivate.getPublishAttemptLifecycleState({
+      status: "uncertain",
+      creation_id: "parent-1",
+      media_id: null,
+    }).outcome_uncertain, true);
+  } finally {
+    axios.post = originalPost;
+    axios.get = originalGet;
+  }
+});
+
+test("Instagram does not publish when the pre-publish checkpoint fails", async () => {
+  const originalPost = axios.post;
+  const originalGet = axios.get;
+  let childNumber = 0;
+  let mediaPublishCalls = 0;
+  axios.post = async (url, body) => {
+    if (url.endsWith("/media_publish")) {
+      mediaPublishCalls += 1;
+      return { data: { id: "media-1" } };
+    }
+    if (body.get("media_type") === "CAROUSEL") return { data: { id: "parent-1" } };
+    childNumber += 1;
+    return { data: { id: `child-${childNumber}` } };
+  };
+  axios.get = async (url) => ({ data: { id: url.split("/").at(-1), status_code: "FINISHED" } });
+
+  try {
+    await assert.rejects(
+      () => instagramPublishService.publishCarousel({
+        connection: { instagram_user_id: "ig-user", user_access_token: "token" },
+        assetUrls: ["https://cdn.example.com/slide-1.jpg", "https://cdn.example.com/slide-2.jpg"],
+        caption: "Carousel caption",
+        onProgress: async (progress) => {
+          if (progress.status === "publishing") throw new Error("Checkpoint unavailable");
+        },
+      }),
+      (error) => error.code === "instagram_publish_checkpoint_failed"
+        && error.details.instagram_outcome_uncertain === false,
+    );
+    assert.equal(mediaPublishCalls, 0);
+  } finally {
+    axios.post = originalPost;
+    axios.get = originalGet;
+  }
 });
 
 test("OpenAI image provider strips unsupported parameters for every selectable model", () => {
@@ -502,7 +927,7 @@ test("campaign compliance scans hashtags and resolved image copy", async () => {
   assert.ok(compliance.issues.some((issue) => issue.code === "blocked_claim" && /100% safe/i.test(issue.message)));
 });
 
-test("Instagram caption assembly preserves tracked URLs and affiliate disclosure within 2200 characters", () => {
+test("Instagram caption assembly preserves tracked URLs and affiliate notice within 2200 characters", () => {
   const trackedUrl = "https://pinkpaisa.in/product/test?utm_source=instagram&utm_campaign=campaign";
   const generated = marketingAgentsPrivate.composeInstagramCaption({
     caption: Array.from({ length: 420 }, () => "editorial").join(" "),
@@ -515,7 +940,7 @@ test("Instagram caption assembly preserves tracked URLs and affiliate disclosure
   assert.equal(generated.character_count, generated.caption.length);
   assert.equal(generated.was_truncated, true);
   assert.ok(generated.caption.includes(trackedUrl));
-  assert.match(generated.caption, /Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned$/);
+  assert.equal(generated.caption.endsWith(marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE), true);
 
   assert.throws(
     () => marketingAgentsPrivate.composeInstagramCaption({
@@ -528,6 +953,28 @@ test("Instagram caption assembly preserves tracked URLs and affiliate disclosure
     (error) => error.code === "instagram_caption_too_long"
       && error.message === "Final Instagram caption exceeds 2200 characters.",
   );
+});
+
+test("affiliate caption assembly replaces retired notices in stored captions", () => {
+  const retiredAssociateNotice = [
+    ["As", "an", "Amazon"].join(" "),
+    ["Associate", "I", "earn", "from", "qualifying", "purchases."].join(" "),
+    `#${["Commissions", "Earned"].join("")}`,
+  ].join(" ");
+  const retiredCommissionNotice = [
+    ["Affiliate", "link:", "Pink", "Paisa"].join(" "),
+    ["may", "earn", "a", "commission", "from", "qualifying", "purchases."].join(" "),
+    "#Ad",
+  ].join(" ");
+  const normalized = marketingAgents.ensureAffiliateInstagramDisclosure(
+    `A curated partner pick.\n\n${retiredAssociateNotice}\n\n${retiredCommissionNotice}`,
+    true,
+  );
+
+  assert.equal(normalized.endsWith(marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE), true);
+  assert.equal(normalized.includes(retiredAssociateNotice), false);
+  assert.equal(normalized.includes(retiredCommissionNotice), false);
+  assert.equal((normalized.match(/#Ad\b/gi) || []).length, 1);
 });
 
 test("new campaign stage sequence skips strategy and stops after tracking", () => {
@@ -623,6 +1070,139 @@ test("durable Instagram attempts are resumed without creating another post", () 
   assert.equal(marketingPrivate.isMatchingDurableCarouselAttempt(recoveredFromRun, ["run-1", "run-2"], payload), true);
   assert.equal(marketingPrivate.isUnresolvedPublishAttempt({ status: "publishing", media_id: null }), true);
   assert.equal(marketingPrivate.isUnresolvedPublishAttempt(attempt), false);
+  assert.equal(marketingPrivate.getPublishAttemptLifecycleState({
+    status: "container_created",
+    child_creation_ids: ["child-1"],
+    media_id: null,
+  }).has_external_work, true);
+  assert.equal(marketingPrivate.getPublishAttemptLifecycleState({
+    status: "publishing",
+    creation_id: "container-1",
+    media_id: null,
+  }).outcome_uncertain, true);
+});
+
+test("stale carousel recovery quarantines an unresolved media publish instead of requeueing", async () => {
+  const originalTaskFind = AgentTask.find;
+  const originalTaskFindOneAndUpdate = AgentTask.findOneAndUpdate;
+  const originalRunFindById = MarketingCampaignRun.findById;
+  const originalRunUpdateMany = MarketingCampaignRun.updateMany;
+  const originalRunDistinct = MarketingCampaignRun.distinct;
+  const originalAttemptFindOne = MarketingPublishAttempt.findOne;
+  const originalAttemptUpdateOne = MarketingPublishAttempt.updateOne;
+  const taskUpdates = [];
+  const attemptUpdates = [];
+  const runUpdates = [];
+  const task = {
+    _id: "task-1",
+    campaign_run_id: "run-1",
+    campaign_id: "cmp-1",
+    agent_name: "carousel",
+    status: "running",
+    attempt_count: 1,
+    started_at: new Date(Date.now() - 60_000),
+    input_json: {
+      grouped_run_ids: ["run-1", "run-2"],
+      carousel: {
+        publish_payload: {
+          content_type: "carousel",
+          asset_urls: ["https://cdn.example.com/1.jpg", "https://cdn.example.com/2.jpg"],
+          caption: "Carousel caption",
+        },
+      },
+    },
+  };
+  const attempt = {
+    _id: "attempt-1",
+    campaign_run_id: "run-1",
+    status: "publishing",
+    content_type: "carousel",
+    creation_id: "parent-1",
+    child_creation_ids: ["child-1", "child-2"],
+    media_id: null,
+  };
+
+  AgentTask.find = () => ({ sort: async () => [task] });
+  AgentTask.findOneAndUpdate = async (_filter, update) => {
+    taskUpdates.push(update.$set);
+    return { ...task, ...update.$set };
+  };
+  MarketingCampaignRun.findById = async () => ({ _id: "run-1", campaign_id: "cmp-1", status: "publishing", publish_status: "publishing" });
+  MarketingCampaignRun.updateMany = async (filter, update) => {
+    runUpdates.push({ filter, update });
+    return { modifiedCount: 2 };
+  };
+  MarketingCampaignRun.distinct = async () => [];
+  MarketingPublishAttempt.findOne = async () => attempt;
+  MarketingPublishAttempt.updateOne = async (filter, update) => {
+    attemptUpdates.push({ filter, update });
+    return { modifiedCount: 1 };
+  };
+
+  try {
+    const result = await marketingAgentOrchestrator.recoverStaleRunningTasks({ force: true });
+    assert.equal(result.recovered_count, 1);
+    assert.equal(taskUpdates[0].status, "failed");
+    assert.equal(attemptUpdates[0].update.$set.status, "uncertain");
+    assert.equal(runUpdates[0].update.$set.publish_status, "failed");
+    assert.match(taskUpdates[0].error_message, /automatic retry is blocked/i);
+  } finally {
+    AgentTask.find = originalTaskFind;
+    AgentTask.findOneAndUpdate = originalTaskFindOneAndUpdate;
+    MarketingCampaignRun.findById = originalRunFindById;
+    MarketingCampaignRun.updateMany = originalRunUpdateMany;
+    MarketingCampaignRun.distinct = originalRunDistinct;
+    MarketingPublishAttempt.findOne = originalAttemptFindOne;
+    MarketingPublishAttempt.updateOne = originalAttemptUpdateOne;
+  }
+});
+
+test("cancelled carousel recovery releases stranded members idempotently", async () => {
+  const originalTaskFind = AgentTask.find;
+  const originalTaskUpdateOne = AgentTask.updateOne;
+  const originalRunFind = MarketingCampaignRun.find;
+  const originalRunUpdateMany = MarketingCampaignRun.updateMany;
+  const originalAttemptFindOne = MarketingPublishAttempt.findOne;
+  const taskUpdates = [];
+  const memberUpdates = [];
+  const task = {
+    _id: "task-2",
+    campaign_run_id: "run-1",
+    agent_name: "carousel",
+    status: "cancelled",
+    cancellation_requested: true,
+    lease_owner: null,
+    input_json: { grouped_run_ids: ["run-1", "run-2"] },
+  };
+
+  AgentTask.find = () => ({
+    sort() { return this; },
+    limit: async () => [task],
+  });
+  AgentTask.updateOne = async (filter, update) => {
+    taskUpdates.push({ filter, update });
+    return { modifiedCount: 1 };
+  };
+  MarketingCampaignRun.find = async () => [{ _id: "run-1" }, { _id: "run-2" }];
+  MarketingCampaignRun.updateMany = async (filter, update) => {
+    memberUpdates.push({ filter, update });
+    return { modifiedCount: 2 };
+  };
+  MarketingPublishAttempt.findOne = () => ({ lean: async () => null });
+
+  try {
+    const result = await marketingAgentOrchestrator.recoverCancelledCarouselMemberships();
+    assert.equal(result.recovered_count, 1);
+    assert.equal(memberUpdates[0].update.$set.carousel_task_id, null);
+    assert.equal(memberUpdates[0].update.$set.publish_status, "ready");
+    assert.equal(taskUpdates[0].update.$set.cancellation_requested, false);
+  } finally {
+    AgentTask.find = originalTaskFind;
+    AgentTask.updateOne = originalTaskUpdateOne;
+    MarketingCampaignRun.find = originalRunFind;
+    MarketingCampaignRun.updateMany = originalRunUpdateMany;
+    MarketingPublishAttempt.findOne = originalAttemptFindOne;
+  }
 });
 
 test("archive membership includes queued grouped carousel tasks", () => {
@@ -647,6 +1227,44 @@ test("bulk campaign archive selection is required, deduplicated, and bounded", (
     () => marketingPrivate.normalizeBulkCampaignRunIds(Array.from({ length: 101 }, (_, index) => `run-${index}`)),
     /Select no more than 100 campaigns/
   );
+});
+
+test("bulk campaign approval is bounded and reports partial success", async () => {
+  assert.deepEqual(
+    marketingPrivate.normalizeBulkReviewRunIds(["run-2", "run-1", "run-2"]),
+    ["run-1", "run-2"]
+  );
+  assert.throws(
+    () => marketingPrivate.normalizeBulkReviewRunIds([]),
+    /Select at least one campaign to approve/
+  );
+  assert.throws(
+    () => marketingPrivate.normalizeBulkReviewRunIds(Array.from({ length: 26 }, (_, index) => `run-${index}`)),
+    /Select no more than 25 campaigns/
+  );
+
+  const calls = [];
+  const result = await marketingPrivate.collectBulkCampaignReviewResults(
+    ["run-1", "run-2", "run-3"],
+    async (runId) => {
+      calls.push(runId);
+      if (runId === "run-2") throw new Error("Compliance needs review");
+      return {
+        campaign_id: `campaign-${runId}`,
+        product_title: `Product ${runId}`,
+        review_status: "approved",
+      };
+    }
+  );
+
+  assert.deepEqual(calls, ["run-1", "run-2", "run-3"]);
+  assert.equal(result.requested, 3);
+  assert.equal(result.approved, 2);
+  assert.equal(result.failed, 1);
+  assert.equal(result.results[0].ok, true);
+  assert.equal(result.results[1].ok, false);
+  assert.equal(result.results[1].message, "Compliance needs review");
+  assert.equal(result.results[2].review_status, "approved");
 });
 
 test("orphaned publish recovery never republishes and returns unaccepted requests to review", () => {
@@ -993,7 +1611,7 @@ test("affiliate campaign captions include disclosure and avoid manual Amazon pri
 
   try {
     const caption = await marketingAgents.runCaptionAgent(affiliateRun);
-    assert.match(caption.instagram.caption, /Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned$/);
+    assert.equal(caption.instagram.caption.endsWith(marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE), true);
     assert.doesNotMatch(caption.instagram.caption, /\u20b90|Core price|Partner-listed/i);
     assert.equal(caption.instagram.cta, "View partner pick");
 
@@ -1002,7 +1620,7 @@ test("affiliate campaign captions include disclosure and avoid manual Amazon pri
       caption_json: caption,
       compliance_json: { status: "approved" },
     });
-    assert.match(tracking.publish_payload.caption, /Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases\. #CommissionsEarned$/);
+    assert.equal(tracking.publish_payload.caption.endsWith(marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE), true);
 
     const nonAffiliateCaption = await marketingAgents.runCaptionAgent({
       ...affiliateRun,
@@ -1119,7 +1737,7 @@ test("publish readiness blocks unsafe affiliate products and non-HTTPS media", (
   assert.ok(missingDisclosure.blockers.some((blocker) => blocker.code === "affiliate_disclosure_missing"));
   assert.throws(
     () => marketingPrivate.assertReviewApprovalReadiness(missingDisclosure),
-    /Affiliate disclosure is required/,
+    /Affiliate notice is required/,
   );
   assert.throws(
     () => marketingPrivate.assertReviewApprovalReadiness(complianceBlocked),
@@ -1180,7 +1798,10 @@ test("carousel readiness reports unsafe selected affiliate runs before publishin
   assert.equal(blockers.length, 1);
   assert.equal(blockers[0].product_title, "Product 2");
   assert.equal(blockers[0].code, "product_hidden");
-  assert.match(marketingPrivate.buildBulkCarouselCaption([makeRun("1", "product-1")]), /Affiliate disclosure: As an Amazon Associate.*#CommissionsEarned$/);
+  assert.equal(
+    marketingPrivate.buildBulkCarouselCaption([makeRun("1", "product-1")]).endsWith(marketingAgents.AFFILIATE_INSTAGRAM_DISCLOSURE),
+    true,
+  );
 });
 
 test("customer session helpers prefer session cookie and fall back to bearer auth", () => {

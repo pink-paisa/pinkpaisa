@@ -397,7 +397,7 @@ const downloadTemplate = async () => {
       name: "Compliance Notes",
       rows: [
         ["Rule", "Details"],
-        ["Disclosure", "Buyer CTAs use a short affiliate notice. The required Amazon Associate disclosure remains on the disclosure page and footer."],
+        ["Disclosure", "Buyer CTAs use a short affiliate notice. The site-wide affiliate notice remains on the disclosure page and footer."],
         ["Affiliate URL", "Use Amazon.in or Amazon.com product URLs with your Associate tag parameter."],
         ["Manual image", "Optional. Use image_url for a direct image URL or /uploads/ path."],
         ["Buying intent and campaign", "Optional. Use them when you want better buyer context or campaign analytics."],
@@ -968,7 +968,7 @@ export default function AdminAffiliateProducts() {
             Manage Amazon.in and Amazon.com picks. Imported rows stay draft/review until validation and publish.
           </p>
           <p className="mt-2 text-xs text-muted-foreground">
-            Buyer CTAs use a short affiliate notice. The full Amazon Associate disclosure remains available site-wide.
+            Buyer CTAs use a short affiliate notice. The full affiliate notice remains available site-wide.
           </p>
         </div>
         <Button type="button" onClick={openCreate} className="rounded-xl">

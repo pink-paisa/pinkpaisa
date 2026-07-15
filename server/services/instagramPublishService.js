@@ -28,6 +28,18 @@ function describeInstagramApiError(error) {
   return "Instagram publishing failed";
 }
 
+function withInstagramOperationContext(error, code, details = {}) {
+  const operationError = error instanceof Error
+    ? error
+    : new Error(String(error || "Instagram publishing failed"));
+  operationError.code = code || operationError.code || "instagram_publish_failed";
+  operationError.details = {
+    ...(operationError.details && typeof operationError.details === "object" ? operationError.details : {}),
+    ...details,
+  };
+  return operationError;
+}
+
 function isPublicMediaUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
@@ -124,19 +136,43 @@ async function pollPublishStatus(containerId, userAccessToken, {
   let lastStatus = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const status = await getContainerStatus(containerId, userAccessToken).catch(() => null);
+    let status;
+    try {
+      status = await getContainerStatus(containerId, userAccessToken);
+    } catch (error) {
+      throw withInstagramOperationContext(error, "instagram_container_status_unavailable", {
+        container_id: containerId,
+        container_failure_terminal: false,
+      });
+    }
     lastStatus = status;
     const code = String(status?.status_code || "").toUpperCase();
 
-    if (!code || code === "FINISHED" || code === "PUBLISHED") return status;
+    if (code === "FINISHED" || code === "PUBLISHED") return status;
     if (code === "ERROR" || code === "EXPIRED") {
-      throw new Error(status?.status || `Instagram media container ${containerId} failed with ${code}`);
+      throw withInstagramOperationContext(
+        new Error(status?.status || `Instagram media container ${containerId} failed with ${code}`),
+        "instagram_container_failed",
+        {
+          container_id: containerId,
+          container_status: code,
+          container_failure_terminal: true,
+        }
+      );
     }
 
-    await sleep(delayMs);
+    if (attempt < maxAttempts - 1) await sleep(delayMs);
   }
 
-  return lastStatus;
+  throw withInstagramOperationContext(
+    new Error(`Instagram media container ${containerId} did not finish processing in time`),
+    "instagram_container_pending",
+    {
+      container_id: containerId,
+      container_status: lastStatus?.status_code || null,
+      container_failure_terminal: false,
+    }
+  );
 }
 
 async function createImageContainer(igUserId, userAccessToken, { imageUrl, caption, isCarouselItem = false }) {
@@ -179,7 +215,14 @@ async function publishSingleImage({ connection, assetUrls, caption, resumeState 
     await onProgress({ status: "container_created", creation_id: creation.id, child_creation_ids: [] });
   }
 
-  await pollPublishStatus(creation.id, connection.user_access_token);
+  try {
+    await pollPublishStatus(creation.id, connection.user_access_token);
+  } catch (error) {
+    throw withInstagramOperationContext(error, error.code || "instagram_container_failed", {
+      instagram_publish_stage: "single_container",
+      creation_id: creation.id,
+    });
+  }
   if (resumeState.media_id) {
     const mediaInfo = await getMediaInfo(resumeState.media_id, connection.user_access_token).catch(() => ({ id: resumeState.media_id }));
     return {
@@ -191,8 +234,29 @@ async function publishSingleImage({ connection, assetUrls, caption, resumeState 
       resumed: true,
     };
   }
-  if (onProgress) await onProgress({ status: "publishing", creation_id: creation.id, child_creation_ids: [] });
-  const published = await publishContainer(connection.instagram_user_id, connection.user_access_token, creation.id);
+  if (onProgress) {
+    try {
+      await onProgress({ status: "publishing", creation_id: creation.id, child_creation_ids: [] });
+    } catch (error) {
+      throw withInstagramOperationContext(error, "instagram_publish_checkpoint_failed", {
+        instagram_publish_stage: "pre_media_publish",
+        instagram_outcome_uncertain: false,
+        creation_id: creation.id,
+        child_creation_ids: [],
+      });
+    }
+  }
+  let published;
+  try {
+    published = await publishContainer(connection.instagram_user_id, connection.user_access_token, creation.id);
+  } catch (error) {
+    throw withInstagramOperationContext(error, "instagram_publish_outcome_uncertain", {
+      instagram_publish_stage: "media_publish",
+      instagram_outcome_uncertain: true,
+      creation_id: creation.id,
+      child_creation_ids: [],
+    });
+  }
   const mediaInfo = await getMediaInfo(published.id, connection.user_access_token).catch(() => ({ id: published.id }));
   if (onProgress) {
     await onProgress({
@@ -218,25 +282,72 @@ async function publishSingleImage({ connection, assetUrls, caption, resumeState 
 async function publishCarousel({ connection, assetUrls, caption, resumeState = {}, onProgress = null }) {
   const childIds = Array.isArray(resumeState.child_creation_ids) ? [...resumeState.child_creation_ids] : [];
 
-  for (const assetUrl of assetUrls.slice(childIds.length, 10)) {
-    const child = await createImageContainer(connection.instagram_user_id, connection.user_access_token, {
-      imageUrl: assetUrl,
-      isCarouselItem: true,
-    });
-    childIds.push(child.id);
-    if (onProgress) await onProgress({ status: "container_created", creation_id: resumeState.creation_id || null, child_creation_ids: childIds });
-    await pollPublishStatus(child.id, connection.user_access_token, { maxAttempts: 6, delayMs: 2500 }).catch(() => null);
+  if (childIds.length > assetUrls.length) {
+    throw withInstagramOperationContext(
+      new Error("Stored Instagram carousel children do not match the current slide count"),
+      "instagram_carousel_checkpoint_invalid",
+      { instagram_publish_stage: "child_container", child_creation_ids: childIds }
+    );
   }
 
-  const parent = resumeState.creation_id
-    ? { id: resumeState.creation_id }
-    : await createCarouselContainer(connection.instagram_user_id, connection.user_access_token, { children: childIds, caption });
+  for (let index = 0; index < childIds.length; index += 1) {
+    try {
+      await pollPublishStatus(childIds[index], connection.user_access_token, { maxAttempts: 6, delayMs: 2500 });
+    } catch (error) {
+      throw withInstagramOperationContext(error, error.code || "instagram_child_container_failed", {
+        instagram_publish_stage: "child_container",
+        failed_child_index: index,
+        creation_id: resumeState.creation_id || null,
+        child_creation_ids: childIds,
+      });
+    }
+  }
+
+  for (let index = childIds.length; index < Math.min(assetUrls.length, 10); index += 1) {
+    try {
+      const child = await createImageContainer(connection.instagram_user_id, connection.user_access_token, {
+        imageUrl: assetUrls[index],
+        isCarouselItem: true,
+      });
+      childIds.push(child.id);
+      if (onProgress) await onProgress({ status: "container_created", creation_id: resumeState.creation_id || null, child_creation_ids: childIds });
+      await pollPublishStatus(child.id, connection.user_access_token, { maxAttempts: 6, delayMs: 2500 });
+    } catch (error) {
+      throw withInstagramOperationContext(error, error.code || "instagram_child_container_failed", {
+        instagram_publish_stage: "child_container",
+        failed_child_index: index,
+        creation_id: resumeState.creation_id || null,
+        child_creation_ids: childIds,
+      });
+    }
+  }
+
+  let parent;
+  try {
+    parent = resumeState.creation_id
+      ? { id: resumeState.creation_id }
+      : await createCarouselContainer(connection.instagram_user_id, connection.user_access_token, { children: childIds, caption });
+  } catch (error) {
+    throw withInstagramOperationContext(error, error.code || "instagram_parent_container_failed", {
+      instagram_publish_stage: "parent_container",
+      creation_id: null,
+      child_creation_ids: childIds,
+    });
+  }
 
   if (!resumeState.creation_id && onProgress) {
     await onProgress({ status: "container_created", creation_id: parent.id, child_creation_ids: childIds });
   }
 
-  await pollPublishStatus(parent.id, connection.user_access_token, { maxAttempts: 8, delayMs: 3000 }).catch(() => null);
+  try {
+    await pollPublishStatus(parent.id, connection.user_access_token, { maxAttempts: 8, delayMs: 3000 });
+  } catch (error) {
+    throw withInstagramOperationContext(error, error.code || "instagram_parent_container_failed", {
+      instagram_publish_stage: "parent_container",
+      creation_id: parent.id,
+      child_creation_ids: childIds,
+    });
+  }
   if (resumeState.media_id) {
     const mediaInfo = await getMediaInfo(resumeState.media_id, connection.user_access_token).catch(() => ({ id: resumeState.media_id }));
     return {
@@ -249,8 +360,29 @@ async function publishCarousel({ connection, assetUrls, caption, resumeState = {
       resumed: true,
     };
   }
-  if (onProgress) await onProgress({ status: "publishing", creation_id: parent.id, child_creation_ids: childIds });
-  const published = await publishContainer(connection.instagram_user_id, connection.user_access_token, parent.id);
+  if (onProgress) {
+    try {
+      await onProgress({ status: "publishing", creation_id: parent.id, child_creation_ids: childIds });
+    } catch (error) {
+      throw withInstagramOperationContext(error, "instagram_publish_checkpoint_failed", {
+        instagram_publish_stage: "pre_media_publish",
+        instagram_outcome_uncertain: false,
+        creation_id: parent.id,
+        child_creation_ids: childIds,
+      });
+    }
+  }
+  let published;
+  try {
+    published = await publishContainer(connection.instagram_user_id, connection.user_access_token, parent.id);
+  } catch (error) {
+    throw withInstagramOperationContext(error, "instagram_publish_outcome_uncertain", {
+      instagram_publish_stage: "media_publish",
+      instagram_outcome_uncertain: true,
+      creation_id: parent.id,
+      child_creation_ids: childIds,
+    });
+  }
   const mediaInfo = await getMediaInfo(published.id, connection.user_access_token).catch(() => ({ id: published.id }));
   if (onProgress) {
     await onProgress({

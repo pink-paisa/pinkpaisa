@@ -1,7 +1,7 @@
 import Link from "next/link";
 
-const DISCLOSURE_TEXT = "As an Amazon Associate I earn from qualifying purchases.";
-const COMPACT_DISCLOSURE_TEXT = DISCLOSURE_TEXT;
+const DISCLOSURE_TEXT = "Some product links are affiliate links.";
+const COMPACT_DISCLOSURE_TEXT = "Affiliate link.";
 
 export function AffiliateDisclosure({ compact = false }: { compact?: boolean }) {
   if (compact) {

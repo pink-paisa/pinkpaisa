@@ -110,6 +110,7 @@ app.use("/api/admin", require("./routes/adminSettings"));
 app.use("/api/vendor-products", require("./routes/vendorProducts"));
 app.use("/api/vendor-orders", require("./routes/vendorOrders"));
 app.use("/api/marketing-campaigns", require("./routes/marketingCampaigns"));
+app.use("/api/c", require("./routes/campaignLinks"));
 app.use("/api/instagram", instagramLimiter, require("./routes/instagram"));
 
 app.get("/api/health", (_req, res) => {

@@ -25,6 +25,7 @@ const getNextActionLabel = (run: CampaignRunLite) => {
   if (action === "approve_for_publish") return "Waiting for review approval";
   if (action === "fix_publish_blockers") return "Needs admin action";
   if (action === "retry_failed_task") return "Retry available";
+  if (action === "verify_instagram_publish") return "Verify Instagram publish result";
   if (action === "wait_for_creative") return "Generating image";
   if (action === "wait_for_tracking") return "Tracking link";
   if (action.startsWith("wait_for_")) {
@@ -66,12 +67,15 @@ const CampaignPublishActions = ({
     ...readinessBlockers,
     ...(!instagramConnected ? [{ code: "instagram_not_connected", message: "Instagram must be connected before publishing." }] : []),
   ];
+  const outcomeUncertain = run.next_action === "verify_instagram_publish"
+    || /automatic retry is blocked|may have accepted this publish request/i.test(lastError || "");
   const canPublish = run.review_status === "approved"
     && !run.archived_at
+    && !outcomeUncertain
     && ["ready", "failed", "scheduled", "draft"].includes(run.publish_status || "")
     && run.publish_readiness?.can_publish === true
     && publishBlockers.length === 0;
-  const showRetry = run.status === "failed" || run.publish_status === "failed";
+  const showRetry = !outcomeUncertain && (run.status === "failed" || run.publish_status === "failed");
   const publishFailed = run.publish_status === "failed";
   const publishStatusLabel = (run.publish_status || "not_ready").replace(/_/g, " ");
   const nextActionLabel = getNextActionLabel(run);
@@ -92,7 +96,7 @@ const CampaignPublishActions = ({
       <div className="mt-4 rounded-2xl border border-border/70 bg-muted/20 p-4">
         <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Workflow tools</p>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <Button variant="outline" className="w-full justify-center rounded-2xl sm:col-span-2" onClick={onRegenerate} disabled={actionLoading}>
+          <Button variant="outline" className="w-full justify-center rounded-2xl sm:col-span-2" onClick={onRegenerate} disabled={actionLoading || outcomeUncertain}>
             <RefreshCcw className="mr-2 h-4 w-4" /> Regenerate image and caption
           </Button>
           {canResetStuck && (
@@ -107,6 +111,18 @@ const CampaignPublishActions = ({
           )}
         </div>
       </div>
+
+      {outcomeUncertain ? (
+        <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <p className="font-medium">Verify the Instagram account</p>
+              <p className="mt-1">Meta may have accepted this post. Automatic retry and regeneration are blocked to prevent a duplicate.</p>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {run.status === "waiting_review" && (
         <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4">

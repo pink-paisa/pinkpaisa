@@ -19,8 +19,8 @@ export default function AffiliateDisclosurePage() {
           <div className="space-y-4 text-sm leading-7 text-muted-foreground md:text-base">
             <p className="font-medium text-foreground">{DISCLOSURE_TEXT}</p>
             <p>
-              Pink Paisa curates products to help readers make better buying decisions. Some product links take you to Amazon;
-              if you buy through those links, Pink Paisa may receive affiliate income at no extra cost to you.
+              Pink Paisa curates products to help readers make better buying decisions. Some product links take you to Amazon
+              or another partner website.
             </p>
             <p>
               Amazon does not sponsor, endorse, or approve our recommendations. We do not provide rewards, rebates, points, or

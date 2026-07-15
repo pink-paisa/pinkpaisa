@@ -4,25 +4,31 @@ const { protect, adminOnly } = require("../middleware/auth");
 const {
   archiveMarketingCampaignController,
   bulkArchiveMarketingCampaignsController,
+  bulkReviewMarketingCampaignsController,
+  cancelMarketingCarouselController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
   getMarketingBatchDetail,
+  getMarketingCarouselController,
   getMarketingCampaignCalendar,
   getLatestMarketingBatch,
   getMarketingQueueHealthController,
   getMarketingCampaignRun,
   listMarketingCampaignCatalogProducts,
   listMarketingCampaignRuns,
+  previewMarketingCarouselController,
   publishMarketingCarouselController,
   publishMarketingCampaignController,
   purgeMarketingCampaignController,
   recoverStaleMarketingTasksController,
   regenerateMarketingCampaign,
   resetStuckMarketingCampaignController,
+  rescheduleMarketingCarouselController,
   reviewMarketingCampaignRun,
   restoreMarketingCampaignController,
   retryFailedMarketingBatchItems,
   retryMarketingCampaign,
+  retryMarketingCarouselController,
   runDailyMarketingBatchController,
   scanMarketingCampaignReadiness,
   scheduleMarketingCampaignController,
@@ -39,8 +45,14 @@ router.get("/admin/queue-health", protect, adminOnly, getMarketingQueueHealthCon
 router.post("/admin/readiness-scan", protect, adminOnly, scanMarketingCampaignReadiness);
 router.post("/admin/run-daily-batch", protect, adminOnly, runDailyMarketingBatchController);
 router.post("/admin/recover-stale-tasks", protect, adminOnly, recoverStaleMarketingTasksController);
+router.post("/admin/carousels/preview", protect, adminOnly, previewMarketingCarouselController);
 router.post("/admin/post-carousel", protect, adminOnly, publishMarketingCarouselController);
+router.get("/admin/carousels/:taskId", protect, adminOnly, getMarketingCarouselController);
+router.patch("/admin/carousels/:taskId/schedule", protect, adminOnly, rescheduleMarketingCarouselController);
+router.post("/admin/carousels/:taskId/cancel", protect, adminOnly, cancelMarketingCarouselController);
+router.post("/admin/carousels/:taskId/retry", protect, adminOnly, retryMarketingCarouselController);
 router.post("/admin/bulk-archive", protect, adminOnly, bulkArchiveMarketingCampaignsController);
+router.post("/admin/bulk-review", protect, adminOnly, bulkReviewMarketingCampaignsController);
 router.post("/admin/from-product/:productId", protect, adminOnly, createMarketingCampaignFromProductSource);
 router.post("/admin/from-vendor-product/:vendorProductId", protect, adminOnly, createMarketingCampaignFromApprovedProduct);
 router.get("/admin/:id", protect, adminOnly, getMarketingCampaignRun);

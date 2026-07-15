@@ -56,6 +56,7 @@ Important:
 - `INSTAGRAM_REDIRECT_URI` must match Meta exactly
 - keep `MARKETING_WORKER_IN_API=false` and `MARKETING_SCHEDULER_IN_API=false` in production
 - keep `AMAZON_CREATORS_API_ENABLED=false` until Pink Paisa receives Creators API access
+- keep `MARKETING_AFFILIATE_CAROUSEL_ENABLED=false` during the initial deploy
 - set `OPENAI_IMAGE_MODEL=gpt-image-2` and `OPENAI_CAPTION_MODEL=gpt-5.6-luna` unless a reviewed replacement is selected
 - every queued campaign product must have a reachable JPEG, PNG, or WebP reference image
 - rotate any secrets that were exposed during local testing
@@ -168,6 +169,8 @@ Check public media:
 If the image opens publicly over HTTPS, Instagram publishing can fetch it.
 
 Before enabling the daily draft schedule, queue one admin, vendor-backed, and affiliate product. Confirm each run uses one product reference, generates one 1080x1350 image plus one caption package, and stops at `waiting_review`. Automatic mode generates drafts only; it never bypasses admin approval.
+
+After the API and marketing worker are healthy, approve two affiliate campaigns with public HTTPS creatives. Set `MARKETING_AFFILIATE_CAROUSEL_ENABLED=true`, run `pm2 startOrReload ecosystem.config.cjs --update-env`, and publish one controlled two-slide carousel. Verify slide order, the shared permalink, compact `/api/c/:campaignId` links, and the same Instagram media ID on both campaign runs before wider use.
 
 Campaign assets are stored on the Lightsail disk under `server/uploads/generated/campaigns`. Releases must preserve `server/uploads`; the deployment package intentionally excludes that directory from replacement.
 

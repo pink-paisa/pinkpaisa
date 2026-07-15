@@ -67,7 +67,7 @@ function buildCaptionRequest({ brief = {}, creative = {}, model = DEFAULT_CAPTIO
     context.is_affiliate
       ? "This is an affiliate discovery item. Do not state or imply that Pink Paisa manufactures, stocks, sells, ships, or delivers it. Do not mention a price, discount, coupon, availability, or delivery promise. Use partner-pick language."
       : "This is a Pink Paisa catalog product. Avoid unsupported performance or medical claims.",
-    "Do not include an affiliate disclosure; the server appends the required disclosure deterministically.",
+    "Do not include an affiliate notice; the server appends the required notice deterministically.",
     "Do not include a URL in the caption or CTA; the server appends the tracked destination.",
   ].join("\n");
 

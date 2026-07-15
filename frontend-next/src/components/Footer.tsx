@@ -1,5 +1,6 @@
 import pinkPaisaLogo from "@/assets/pink-paisa-logo.png";
 import Link from "next/link";
+import { DISCLOSURE_TEXT } from "@/components/affiliate/AffiliateDisclosure";
 
 const Footer = () => {
   return (
@@ -44,7 +45,7 @@ const Footer = () => {
           </div>
         </div>
         <p className="mt-8 text-center text-xs text-muted-foreground">
-          Affiliate notice: As an Amazon Associate I earn from qualifying purchases.
+          Affiliate notice: {DISCLOSURE_TEXT}
         </p>
         <p className="mt-2 text-center text-xs text-muted-foreground">
           Copyright {new Date().getFullYear()} Pink Paisa. All rights reserved.

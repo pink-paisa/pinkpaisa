@@ -16,9 +16,14 @@ const {
 
 const DEFAULT_FRONTEND_URL = "https://www.pinkpaisa.in";
 const BLOCKED_CLAIMS = ["cure", "guaranteed", "instant results", "100% safe", "risk-free", "miracle", "clinically proven"];
-const AFFILIATE_INSTAGRAM_DISCLOSURE = "Affiliate disclosure: As an Amazon Associate I earn from qualifying purchases. #CommissionsEarned";
-const AFFILIATE_DISCLOSURE_RE = /as an amazon associate i earn from qualifying purchases/i;
-const AFFILIATE_DISCLOSURE_BLOCK_RE = /(?:affiliate disclosure:\s*)?as an amazon associate i earn from qualifying purchases\.?\s*#commissionsearned/ig;
+const AFFILIATE_INSTAGRAM_DISCLOSURE = "#Ad";
+const AFFILIATE_DISCLOSURE_RE = /(?:^|\s)#ad\b/i;
+const AFFILIATE_DISCLOSURE_BLOCK_RE = /(?:^|\s)#ad\b/ig;
+const RETIRED_COMMISSION_NOTICE_WORDS = ["pink", "paisa", "may", "earn", "a", "commission", "from", "qualifying", "purchases"];
+const RETIRED_COMMISSION_NOTICE_SOURCE = `(?:affiliate\\s+link:\\s*)?${RETIRED_COMMISSION_NOTICE_WORDS.join("\\s+")}\\.?(?:\\s*#ad)?`;
+const LEGACY_ASSOCIATE_NOTICE_WORDS = ["as", "an", "amazon", "associate", "i", "earn", "from", "qualifying", "purchases"];
+const LEGACY_DISCLOSURE_HASHTAG = ["commissions", "earned"].join("");
+const LEGACY_ASSOCIATE_NOTICE_SOURCE = `(?:affiliate\\s+disclosure:\\s*)?${LEGACY_ASSOCIATE_NOTICE_WORDS.join("\\s+")}\\.?(?:\\s*#?${LEGACY_DISCLOSURE_HASHTAG})?`;
 const INSTAGRAM_CAPTION_MAX_LENGTH = 2200;
 const BLOCKED_CLAIM_PATTERNS = [
   { label: "cure", pattern: /\bcures?\b/i },
@@ -61,16 +66,30 @@ function buildProductUrl(slug) {
 }
 
 function hasAffiliateInstagramDisclosure(value) {
-  return AFFILIATE_DISCLOSURE_RE.test(String(value || ""));
+  const text = String(value || "");
+  return AFFILIATE_DISCLOSURE_RE.test(text)
+    || new RegExp(RETIRED_COMMISSION_NOTICE_SOURCE, "i").test(text)
+    || new RegExp(LEGACY_ASSOCIATE_NOTICE_SOURCE, "i").test(text);
+}
+
+function isAffiliateDisclosureHashtag(value) {
+  const normalized = trimText(value).replace(/^#+/, "").toLowerCase();
+  return normalized === "ad" || normalized === LEGACY_DISCLOSURE_HASHTAG;
+}
+
+function stripAffiliateInstagramDisclosure(value) {
+  return String(value || "")
+    .replace(new RegExp(RETIRED_COMMISSION_NOTICE_SOURCE, "ig"), "")
+    .replace(new RegExp(LEGACY_ASSOCIATE_NOTICE_SOURCE, "ig"), "")
+    .replace(AFFILIATE_DISCLOSURE_BLOCK_RE, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function ensureAffiliateInstagramDisclosure(value, isAffiliate = false) {
   const caption = trimText(value);
   if (!isAffiliate || !caption) return caption;
-  const withoutExistingDisclosure = caption
-    .replace(AFFILIATE_DISCLOSURE_BLOCK_RE, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  const withoutExistingDisclosure = stripAffiliateInstagramDisclosure(caption);
   return [withoutExistingDisclosure, AFFILIATE_INSTAGRAM_DISCLOSURE].filter(Boolean).join("\n\n");
 }
 
@@ -129,9 +148,12 @@ function truncateAtWord(value, maximum) {
 }
 
 function composeInstagramCaption({ caption, trackedUrl, hashtags = [], isAffiliate = false, overflowMode = "truncate" }) {
-  const body = trimText(caption).replace(AFFILIATE_DISCLOSURE_BLOCK_RE, "").replace(/\n{3,}/g, "\n\n").trim();
+  const body = stripAffiliateInstagramDisclosure(caption);
   const url = trimText(trackedUrl);
-  const selectedHashtags = (Array.isArray(hashtags) ? hashtags : []).map(trimText).filter(Boolean).slice(0, 8);
+  const selectedHashtags = (Array.isArray(hashtags) ? hashtags : [])
+    .map(trimText)
+    .filter((hashtag) => hashtag && !isAffiliateDisclosureHashtag(hashtag))
+    .slice(0, 8);
   const disclosure = isAffiliate ? AFFILIATE_INSTAGRAM_DISCLOSURE : "";
   const assemble = (captionText, hashtagValues) => [
     captionText,
@@ -451,7 +473,7 @@ async function runComplianceAgent(run) {
     captions.instagram?.short_caption,
     captions.instagram?.long_caption,
   ].filter(Boolean).join("\n\n"))) {
-    issues.push(createIssue("blocking", "missing_affiliate_disclosure", "Affiliate Instagram captions must include the Amazon Associate disclosure."));
+    issues.push(createIssue("blocking", "missing_affiliate_disclosure", "Affiliate Instagram captions must include Pink Paisa's affiliate notice."));
   }
   if (!brief.reference_image_url && !brief.campaign_asset?.url) {
     issues.push(createIssue("blocking", "reference_image_required", "Product image required."));
@@ -610,6 +632,8 @@ module.exports = {
   INSTAGRAM_CAPTION_MAX_LENGTH,
   ensureAffiliateInstagramDisclosure,
   hasAffiliateInstagramDisclosure,
+  isAffiliateDisclosureHashtag,
+  stripAffiliateInstagramDisclosure,
   runIntakeAgent,
   runStrategyAgent,
   runCreativeAgent,
@@ -621,5 +645,7 @@ module.exports = {
     composeInstagramCaption,
     ensureAffiliateInstagramDisclosure,
     hasAffiliateInstagramDisclosure,
+    isAffiliateDisclosureHashtag,
+    stripAffiliateInstagramDisclosure,
   },
 };

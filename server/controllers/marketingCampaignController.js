@@ -1,11 +1,14 @@
 const {
   archiveCampaignRun,
   archiveCampaignRuns,
+  buildAffiliateCarouselPreview,
+  cancelAffiliateCarousel,
   enqueueAffiliateProductCampaign,
   enqueueAdminProductCampaign,
   enqueueApprovedProductCampaign,
   getDailyBatchRunDetail,
   getCampaignRunDetail,
+  getAffiliateCarouselTask,
   getLatestDailyBatchRun,
   getMarketingQueueHealth,
   listCampaignCalendar,
@@ -14,24 +17,31 @@ const {
   publishCampaignRunNow,
   purgeCampaignRun,
   recoverStaleRunningTasks,
+  queueAffiliateCarousel,
   regenerateCampaignRun,
   resetStuckCampaignRun,
+  rescheduleAffiliateCarousel,
   reviewCampaignRun,
+  reviewCampaignRuns,
   restoreCampaignRun,
   retryCampaignRun,
+  retryAffiliateCarousel,
   retryFailedBatchRuns,
   runDailyBatch,
   scanCampaignReadiness,
   scheduleCampaignRun,
   updateCampaignDraft,
 } = require("../services/marketingAgentOrchestrator");
+const MarketingCampaignRun = require("../models/MarketingCampaignRun");
 const Product = require("../models/Product");
 const VendorProduct = require("../models/VendorProduct");
 
 const campaignErrorResponse = (error) => ({
   message: error.message,
   ...(error.code ? { code: error.code } : {}),
+  ...(error.details && typeof error.details === "object" ? error.details : {}),
 });
+const isCarouselConflict = (error) => ["carousel_conflict", "carousel_not_ready", "carousel_publish_uncertain"].includes(error?.code);
 
 const listMarketingCampaignRuns = async (req, res) => {
   try {
@@ -196,10 +206,29 @@ const retryFailedMarketingBatchItems = async (req, res) => {
 
 const reviewMarketingCampaignRun = async (req, res) => {
   try {
-    const updated = await reviewCampaignRun(req.params.id, req.body.action, req.body.notes || "");
+    const updated = await reviewCampaignRun(req.params.id, req.body.action, req.body.notes || "", {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
     res.json({ message: req.body.action === "reject" ? "Campaign review rejected" : "Campaign review approved", run: updated });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(400).json(campaignErrorResponse(error));
+  }
+};
+
+const bulkReviewMarketingCampaignsController = async (req, res) => {
+  try {
+    const result = await reviewCampaignRuns(req.body?.run_ids, {
+      notes: req.body?.notes || "",
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.json({
+      message: result.failed
+        ? `${result.approved} campaign(s) approved; ${result.failed} remain blocked`
+        : `${result.approved} campaign(s) approved for publishing`,
+      ...result,
+    });
+  } catch (error) {
+    res.status(400).json(campaignErrorResponse(error));
   }
 };
 
@@ -210,7 +239,7 @@ const retryMarketingCampaign = async (req, res) => {
     });
     res.json({ message: "Campaign task re-queued", run: updated });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(error.code === "instagram_publish_outcome_uncertain" ? 409 : 400).json(campaignErrorResponse(error));
   }
 };
 
@@ -246,7 +275,7 @@ const regenerateMarketingCampaign = async (req, res) => {
     });
     res.json({ message: "Campaign draft regeneration started", ...updated });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(error.code === "instagram_publish_outcome_uncertain" ? 409 : 400).json(campaignErrorResponse(error));
   }
 };
 
@@ -255,7 +284,7 @@ const updateMarketingCampaignDraftController = async (req, res) => {
     const updated = await updateCampaignDraft(req.params.id, req.body || {});
     res.json({ message: "Campaign draft updated", ...updated });
   } catch (error) {
-    res.status(400).json(campaignErrorResponse(error));
+    res.status(error.code === "instagram_publish_outcome_uncertain" ? 409 : 400).json(campaignErrorResponse(error));
   }
 };
 
@@ -266,15 +295,109 @@ const publishMarketingCampaignController = async (req, res) => {
     });
     res.status(202).json({ message: "Instagram publish queued", queued: true, ...updated });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(error.code === "instagram_publish_outcome_uncertain" ? 409 : 400).json(campaignErrorResponse(error));
   }
 };
 
-const publishMarketingCarouselController = async (_req, res) => {
-  res.status(410).json({
-    code: "carousel_creation_disabled",
-    message: "New carousel publishing is disabled. Generate and review one product post at a time.",
-  });
+const previewMarketingCarouselController = async (req, res) => {
+  try {
+    const preview = await buildAffiliateCarouselPreview(req.body?.run_ids, {
+      captionBody: req.body?.caption_body,
+      hashtags: req.body?.hashtags,
+    });
+    res.json(preview);
+  } catch (error) {
+    res.status(400).json(campaignErrorResponse(error));
+  }
+};
+
+const publishMarketingCarouselController = async (req, res) => {
+  try {
+    const result = await queueAffiliateCarousel({
+      runIds: req.body?.run_ids,
+      captionBody: req.body?.caption_body,
+      hashtags: req.body?.hashtags,
+      scheduledFor: req.body?.scheduled_for || null,
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.status(202).json({
+      message: result.status === "scheduled" ? "Instagram carousel scheduled" : "Instagram carousel publish queued",
+      queued: true,
+      ...result,
+    });
+  } catch (error) {
+    const status = isCarouselConflict(error) ? 409 : 400;
+    res.status(status).json(campaignErrorResponse(error));
+  }
+};
+
+const getMarketingCarouselController = async (req, res) => {
+  try {
+    res.json(await getAffiliateCarouselTask(req.params.taskId));
+  } catch (error) {
+    res.status(error.code === "carousel_not_found" ? 404 : 400).json(campaignErrorResponse(error));
+  }
+};
+
+const rescheduleMarketingCarouselController = async (req, res) => {
+  try {
+    const result = await rescheduleAffiliateCarousel(req.params.taskId, req.body?.scheduled_for, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.json({ message: "Instagram carousel rescheduled", ...result });
+  } catch (error) {
+    res.status(isCarouselConflict(error) ? 409 : 400).json(campaignErrorResponse(error));
+  }
+};
+
+const cancelMarketingCarouselController = async (req, res) => {
+  try {
+    const result = await cancelAffiliateCarousel(req.params.taskId, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.json({ message: "Instagram carousel cancelled", ...result });
+  } catch (error) {
+    res.status(isCarouselConflict(error) ? 409 : error.code === "carousel_not_found" ? 404 : 400).json(campaignErrorResponse(error));
+  }
+};
+
+const retryMarketingCarouselController = async (req, res) => {
+  try {
+    const result = await retryAffiliateCarousel(req.params.taskId, {
+      actorAdminId: req.user?._id || req.user?.id || null,
+    });
+    res.status(202).json({ message: "Instagram carousel retry queued", queued: true, ...result });
+  } catch (error) {
+    res.status(isCarouselConflict(error) ? 409 : error.code === "carousel_not_found" ? 404 : 400).json(campaignErrorResponse(error));
+  }
+};
+
+const redirectMarketingCampaignLinkController = async (req, res) => {
+  const frontendBase = String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || "https://www.pinkpaisa.in").replace(/\/+$/, "");
+  const fallbackUrl = `${frontendBase}/products`;
+  try {
+    const campaignId = String(req.params.campaignId || "").trim().slice(0, 80);
+    if (!campaignId) return res.redirect(302, fallbackUrl);
+    const run = await MarketingCampaignRun.findOne({ campaign_id: campaignId }).lean();
+    if (!run?.public_product_id) return res.redirect(302, fallbackUrl);
+    const product = await Product.findOne({
+      _id: run.public_product_id,
+      is_affiliate: true,
+      status: "active",
+      is_visible: true,
+      archived_at: null,
+    }).select("slug").lean();
+    if (!product?.slug) return res.redirect(302, fallbackUrl);
+
+    const destination = new URL(`/product/${encodeURIComponent(product.slug)}`, `${frontendBase}/`);
+    destination.searchParams.set("utm_source", "instagram");
+    destination.searchParams.set("utm_medium", "organic_social");
+    destination.searchParams.set("utm_campaign", run.campaign_id);
+    destination.searchParams.set("utm_content", run.carousel_position ? `carousel_slide_${run.carousel_position}` : "carousel");
+    return res.redirect(302, destination.toString());
+  } catch {
+    return res.redirect(302, fallbackUrl);
+  }
 };
 
 const scheduleMarketingCampaignController = async (req, res) => {
@@ -284,7 +407,7 @@ const scheduleMarketingCampaignController = async (req, res) => {
     });
     res.json({ message: "Campaign scheduled for Instagram publishing", run });
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(error.code === "instagram_publish_outcome_uncertain" ? 409 : 400).json(campaignErrorResponse(error));
   }
 };
 
@@ -366,25 +489,32 @@ const createMarketingCampaignFromProductSource = async (req, res) => {
 module.exports = {
   archiveMarketingCampaignController,
   bulkArchiveMarketingCampaignsController,
+  bulkReviewMarketingCampaignsController,
+  cancelMarketingCarouselController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
   getMarketingBatchDetail,
+  getMarketingCarouselController,
   getMarketingCampaignCalendar,
   listMarketingCampaignCatalogProducts,
   getLatestMarketingBatch,
   getMarketingQueueHealthController,
   getMarketingCampaignRun,
   listMarketingCampaignRuns,
+  previewMarketingCarouselController,
   publishMarketingCarouselController,
   publishMarketingCampaignController,
+  redirectMarketingCampaignLinkController,
   purgeMarketingCampaignController,
   recoverStaleMarketingTasksController,
   regenerateMarketingCampaign,
   resetStuckMarketingCampaignController,
+  rescheduleMarketingCarouselController,
   reviewMarketingCampaignRun,
   restoreMarketingCampaignController,
   retryFailedMarketingBatchItems,
   retryMarketingCampaign,
+  retryMarketingCarouselController,
   runDailyMarketingBatchController,
   scanMarketingCampaignReadiness,
   scheduleMarketingCampaignController,

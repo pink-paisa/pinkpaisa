@@ -207,7 +207,7 @@ Never use:
 - "Get Yours"
 - Any wording suggesting that Pink Paisa directly sells the product
 
-Do not include an affiliate disclosure inside the image. The disclosure will be included separately in the Instagram caption.
+Do not include an affiliate notice inside the image. The notice will be included separately in the Instagram caption.
 
 STRICT CONTENT RESTRICTIONS
 
@@ -243,7 +243,7 @@ Do not display or invent:
 - Performance statistics
 - Additional slogans
 - Extra marketing copy
-- Affiliate disclosure
+- Affiliate notice
 - Watermarks
 
 Do not show duplicated products unless multiple units are present in the approved source and intentionally required.

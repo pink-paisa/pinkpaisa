@@ -9,7 +9,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 import { EmptyState, LoadingSpinner, StatusBadge } from "./AdminShared";
-import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Copy, Eye, ExternalLink, Link as LinkIcon, Maximize2, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Copy, Eye, ExternalLink, GalleryHorizontalEnd, Link as LinkIcon, Maximize2, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import InstagramConnectionPanel from "./InstagramConnectionPanel";
 import CampaignAutomationPanel, {
@@ -20,6 +20,9 @@ import CampaignAutomationPanel, {
 import CampaignCreativePreview from "./CampaignCreativePreview";
 import CampaignPostLightbox, { type CampaignPostPreview } from "./CampaignPostLightbox";
 import CampaignPublishActions from "./CampaignPublishActions";
+import CampaignBulkReviewDialog, { type BulkReviewCampaign } from "./CampaignBulkReviewDialog";
+import CampaignCarouselComposer, { type CarouselTaskResponse } from "./CampaignCarouselComposer";
+import CampaignCarouselStatusPanel from "./CampaignCarouselStatusPanel";
 import CampaignQueueHealth, { type CampaignQueueHealthData } from "./CampaignQueueHealth";
 import CampaignTimeline, { type CampaignPublishEvent, type CampaignTask } from "./CampaignTimeline";
 import { useCampaignPolling } from "@/hooks/useCampaignPolling";
@@ -64,6 +67,9 @@ type CampaignRun = {
   published_at?: string | null;
   instagram_media_id?: string | null;
   instagram_permalink?: string | null;
+  carousel_task_id?: string | null;
+  carousel_position?: number | null;
+  carousel_size?: number | null;
   archived_at?: string | null;
   archive_reason?: string | null;
   next_action?: string | null;
@@ -102,6 +108,15 @@ type CampaignRun = {
     generated_at?: string | null;
   } | null;
   compliance_json?: { status?: string } | null;
+  caption_json?: {
+    instagram?: {
+      caption?: string;
+      short_caption?: string;
+      long_caption?: string;
+      hashtags?: string[];
+      cta?: string;
+    };
+  } | null;
   tracking_json?: {
     links?: { instagram_feed?: string };
     publish_payload?: { tracked_url?: string; asset_urls?: string[]; caption?: string };
@@ -189,6 +204,7 @@ const normalizeCampaignSettingsResponse = (response: CampaignSettingsResponse): 
 
 type CampaignListResponse = {
   items: CampaignRun[];
+  features?: { affiliate_carousel?: boolean };
   counts: {
     queued: number;
     batch_running: number;
@@ -291,6 +307,11 @@ const canSelectCampaignRun = (run: CampaignRun) => (
 
 const getReadinessBlockers = (run: CampaignRun | null | undefined) => run?.publish_readiness?.blockers || [];
 
+const getReviewApprovalBlockers = (run: CampaignRun) => getReadinessBlockers(run).filter((blocker) => ![
+  "review_not_approved",
+  "non_https_media_url",
+].includes(blocker.code));
+
 const getProductImageUrl = (run: CampaignRun) => {
   const images = Array.isArray(run.brief_json?.images) ? run.brief_json?.images : [];
   const fallbackImages = Array.isArray(run.product_gallery_urls) ? run.product_gallery_urls : [];
@@ -310,6 +331,14 @@ const getCampaignTrackedUrl = (run: CampaignRun) => (
   run.tracking_json?.links?.instagram_feed
   || run.tracking_json?.publish_payload?.tracked_url
   || null
+);
+
+const getCampaignCaption = (run: CampaignRun) => (
+  run.tracking_json?.publish_payload?.caption
+  || run.caption_json?.instagram?.caption
+  || run.caption_json?.instagram?.long_caption
+  || run.caption_json?.instagram?.short_caption
+  || ""
 );
 
 const getCatalogSourceLabel = (product: CatalogProduct) => {
@@ -337,9 +366,7 @@ const truncateText = (value: string | null | undefined, maxLength = 140) => {
 };
 
 const hasAffiliateDisclosureText = (value: string | null | undefined) => (
-  /affiliate disclosure/i.test(value || "")
-  || /amazon associate/i.test(value || "")
-  || /#commissions?earned/i.test(value || "")
+  /(?:^|\s)#ad\b/i.test(value || "")
 );
 
 const getHashtagCount = (value: string | null | undefined) => {
@@ -430,6 +457,11 @@ const AdminCampaigns = () => {
   const [batchDetailLoading, setBatchDetailLoading] = useState(false);
   const [lifecycleAction, setLifecycleAction] = useState<"archive" | "restore" | "purge" | null>(null);
   const [bulkArchiveOpen, setBulkArchiveOpen] = useState(false);
+  const [bulkReviewOpen, setBulkReviewOpen] = useState(false);
+  const [carouselComposerOpen, setCarouselComposerOpen] = useState(false);
+  const [carouselTask, setCarouselTask] = useState<CarouselTaskResponse | null>(null);
+  const [carouselTaskLoading, setCarouselTaskLoading] = useState(false);
+  const [carouselCancelOpen, setCarouselCancelOpen] = useState(false);
   const [postPreview, setPostPreview] = useState<CampaignPostPreview | null>(null);
   const previousDetailState = useRef<string | null>(null);
   const previousListStates = useRef<Map<string, string>>(new Map());
@@ -565,6 +597,20 @@ const AdminCampaigns = () => {
     }
   };
 
+  const loadCarouselTask = async (taskId: string, { silent = false }: { silent?: boolean } = {}) => {
+    try {
+      if (!silent) setCarouselTaskLoading(true);
+      const response = await apiFetch<CarouselTaskResponse>(`/marketing-campaigns/admin/carousels/${taskId}`);
+      setCarouselTask(response);
+      return response;
+    } catch (error) {
+      if (!silent) toast.error(error instanceof Error ? error.message : "Could not load carousel status");
+      return null;
+    } finally {
+      if (!silent) setCarouselTaskLoading(false);
+    }
+  };
+
   const loadDetail = async (id: string, { silent = false, open = true }: { silent?: boolean; open?: boolean } = {}) => {
     try {
       if (!silent) setDetailLoading(true);
@@ -572,6 +618,11 @@ const AdminCampaigns = () => {
       if (open) setDetailOpen(true);
       const response = await apiFetch<CampaignDetailResponse>(`/marketing-campaigns/admin/${id}`);
       setDetail(response);
+      if (response.run.carousel_task_id) {
+        await loadCarouselTask(response.run.carousel_task_id, { silent });
+      } else {
+        setCarouselTask(null);
+      }
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : "Could not load campaign detail");
       if (open) setDetailOpen(false);
@@ -627,7 +678,12 @@ const AdminCampaigns = () => {
   }, [detail]);
 
   useEffect(() => {
-    setSelectedRunIds((current) => current.filter((id) => data.items.some((run) => run.id === id && canSelectCampaignRun(run))));
+    setSelectedRunIds((current) => {
+      const next = current.filter((id) => data.items.some((run) => run.id === id && canSelectCampaignRun(run)));
+      return next.length === current.length && next.every((id, index) => id === current[index])
+        ? current
+        : next;
+    });
   }, [data.items]);
 
   useEffect(() => {
@@ -639,7 +695,10 @@ const AdminCampaigns = () => {
     detailOpen
     && selectedId
     && detail?.run
-    && ["queued", "running", "batch_running", "publishing", "scheduled"].includes(detail.run.status)
+    && (
+      ["queued", "running", "batch_running", "publishing", "scheduled"].includes(detail.run.status)
+      || ["queued", "scheduled", "running"].includes(carouselTask?.status || "")
+    )
   );
 
   useCampaignPolling({
@@ -685,6 +744,55 @@ const AdminCampaigns = () => {
   const selectedPublishedCount = selectedVisibleRuns.filter((run) => (
     run.publish_status === "published" || run.status === "published" || Boolean(run.instagram_media_id)
   )).length;
+  const bulkReviewSelectionReady = selectedRunIds.length > 0
+    && selectedRunIds.length <= 25
+    && selectedVisibleRuns.length === selectedRunIds.length
+    && selectedVisibleRuns.every((run) => (
+      run.status === "waiting_review"
+      && Boolean(run.review_stage)
+      && !run.archived_at
+      && !run.carousel_task_id
+    ));
+  const bulkReviewSelectionHint = selectedRunIds.length > 25
+    ? "Approve no more than 25 campaigns at once."
+    : selectedVisibleRuns.some((run) => run.status !== "waiting_review" || !run.review_stage)
+      ? "Every selected campaign must be waiting for review."
+      : selectedVisibleRuns.some((run) => Boolean(run.carousel_task_id))
+        ? "A campaign already assigned to a carousel cannot be reviewed here."
+        : "Select one or more campaigns waiting for review.";
+  const bulkReviewCampaigns = useMemo<BulkReviewCampaign[]>(() => selectedVisibleRuns.map((run) => ({
+    id: run.id,
+    title: run.product_title || run.campaign_id,
+    sourceLabel: getCampaignSourceLabel(run),
+    creativeUrl: getCreativeImageUrl(run),
+    caption: getCampaignCaption(run),
+    blockers: getReviewApprovalBlockers(run),
+    warnings: run.publish_readiness?.warnings || [],
+  })), [selectedVisibleRuns]);
+  const carouselSelectionReady = selectedRunIds.length >= 2
+    && data.features?.affiliate_carousel !== false
+    && selectedRunIds.length <= 10
+    && selectedVisibleRuns.length === selectedRunIds.length
+    && selectedVisibleRuns.every((run) => (
+      (run.is_affiliate || run.source_event === "affiliate_product.published")
+      && run.review_status === "approved"
+      && !run.archived_at
+      && !run.carousel_task_id
+      && !run.instagram_media_id
+      && run.publish_status !== "published"
+      && run.publish_status !== "publishing"
+    ));
+  const carouselSelectionHint = data.features?.affiliate_carousel === false
+    ? "Affiliate carousel publishing is disabled by the server feature flag."
+    : selectedRunIds.length < 2 || selectedRunIds.length > 10
+    ? "Select between 2 and 10 campaigns."
+    : selectedVisibleRuns.some((run) => !(run.is_affiliate || run.source_event === "affiliate_product.published"))
+      ? "Carousels currently support affiliate campaigns only."
+      : selectedVisibleRuns.some((run) => run.review_status !== "approved")
+        ? "Every campaign must be approved first."
+        : selectedVisibleRuns.some((run) => Boolean(run.carousel_task_id))
+          ? "One or more campaigns already belong to a carousel."
+          : "Selected campaigns are not ready for a carousel.";
   const allSelectableVisibleSelected = selectableVisibleRuns.length > 0 && selectableVisibleRuns.every((run) => selectedRunIds.includes(run.id));
   const filteredCatalogProducts = useMemo(() => {
     return catalogProducts;
@@ -912,6 +1020,36 @@ const AdminCampaigns = () => {
     }
   };
 
+  const approveSelectedCampaigns = async (notes: string) => {
+    if (!bulkReviewSelectionReady) return;
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{
+        message?: string;
+        approved: number;
+        failed: number;
+        results: Array<{ id: string; ok: boolean; message?: string }>;
+      }>("/marketing-campaigns/admin/bulk-review", {
+        method: "POST",
+        body: JSON.stringify({ run_ids: selectedRunIds, notes }),
+      });
+      const failedResults = response.results.filter((result) => !result.ok);
+      const failedIds = new Set(failedResults.map((result) => result.id));
+      setSelectedRunIds((current) => current.filter((id) => failedIds.has(id)));
+      setBulkReviewOpen(false);
+      if (response.approved) toast.success(`${response.approved} campaign${response.approved === 1 ? "" : "s"} approved for publishing`);
+      if (response.failed) toast.error(`${response.failed} campaign${response.failed === 1 ? " remains" : "s remain"} blocked. ${failedResults[0]?.message || "Review the campaign blockers."}`);
+      await Promise.all([
+        loadCampaigns({ silent: true }),
+        selectedId ? loadDetail(selectedId, { silent: true, open: false }) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not approve selected campaigns");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const retryFailedBatchItems = async () => {
     if (!data.latest_batch?.id) {
       toast.info("No batch available to retry");
@@ -966,6 +1104,83 @@ const AdminCampaigns = () => {
       await refreshAll();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not publish to Instagram");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleCarouselQueued = async (task: CarouselTaskResponse) => {
+    setCarouselTask(task);
+    setSelectedRunIds([]);
+    toast.success(task.status === "scheduled" ? "Instagram carousel scheduled" : "Instagram carousel publish queued");
+    await Promise.all([loadCampaigns({ silent: true }), loadCalendar()]);
+  };
+
+  const refreshCarouselTask = async () => {
+    if (!carouselTask?.carousel_task_id) return;
+    await loadCarouselTask(carouselTask.carousel_task_id);
+  };
+
+  const rescheduleCarouselTask = async (scheduledFor: string) => {
+    if (!carouselTask?.carousel_task_id) return;
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<CarouselTaskResponse>(`/marketing-campaigns/admin/carousels/${carouselTask.carousel_task_id}/schedule`, {
+        method: "PATCH",
+        body: JSON.stringify({ scheduled_for: scheduledFor }),
+      });
+      setCarouselTask(response);
+      toast.success("Instagram carousel rescheduled");
+      await Promise.all([
+        loadCampaigns({ silent: true }),
+        loadCalendar(),
+        selectedId ? loadDetail(selectedId, { silent: true, open: false }) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not reschedule carousel");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const cancelCarouselTask = async () => {
+    if (!carouselTask?.carousel_task_id) return;
+    try {
+      setActionLoading(true);
+      await apiFetch<CarouselTaskResponse>(`/marketing-campaigns/admin/carousels/${carouselTask.carousel_task_id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setCarouselCancelOpen(false);
+      toast.success("Carousel cancelled; member campaigns are ready to publish again");
+      await Promise.all([
+        loadCampaigns({ silent: true }),
+        loadCalendar(),
+        selectedId ? loadDetail(selectedId, { silent: true, open: false }) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not cancel carousel");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const retryCarouselTask = async () => {
+    if (!carouselTask?.carousel_task_id) return;
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<CarouselTaskResponse>(`/marketing-campaigns/admin/carousels/${carouselTask.carousel_task_id}/retry`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setCarouselTask(response);
+      toast.success("Instagram carousel retry queued");
+      await Promise.all([
+        loadCampaigns({ silent: true }),
+        selectedId ? loadDetail(selectedId, { silent: true, open: false }) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not retry carousel");
     } finally {
       setActionLoading(false);
     }
@@ -1184,14 +1399,20 @@ const AdminCampaigns = () => {
     || detail?.run.instagram_media_id
   );
   const detailIsAffiliate = Boolean(detail?.run.is_affiliate || detail?.run.source_event === "affiliate_product.published");
+  const carouselTrackedItems = carouselTask?.carousel?.items || [];
+  const detailTrackedLinksReady = detail?.run.carousel_task_id
+    ? carouselTrackedItems.length >= 2 && carouselTrackedItems.every((item) => Boolean(item.tracked_url))
+    : Boolean(trackedUrl);
 
   const copyTrackedUrl = async () => {
-    if (!trackedUrl) {
+    const carouselLinks = carouselTask?.carousel?.items?.map((item) => item.tracked_url).filter(Boolean) || [];
+    const value = detail?.run.carousel_task_id && carouselLinks.length ? carouselLinks.join("\n") : trackedUrl;
+    if (!value) {
       toast.error("No tracked link available yet");
       return;
     }
-    await navigator.clipboard.writeText(trackedUrl);
-    toast.success("Tracked link copied");
+    await navigator.clipboard.writeText(value);
+    toast.success(detail?.run.carousel_task_id && carouselLinks.length > 1 ? "Carousel links copied" : "Tracked link copied");
   };
 
   const runLifecycleAction = async () => {
@@ -1261,10 +1482,13 @@ const AdminCampaigns = () => {
 
   const finalCaptionPreview = useMemo(() => {
     if (!detail) return "";
+    if (detail.run.carousel_task_id && carouselTask?.carousel?.final_caption) {
+      return carouselTask.carousel.final_caption;
+    }
     const hashtags = draftHashtags.split(",").map((item) => item.trim()).filter(Boolean).join(" ");
     return detail.run.tracking_json?.publish_payload?.caption
       || [draftCaption, trackedUrl, hashtags].filter(Boolean).join("\n\n");
-  }, [detail, draftCaption, draftHashtags, trackedUrl]);
+  }, [carouselTask?.carousel?.final_caption, detail, draftCaption, draftHashtags, trackedUrl]);
 
   const copyCaption = async () => {
     if (!finalCaptionPreview.trim()) {
@@ -1462,6 +1686,23 @@ const AdminCampaigns = () => {
               <Button variant="outline" className="rounded-xl" onClick={() => setSelectedRunIds([])} disabled={!selectedRunIds.length || actionLoading}>
                 Clear
               </Button>
+              <Button
+                className="rounded-xl"
+                onClick={() => setBulkReviewOpen(true)}
+                disabled={actionLoading || !bulkReviewSelectionReady}
+                title={bulkReviewSelectionReady ? "Review and approve selected campaign drafts" : bulkReviewSelectionHint}
+              >
+                <CheckCircle2 className="mr-2 h-4 w-4" /> Approve selected
+              </Button>
+              <Button
+                variant="outline"
+                className="rounded-xl"
+                onClick={() => setCarouselComposerOpen(true)}
+                disabled={actionLoading || !carouselSelectionReady}
+                title={carouselSelectionReady ? "Compose one Instagram carousel" : carouselSelectionHint}
+              >
+                <GalleryHorizontalEnd className="mr-2 h-4 w-4" /> Create carousel
+              </Button>
               <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length}>
                 Scan readiness
               </Button>
@@ -1567,7 +1808,10 @@ const AdminCampaigns = () => {
                       className="w-full rounded-xl bg-card px-3 py-2 text-left text-xs transition-colors hover:bg-accent"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate font-medium">{entry.run.product_title || entry.run.campaign_id}</span>
+                        <span className="min-w-0 truncate font-medium">
+                          {entry.run.product_title || entry.run.campaign_id}
+                          {entry.run.carousel_size && entry.run.carousel_size > 1 ? ` + ${entry.run.carousel_size - 1} carousel slide${entry.run.carousel_size === 2 ? "" : "s"}` : ""}
+                        </span>
                         <StatusBadge status={entry.run.status} />
                       </div>
                       {entry.warnings.length ? <p className="mt-1 text-amber-700">{entry.warnings[0].message}</p> : null}
@@ -1637,6 +1881,9 @@ const AdminCampaigns = () => {
                           <span className={`rounded-full px-2 py-0.5 font-medium ${getCampaignSourceLabel(run) === "Affiliate" ? "bg-amber-100 text-amber-800" : "bg-muted text-muted-foreground"}`}>
                             {getCampaignSourceLabel(run)}
                           </span>
+                          {run.carousel_task_id && run.carousel_position && run.carousel_size ? (
+                            <span className="rounded-full bg-pink-100 px-2 py-0.5 font-medium text-pink-800">Carousel {run.carousel_position}/{run.carousel_size}</span>
+                          ) : null}
                           <span>{run.vendor_shop_name || (run.source_event === "admin_product.published" ? "Pink Paisa" : EMPTY_PLACEHOLDER)}</span>
                         </div>
                         <p className="mt-1 text-xs text-muted-foreground">
@@ -1699,6 +1946,7 @@ const AdminCampaigns = () => {
                   <td className="px-4 py-4">
                     <div className="min-w-[9rem] space-y-2">
                       {run.publish_status ? <StatusBadge status={run.publish_status} /> : EMPTY_PLACEHOLDER}
+                      {run.carousel_task_id && run.carousel_position && run.carousel_size ? <p className="text-xs font-medium text-pink-700">Carousel {run.carousel_position}/{run.carousel_size}</p> : null}
                       {run.instagram_media_id ? <p className="text-xs text-muted-foreground">Media ID saved</p> : null}
                       {getReadinessBlockers(run).length ? (
                         <p className="text-xs text-rose-600">{truncateText(getReadinessBlockers(run)[0].message, 110)}</p>
@@ -2000,7 +2248,12 @@ const AdminCampaigns = () => {
                       ) : null}
                     </>
                   ) : (
-                    <Button variant={detailIsPublished ? "destructive" : "outline"} className="rounded-xl" onClick={() => setLifecycleAction("archive")} disabled={actionLoading || detail.run.publish_status === "publishing"}>
+                    <Button
+                      variant={detailIsPublished ? "destructive" : "outline"}
+                      className="rounded-xl"
+                      onClick={() => setLifecycleAction("archive")}
+                      disabled={actionLoading || (detail.run.publish_status === "publishing" && carouselTask?.task_status !== "queued")}
+                    >
                       {detailIsPublished ? <Trash2 className="mr-2 h-4 w-4" /> : <Archive className="mr-2 h-4 w-4" />}
                       {detailIsPublished ? "Remove from Pink Paisa" : "Archive"}
                     </Button>
@@ -2097,7 +2350,7 @@ const AdminCampaigns = () => {
                         ok: (detail.run.tracking_json?.publish_payload?.asset_urls || detail.run.asset_urls || []).some(isPublicHttpsUrl),
                       },
                       {
-                        label: "Caption includes affiliate disclosure when needed",
+                        label: "Caption includes affiliate notice when needed",
                         ok: !(detail.run.is_affiliate || detail.run.source_event === "affiliate_product.published") || hasAffiliateDisclosureText(finalCaptionPreview),
                       },
                       {
@@ -2144,7 +2397,7 @@ const AdminCampaigns = () => {
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Caption preview</p>
-                      <h3 className="mt-1 font-serif text-xl">Final Instagram caption</h3>
+                      <h3 className="mt-1 font-serif text-xl">{detail.run.carousel_task_id ? "Frozen carousel caption" : "Final Instagram caption"}</h3>
                     </div>
                     <div className="flex gap-2">
                       <Button variant="outline" className="rounded-2xl" onClick={copyCaption}>
@@ -2172,8 +2425,8 @@ const AdminCampaigns = () => {
                     </div>
                     <div className="rounded-xl bg-background/60 px-3 py-2">
                       <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground">Tracked link</p>
-                      <p className={`mt-1 font-semibold ${trackedUrl ? "text-emerald-700" : "text-rose-700"}`}>
-                        {trackedUrl ? "Present" : "Missing"}
+                      <p className={`mt-1 font-semibold ${detailTrackedLinksReady ? "text-emerald-700" : "text-rose-700"}`}>
+                        {detailTrackedLinksReady ? "Present" : "Missing"}
                       </p>
                     </div>
                   </div>
@@ -2204,7 +2457,9 @@ const AdminCampaigns = () => {
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Caption editor</p>
-                        <p className="mt-1 text-sm text-muted-foreground">Edit the one final caption package before approval.</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          {detail.run.carousel_task_id ? "This campaign caption is frozen inside its active carousel." : "Edit the one final caption package before approval."}
+                        </p>
                       </div>
                       <Button variant="outline" className="rounded-2xl" onClick={copyTrackedUrl}>
                         <Copy className="mr-2 h-4 w-4" /> Copy tracked link
@@ -2214,19 +2469,19 @@ const AdminCampaigns = () => {
                       <div className="grid gap-4 lg:grid-cols-[220px,minmax(0,1fr)]">
                         <div>
                           <label className="mb-2 block text-sm font-medium">CTA text</label>
-                          <Input value={draftCta} onChange={(e) => setDraftCta(e.target.value)} placeholder="Buy Now" />
+                          <Input value={draftCta} onChange={(e) => setDraftCta(e.target.value)} placeholder="Buy Now" disabled={Boolean(detail.run.carousel_task_id)} />
                         </div>
                         <div>
                           <label className="mb-2 block text-sm font-medium">Hashtags</label>
-                          <Input value={draftHashtags} onChange={(e) => setDraftHashtags(e.target.value)} placeholder="#PinkPaisa, #WomenWhoWellness" />
+                          <Input value={draftHashtags} onChange={(e) => setDraftHashtags(e.target.value)} placeholder="#PinkPaisa, #WomenWhoWellness" disabled={Boolean(detail.run.carousel_task_id)} />
                         </div>
                       </div>
                       <div>
                         <label className="mb-2 block text-sm font-medium">Instagram caption</label>
-                        <Textarea value={draftCaption} onChange={(e) => setDraftCaption(e.target.value)} rows={7} />
+                        <Textarea value={draftCaption} onChange={(e) => setDraftCaption(e.target.value)} rows={7} disabled={Boolean(detail.run.carousel_task_id)} />
                       </div>
                       <div className="flex justify-end">
-                        <Button className="rounded-2xl lg:min-w-[160px]" onClick={saveDraft} disabled={actionLoading}>
+                        <Button className="rounded-2xl lg:min-w-[160px]" onClick={saveDraft} disabled={actionLoading || Boolean(detail.run.carousel_task_id)}>
                           Save caption
                         </Button>
                       </div>
@@ -2260,19 +2515,33 @@ const AdminCampaigns = () => {
 
                 <div className="min-w-0">
                   <div className="space-y-4 xl:sticky xl:top-6">
-                  <CampaignPublishActions
-                    run={detail.run}
-                    lastError={detail.run.last_error || null}
-                    actionLoading={actionLoading}
-                    onRetry={retryRun}
-                    onResetStuckTask={resetStuckTask}
-                    onRegenerate={regenerateRun}
-                    onApproveReview={() => openReviewDialog("approve")}
-                    onPostNow={publishNow}
-                    canResetStuck={selectedRunHasRunningTask}
-                    instagramConnected={connection?.is_connected === true}
-                    instagramConnectionWarning={connection?.last_error || null}
-                  />
+                  {detail.run.carousel_task_id ? (
+                    <CampaignCarouselStatusPanel
+                      task={carouselTask}
+                      currentRunId={detail.run.id}
+                      loading={carouselTaskLoading}
+                      actionLoading={actionLoading}
+                      onRefresh={refreshCarouselTask}
+                      onReschedule={rescheduleCarouselTask}
+                      onCancel={() => setCarouselCancelOpen(true)}
+                      onRetry={retryCarouselTask}
+                      onPreview={setPostPreview}
+                    />
+                  ) : (
+                    <CampaignPublishActions
+                      run={detail.run}
+                      lastError={detail.run.last_error || null}
+                      actionLoading={actionLoading}
+                      onRetry={retryRun}
+                      onResetStuckTask={resetStuckTask}
+                      onRegenerate={regenerateRun}
+                      onApproveReview={() => openReviewDialog("approve")}
+                      onPostNow={publishNow}
+                      canResetStuck={selectedRunHasRunningTask}
+                      instagramConnected={connection?.is_connected === true}
+                      instagramConnectionWarning={connection?.last_error || null}
+                    />
+                  )}
 
                   <div className="rounded-[28px] border border-border bg-background p-4 shadow-sm">
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -2323,6 +2592,26 @@ const AdminCampaigns = () => {
           </div>
         </DialogContent>
       </Dialog>
+      <CampaignBulkReviewDialog
+        open={bulkReviewOpen}
+        modal={!postPreview}
+        campaigns={bulkReviewCampaigns}
+        pending={actionLoading}
+        onOpenChange={setBulkReviewOpen}
+        onApprove={approveSelectedCampaigns}
+        onPreview={(campaignId) => {
+          const run = selectedVisibleRuns.find((item) => item.id === campaignId);
+          if (run) openPostPreview(run);
+        }}
+      />
+      <CampaignCarouselComposer
+        open={carouselComposerOpen}
+        runIds={selectedRunIds}
+        modal={!postPreview}
+        onOpenChange={setCarouselComposerOpen}
+        onQueued={handleCarouselQueued}
+        onPreview={setPostPreview}
+      />
       {postPreview ? (
         <CampaignPostLightbox
           open
@@ -2330,6 +2619,16 @@ const AdminCampaigns = () => {
           {...postPreview}
         />
       ) : null}
+      <ConfirmActionDialog
+        open={carouselCancelOpen}
+        onOpenChange={setCarouselCancelOpen}
+        title="Cancel carousel"
+        description="Cancel this queued Instagram carousel and return every member campaign to Ready to publish?"
+        confirmLabel="Cancel carousel"
+        destructive
+        pending={actionLoading}
+        onConfirm={cancelCarouselTask}
+      />
       <ConfirmActionDialog
         open={lifecycleAction !== null}
         onOpenChange={(open) => !open && setLifecycleAction(null)}
