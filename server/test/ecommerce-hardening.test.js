@@ -843,6 +843,13 @@ test("structured caption parsing enforces schema fields, hashtag limits, and aff
   }, { isAffiliate: true });
   assert.deepEqual(valid.hashtags, ["#PinkPaisa", "#PartnerPick"]);
 
+  const percentageAttributes = openAiCaptionPrivate.validateCaptionPackage({
+    caption: "A 100% vegan partner pick with 2% Alpha Arbutin positioning.",
+    hashtags: ["#VeganBeauty"],
+    cta: "View partner pick",
+  }, { isAffiliate: true });
+  assert.equal(percentageAttributes.caption.includes("100% vegan"), true);
+
   assert.throws(
     () => openAiCaptionPrivate.validateCaptionPackage({
       caption: "Partner pick",
@@ -856,6 +863,14 @@ test("structured caption parsing enforces schema fields, hashtag limits, and aff
       caption: "Available now with 20% discount and fast delivery.",
       hashtags: [],
       cta: "Buy from Pink Paisa",
+    }, { isAffiliate: true }),
+    /affiliate rule/,
+  );
+  assert.throws(
+    () => openAiCaptionPrivate.validateCaptionPackage({
+      caption: "Save 20% on this partner pick.",
+      hashtags: [],
+      cta: "View partner pick",
     }, { isAffiliate: true }),
     /affiliate rule/,
   );

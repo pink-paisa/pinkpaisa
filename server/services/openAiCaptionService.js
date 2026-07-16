@@ -6,7 +6,10 @@ const MAX_HASHTAG_LENGTH = 40;
 
 const AFFILIATE_PROHIBITED_PATTERNS = [
   { code: "affiliate_numeric_price", pattern: /(?:\u20b9|\$|\b(?:rs\.?|inr|usd)\s*)\d|\b(?:price(?:d)?|costs?|only|just)\s*(?:is|at|from)?\s*\d{2,}/i },
-  { code: "affiliate_discount_claim", pattern: /\b\d+(?:\.\d+)?\s*%|\b(?:discount|coupon|sale|deal price)\b/i },
+  {
+    code: "affiliate_discount_claim",
+    pattern: /\b(?:discount(?:ed|s)?|coupon|sale|deal\s+price)\b|\b(?:save|saving(?:s)?(?:\s+of)?|extra)\s+\d+(?:\.\d+)?\s*(?:%|\bpercent\b)|\b\d+(?:\.\d+)?\s*(?:%|\bpercent\b)\s*(?:off|discount|sale|saving(?:s)?|less)\b/i,
+  },
   { code: "affiliate_availability_claim", pattern: /\b(?:available|availability|in stock|out of stock|limited stock)\b/i },
   { code: "affiliate_delivery_claim", pattern: /\b(?:delivery|delivers?|shipping|ships?)\b/i },
   { code: "affiliate_purchase_cta", pattern: /\b(?:buy now|shop now|order now|purchase now|add to cart)\b/i },
