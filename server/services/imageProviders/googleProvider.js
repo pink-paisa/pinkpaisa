@@ -1,7 +1,7 @@
 const GEMINI_API_BASE = String(
   process.env.GEMINI_API_BASE_URL
   || process.env.GOOGLE_GEMINI_API_BASE_URL
-  || "https://generativelanguage.googleapis.com/v1"
+  || "https://generativelanguage.googleapis.com/v1beta"
 ).replace(/\/+$/, "");
 
 const DEFAULT_ASPECT_RATIO = trimText(process.env.GEMINI_IMAGE_ASPECT_RATIO || process.env.GOOGLE_IMAGE_ASPECT_RATIO || "4:5");

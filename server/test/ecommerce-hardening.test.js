@@ -752,7 +752,7 @@ test("Google stable image models use capability-safe Interactions API requests",
 
     assert.equal(calls.length, modelSizes.size);
     for (const call of calls) {
-      assert.match(call.url, /\/v1\/interactions$/);
+      assert.match(call.url, /\/v1beta\/interactions$/);
       const request = JSON.parse(call.options.body);
       assert.equal(modelSizes.has(request.model), true, request.model);
       assert.deepEqual(request.response_format, {
