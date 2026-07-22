@@ -63,7 +63,11 @@ const googleImageProviderPrivate = googleImageProvider._private;
 const openrouterImageProvider = require("../services/imageProviders/openrouterProvider");
 const openrouterImageProviderPrivate = openrouterImageProvider._private;
 const imageProviderService = require("../services/imageProviders");
-const { getDefaultModelId, getImageProviderRegistry } = require("../services/imageProviders/registry");
+const {
+  getDefaultModelId,
+  getImageProviderRegistry,
+  normaliseImageProviderSelection,
+} = require("../services/imageProviders/registry");
 const campaignAssetStoragePrivate = require("../services/campaignAssetStorage")._private;
 const { buildVariantPrompt, _private: instagramCreativePrivate } = require("../services/instagramAiCreativeService");
 const {
@@ -667,6 +671,107 @@ test("OpenAI image provider strips unsupported parameters for every selectable m
   }
 });
 
+test("Google image registry exposes stable models and maps retired selections", () => {
+  const googleProvider = getImageProviderRegistry().find((provider) => provider.key === "google");
+  assert.ok(googleProvider, "Google provider should be registered");
+  assert.deepEqual(googleProvider.models.map((model) => model.id), [
+    "gemini-3.1-flash-image",
+    "gemini-3.1-flash-lite-image",
+    "gemini-3-pro-image",
+  ]);
+
+  const originalGeminiModel = process.env.GEMINI_IMAGE_MODEL;
+  const originalGoogleModel = process.env.GOOGLE_IMAGE_MODEL;
+  delete process.env.GEMINI_IMAGE_MODEL;
+  delete process.env.GOOGLE_IMAGE_MODEL;
+  try {
+    assert.equal(getDefaultModelId("google"), "gemini-3.1-flash-image");
+  } finally {
+    if (originalGeminiModel == null) delete process.env.GEMINI_IMAGE_MODEL;
+    else process.env.GEMINI_IMAGE_MODEL = originalGeminiModel;
+    if (originalGoogleModel == null) delete process.env.GOOGLE_IMAGE_MODEL;
+    else process.env.GOOGLE_IMAGE_MODEL = originalGoogleModel;
+  }
+
+  assert.deepEqual(
+    normaliseImageProviderSelection("google", "gemini-3.1-flash-image-preview"),
+    { provider: "google", model: "gemini-3.1-flash-image" },
+  );
+  assert.deepEqual(
+    normaliseImageProviderSelection("google", "gemini-3-pro-image-preview"),
+    { provider: "google", model: "gemini-3-pro-image" },
+  );
+  assert.deepEqual(
+    normaliseImageProviderSelection("google", "gemini-2.5-flash-image"),
+    { provider: "google", model: "gemini-3.1-flash-image" },
+  );
+});
+
+test("Google stable image models use capability-safe Interactions API requests", async () => {
+  const source = await sharp({
+    create: { width: 12, height: 15, channels: 3, background: "#d84b7d" },
+  }).png().toBuffer();
+  const modelSizes = new Map([
+    ["gemini-3.1-flash-image", "4K"],
+    ["gemini-3.1-flash-lite-image", "1K"],
+    ["gemini-3-pro-image", "4K"],
+  ]);
+  const generated = Buffer.from("generated-google-image");
+  const originalFetch = global.fetch;
+  const originalApiKey = process.env.GEMINI_API_KEY;
+  const calls = [];
+  process.env.GEMINI_API_KEY = "test-google-key";
+  global.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    return {
+      ok: true,
+      async json() {
+        return {
+          status: "completed",
+          steps: [{
+            type: "model_output",
+            status: "done",
+            content: [{ type: "image", mime_type: "image/jpeg", data: generated.toString("base64") }],
+          }],
+        };
+      },
+    };
+  };
+
+  try {
+    for (const [model, expectedImageSize] of modelSizes) {
+      const output = await googleImageProvider.generateImage({
+        model,
+        prompt: "Preserve this exact product",
+        sourceImageBuffer: source,
+        size: "1080x1350",
+        quality: "high",
+      });
+      assert.equal(output.equals(generated), true, model);
+    }
+
+    assert.equal(calls.length, modelSizes.size);
+    for (const call of calls) {
+      assert.match(call.url, /\/v1\/interactions$/);
+      const request = JSON.parse(call.options.body);
+      assert.equal(modelSizes.has(request.model), true, request.model);
+      assert.deepEqual(request.response_format, {
+        type: "image",
+        aspect_ratio: "4:5",
+        image_size: modelSizes.get(request.model),
+      });
+      assert.equal(request.input[0].type, "image");
+      assert.equal(request.input[0].mime_type, "image/png");
+      assert.equal(Buffer.from(request.input[0].data, "base64").equals(source), true);
+      assert.deepEqual(request.input[1], { type: "text", text: "Preserve this exact product" });
+    }
+  } finally {
+    global.fetch = originalFetch;
+    if (originalApiKey == null) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalApiKey;
+  }
+});
+
 test("campaign reference images normalize JPEG, PNG, and WebP inputs", async () => {
   assert.equal(resolveProductReferenceImage({
     affiliate_campaign_asset_url: "campaign.jpg",
@@ -725,14 +830,15 @@ test("every image provider request includes the required product reference", asy
   assert.equal(openaiImage.size, source.length);
 
   const googleBody = googleImageProviderPrivate.buildRequestBody({
-    model: "gemini-2.5-flash-image",
+    model: "gemini-3.1-flash-image",
     prompt: "Preserve this exact product",
     sourceImageBuffer: source,
     size: "1080x1350",
     quality: "medium",
   });
-  assert.equal(googleBody.contents[0].parts[0].inlineData.mimeType, "image/png");
-  assert.equal(Buffer.from(googleBody.contents[0].parts[0].inlineData.data, "base64").equals(source), true);
+  assert.equal(googleBody.input[0].type, "image");
+  assert.equal(googleBody.input[0].mime_type, "image/png");
+  assert.equal(Buffer.from(googleBody.input[0].data, "base64").equals(source), true);
 
   const openrouterMessages = openrouterImageProviderPrivate.buildMessages({
     prompt: "Preserve this exact product",
@@ -742,7 +848,7 @@ test("every image provider request includes the required product reference", asy
   assert.equal(openrouterMessages[0].content[1].image_url.url.endsWith(source.toString("base64")), true);
 
   await assert.rejects(
-    googleImageProvider.generateImage({ model: "gemini-2.5-flash-image", prompt: "No source" }),
+    googleImageProvider.generateImage({ model: "gemini-3.1-flash-image", prompt: "No source" }),
     (error) => error.code === "reference_image_required",
   );
   await assert.rejects(
@@ -818,7 +924,7 @@ test("OpenAI campaign creatives use image edits and never text-only generations"
 test("Instagram output fitting preserves the full image without cover cropping", async () => {
   assert.equal(instagramCreativePrivate.generationSizeForProvider("openai", "gpt-image-2"), "1088x1360");
   assert.equal(instagramCreativePrivate.generationSizeForProvider("openai", "gpt-image-1.5"), "1024x1536");
-  assert.equal(instagramCreativePrivate.generationSizeForProvider("google", "gemini-2.5-flash-image"), "1080x1350");
+  assert.equal(instagramCreativePrivate.generationSizeForProvider("google", "gemini-3.1-flash-image"), "1080x1350");
 
   const source = await sharp({
     create: { width: 100, height: 100, channels: 3, background: { r: 220, g: 20, b: 60 } },

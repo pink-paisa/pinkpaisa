@@ -1,11 +1,13 @@
 const GEMINI_API_BASE = String(
   process.env.GEMINI_API_BASE_URL
   || process.env.GOOGLE_GEMINI_API_BASE_URL
-  || "https://generativelanguage.googleapis.com/v1beta"
+  || "https://generativelanguage.googleapis.com/v1"
 ).replace(/\/+$/, "");
 
 const DEFAULT_ASPECT_RATIO = trimText(process.env.GEMINI_IMAGE_ASPECT_RATIO || process.env.GOOGLE_IMAGE_ASPECT_RATIO || "4:5");
-const DEFAULT_FLASH_IMAGE_SIZE = trimText(process.env.GEMINI_IMAGE_SIZE || process.env.GOOGLE_IMAGE_SIZE || "2K");
+const DEFAULT_IMAGE_SIZE = trimText(process.env.GEMINI_IMAGE_SIZE || process.env.GOOGLE_IMAGE_SIZE || "2K").toUpperCase();
+
+const { getModelDefinition } = require("./registry");
 
 function trimText(value) {
   return String(value || "").trim();
@@ -69,61 +71,60 @@ function aspectRatioFromSize(size) {
   return DEFAULT_ASPECT_RATIO;
 }
 
-function supportsImageSize(model) {
-  return /^gemini-3\./i.test(trimText(model));
-}
-
 function resolveImageSize(model, quality) {
-  if (!supportsImageSize(model)) return null;
+  const modelDefinition = getModelDefinition("google", model);
+  const supportedSizes = modelDefinition?.capabilities?.image_sizes || [];
+  if (!supportedSizes.length) return null;
 
-  if (quality === "high") return "4K";
-  if (quality === "low") return "1K";
-  return DEFAULT_FLASH_IMAGE_SIZE || "2K";
+  const defaultSize = modelDefinition.capabilities.default_image_size || supportedSizes[0];
+  const preferredSize = quality === "high"
+    ? "4K"
+    : quality === "low"
+      ? "1K"
+      : DEFAULT_IMAGE_SIZE || defaultSize;
+
+  if (supportedSizes.includes(preferredSize)) return preferredSize;
+  if (supportedSizes.includes(defaultSize)) return defaultSize;
+  return supportedSizes[0];
 }
 
 function buildRequestBody({ model, prompt, sourceImageBuffer, size, quality }) {
-  const parts = [];
+  const input = [];
   if (sourceImageBuffer) {
-    parts.push({
-      inlineData: {
-        mimeType: resolveMimeType(sourceImageBuffer),
-        data: sourceImageBuffer.toString("base64"),
-      },
+    input.push({
+      type: "image",
+      mime_type: resolveMimeType(sourceImageBuffer),
+      data: sourceImageBuffer.toString("base64"),
     });
   }
 
-  parts.push({ text: prompt });
+  input.push({ type: "text", text: prompt });
 
   const body = {
-    contents: [
-      {
-        role: "user",
-        parts,
-      },
-    ],
-    generationConfig: {
-      responseModalities: ["Image"],
-      imageConfig: {
-        aspectRatio: aspectRatioFromSize(size),
-      },
+    model: trimText(model),
+    input,
+    response_format: {
+      type: "image",
+      aspect_ratio: aspectRatioFromSize(size),
     },
   };
 
   const imageSize = resolveImageSize(model, quality);
   if (imageSize) {
-    body.generationConfig.imageConfig.imageSize = imageSize;
+    body.response_format.image_size = imageSize;
   }
 
   return body;
 }
 
 function extractImageBuffer(responseJson) {
-  const candidates = Array.isArray(responseJson?.candidates) ? responseJson.candidates : [];
-  for (const candidate of candidates) {
-    const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
-    const imagePart = parts.find((part) => trimText(part?.inlineData?.data));
-    if (imagePart?.inlineData?.data) {
-      return Buffer.from(imagePart.inlineData.data, "base64");
+  const steps = Array.isArray(responseJson?.steps) ? [...responseJson.steps].reverse() : [];
+  for (const step of steps) {
+    if (step?.type !== "model_output") continue;
+    const content = Array.isArray(step?.content) ? step.content : [];
+    const image = content.find((item) => item?.type === "image" && trimText(item?.data));
+    if (image?.data) {
+      return Buffer.from(image.data, "base64");
     }
   }
 
@@ -146,7 +147,7 @@ async function generateImage({ model, prompt, sourceImageBuffer, size, quality }
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${GEMINI_API_BASE}/models/${encodeURIComponent(resolvedModel)}:generateContent`, {
+    const response = await fetch(`${GEMINI_API_BASE}/interactions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -183,6 +184,8 @@ module.exports = {
   generateImage,
   _private: {
     buildRequestBody,
+    extractImageBuffer,
+    resolveImageSize,
     resolveMimeType,
   },
 };

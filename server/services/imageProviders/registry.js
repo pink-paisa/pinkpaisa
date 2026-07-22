@@ -2,6 +2,20 @@ function trimText(value) {
   return String(value || "").trim();
 }
 
+const MODEL_ID_ALIASES = {
+  google: {
+    "gemini-2.5-flash-image": "gemini-3.1-flash-image",
+    "gemini-3.1-flash-image-preview": "gemini-3.1-flash-image",
+    "gemini-3-pro-image-preview": "gemini-3-pro-image",
+  },
+};
+
+function resolveModelIdAlias(providerKey, modelId) {
+  const normalizedProvider = trimText(providerKey);
+  const normalizedModel = trimText(modelId);
+  return MODEL_ID_ALIASES[normalizedProvider]?.[normalizedModel] || normalizedModel;
+}
+
 const IMAGE_PROVIDER_REGISTRY = [
   {
     key: "openai",
@@ -52,24 +66,27 @@ const IMAGE_PROVIDER_REGISTRY = [
     coming_soon: false,
     models: [
       {
-        id: "gemini-2.5-flash-image",
-        label: "Gemini 2.5 Flash Image",
+        id: "gemini-3.1-flash-image",
+        label: "Gemini 3.1 Flash Image",
         supports_reference_image: true,
         supports_text_to_image: true,
-        cost_tier: "low",
-      },
-      {
-        id: "gemini-3.1-flash-image-preview",
-        label: "Gemini 3.1 Flash Image Preview",
-        supports_reference_image: true,
-        supports_text_to_image: true,
+        capabilities: { image_sizes: ["1K", "2K", "4K"], default_image_size: "2K" },
         cost_tier: "medium",
       },
       {
-        id: "gemini-3-pro-image-preview",
-        label: "Gemini 3 Pro Image Preview",
+        id: "gemini-3.1-flash-lite-image",
+        label: "Gemini 3.1 Flash Lite Image",
         supports_reference_image: true,
         supports_text_to_image: true,
+        capabilities: { image_sizes: ["1K"], default_image_size: "1K" },
+        cost_tier: "low",
+      },
+      {
+        id: "gemini-3-pro-image",
+        label: "Gemini 3 Pro Image",
+        supports_reference_image: true,
+        supports_text_to_image: true,
+        capabilities: { image_sizes: ["1K", "2K", "4K"], default_image_size: "2K" },
         cost_tier: "high",
       },
     ],
@@ -87,7 +104,19 @@ const IMAGE_PROVIDER_REGISTRY = [
 function cloneProvider(provider) {
   return {
     ...provider,
-    models: provider.models.map((model) => ({ ...model })),
+    models: provider.models.map((model) => ({
+      ...model,
+      ...(model.capabilities
+        ? {
+          capabilities: {
+            ...model.capabilities,
+            ...(Array.isArray(model.capabilities.image_sizes)
+              ? { image_sizes: [...model.capabilities.image_sizes] }
+              : {}),
+          },
+        }
+        : {}),
+    })),
   };
 }
 
@@ -118,8 +147,9 @@ function getDefaultModelId(providerKey) {
       : provider.key === "openrouter"
         ? trimText(process.env.OPENROUTER_IMAGE_MODEL)
       : "";
-  if (envPreferredModel && provider.models.some((model) => model.id === envPreferredModel)) {
-    return envPreferredModel;
+  const canonicalEnvModel = resolveModelIdAlias(provider.key, envPreferredModel);
+  if (canonicalEnvModel && provider.models.some((model) => model.id === canonicalEnvModel)) {
+    return canonicalEnvModel;
   }
 
   if (provider.key === "openrouter" && envPreferredModel) {
@@ -138,7 +168,8 @@ function getDefaultModelId(providerKey) {
 function getModelDefinition(providerKey, modelId) {
   const provider = getProviderDefinition(providerKey);
   if (!provider) return null;
-  return provider.models.find((model) => model.id === trimText(modelId)) || null;
+  const canonicalModelId = resolveModelIdAlias(provider.key, modelId);
+  return provider.models.find((model) => model.id === canonicalModelId) || null;
 }
 
 function normaliseImageProviderSelection(rawProviderKey, rawModelId) {
@@ -196,11 +227,13 @@ async function buildImageProviderRegistryResponse() {
       : "";
     const defaultModel = provider.enabled
       ? (
-        envPreferredModel && referenceModels.some((model) => model.id === envPreferredModel)
-          ? envPreferredModel
-          : provider.key === "openai"
-            ? getDefaultModelId("openai") || null
-            : referenceModels[0]?.id || null
+        provider.key === "openrouter"
+          ? (
+            envPreferredModel && referenceModels.some((model) => model.id === envPreferredModel)
+              ? envPreferredModel
+              : referenceModels[0]?.id || null
+          )
+          : getDefaultModelId(provider.key) || referenceModels[0]?.id || null
       )
       : null;
 
@@ -231,4 +264,5 @@ module.exports = {
   getModelDefinition,
   getProviderDefinition,
   normaliseImageProviderSelection,
+  resolveModelIdAlias,
 };
