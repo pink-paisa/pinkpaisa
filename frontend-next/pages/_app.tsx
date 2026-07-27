@@ -7,10 +7,13 @@ import "yet-another-react-lightbox/plugins/captions.css";
 import "yet-another-react-lightbox/plugins/counter.css";
 import "@/index.css";
 import AppProviders from "@/components/AppProviders";
+import MicrosoftClarity from "@/components/analytics/MicrosoftClarity";
 import { persistAffiliateAttribution } from "@/lib/affiliateTracking";
+import { isClarityBlockedPath } from "@/lib/microsoftClarity";
 
 export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
   const router = useRouter();
+  const maskPageForClarity = isClarityBlockedPath(router.asPath);
 
   useEffect(() => {
     persistAffiliateAttribution();
@@ -21,7 +24,14 @@ export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
       <Head>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
       </Head>
-      <Component {...pageProps} />
+      <MicrosoftClarity />
+      {maskPageForClarity ? (
+        <div data-clarity-mask="true">
+          <Component {...pageProps} />
+        </div>
+      ) : (
+        <Component {...pageProps} />
+      )}
     </AppProviders>
   );
 }

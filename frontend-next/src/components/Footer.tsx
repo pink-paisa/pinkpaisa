@@ -26,6 +26,12 @@ const Footer = () => {
             >
               Affiliate Disclosure
             </Link>
+            <Link
+              href="/privacy"
+              className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
+            >
+              Privacy
+            </Link>
             <a
               href="https://pinkpaisa.in"
               target="_blank"

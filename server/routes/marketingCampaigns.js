@@ -4,6 +4,7 @@ const { protect, adminOnly } = require("../middleware/auth");
 const {
   archiveMarketingCampaignController,
   bulkArchiveMarketingCampaignsController,
+  bulkRegenerateMarketingCampaignsController,
   bulkReviewMarketingCampaignsController,
   cancelMarketingCarouselController,
   createMarketingCampaignFromApprovedProduct,
@@ -53,6 +54,7 @@ router.patch("/admin/carousels/:taskId/schedule", protect, adminOnly, reschedule
 router.post("/admin/carousels/:taskId/cancel", protect, adminOnly, cancelMarketingCarouselController);
 router.post("/admin/carousels/:taskId/retry", protect, adminOnly, retryMarketingCarouselController);
 router.post("/admin/bulk-archive", protect, adminOnly, bulkArchiveMarketingCampaignsController);
+router.post("/admin/bulk-regenerate", protect, adminOnly, bulkRegenerateMarketingCampaignsController);
 router.post("/admin/bulk-review", protect, adminOnly, bulkReviewMarketingCampaignsController);
 router.post("/admin/from-product/:productId", protect, adminOnly, createMarketingCampaignFromProductSource);
 router.post("/admin/from-vendor-product/:vendorProductId", protect, adminOnly, createMarketingCampaignFromApprovedProduct);

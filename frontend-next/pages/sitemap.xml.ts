@@ -12,6 +12,7 @@ const STATIC_PATHS = [
   "/instagram/picks",
   "/instagram/trending",
   "/affiliate-disclosure",
+  "/privacy",
   "/blogs",
   "/workshops",
   "/pink-pages",

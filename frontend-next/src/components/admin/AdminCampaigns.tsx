@@ -298,6 +298,9 @@ const JsonBlock = ({ value }: { value: unknown }) => (
 );
 
 const EMPTY_PLACEHOLDER = "-";
+const INSTAGRAM_API_CAROUSEL_MIN_ITEMS = 2;
+const INSTAGRAM_API_CAROUSEL_MAX_ITEMS = 10;
+const INSTAGRAM_APP_CAROUSEL_MAX_ITEMS = 20;
 
 const formatDateTime = (value: string | null | undefined) => {
   if (!value) return EMPTY_PLACEHOLDER;
@@ -774,6 +777,36 @@ const AdminCampaigns = () => {
   const selectedPublishedCount = selectedVisibleRuns.filter((run) => (
     run.publish_status === "published" || run.status === "published" || Boolean(run.instagram_media_id)
   )).length;
+  const bulkRegenerateSelectionReady = selectedRunIds.length > 0
+    && selectedRunIds.length <= 25
+    && selectedVisibleRuns.length === selectedRunIds.length
+    && selectedVisibleRuns.every((run) => (
+      !run.archived_at
+      && !run.carousel_task_id
+      && run.status !== "publishing"
+      && run.status !== "published"
+      && run.publish_status !== "publishing"
+      && run.publish_status !== "published"
+      && !run.instagram_media_id
+      && run.next_action !== "verify_instagram_publish"
+    ));
+  const bulkRegenerateSelectionHint = selectedRunIds.length > 25
+    ? "Regenerate no more than 25 campaigns at once."
+    : selectedVisibleRuns.length !== selectedRunIds.length
+      ? "Only campaigns visible in the current list can be regenerated in bulk."
+      : selectedVisibleRuns.some((run) => Boolean(run.carousel_task_id))
+        ? "Cancel the active carousel before regenerating selected campaigns."
+        : selectedVisibleRuns.some((run) => (
+          run.status === "publishing"
+          || run.status === "published"
+          || run.publish_status === "publishing"
+          || run.publish_status === "published"
+          || Boolean(run.instagram_media_id)
+        ))
+          ? "Published or publishing campaigns cannot be regenerated."
+          : selectedVisibleRuns.some((run) => run.next_action === "verify_instagram_publish")
+            ? "Verify uncertain Instagram publish results before regenerating."
+            : "Regenerate image and caption for selected campaigns.";
   const bulkReviewSelectionReady = selectedRunIds.length > 0
     && selectedRunIds.length <= 25
     && selectedVisibleRuns.length === selectedRunIds.length
@@ -801,7 +834,7 @@ const AdminCampaigns = () => {
   })), [selectedVisibleRuns]);
   const carouselSelectionReady = selectedRunIds.length >= 2
     && data.features?.affiliate_carousel !== false
-    && selectedRunIds.length <= 10
+    && selectedRunIds.length <= INSTAGRAM_API_CAROUSEL_MAX_ITEMS
     && selectedVisibleRuns.length === selectedRunIds.length
     && selectedVisibleRuns.every((run) => (
       (run.is_affiliate || run.source_event === "affiliate_product.published")
@@ -814,8 +847,8 @@ const AdminCampaigns = () => {
     ));
   const carouselSelectionHint = data.features?.affiliate_carousel === false
     ? "Affiliate carousel publishing is disabled by the server feature flag."
-    : selectedRunIds.length < 2 || selectedRunIds.length > 10
-    ? "Select between 2 and 10 campaigns."
+    : selectedRunIds.length < INSTAGRAM_API_CAROUSEL_MIN_ITEMS || selectedRunIds.length > INSTAGRAM_API_CAROUSEL_MAX_ITEMS
+    ? `Select between ${INSTAGRAM_API_CAROUSEL_MIN_ITEMS} and ${INSTAGRAM_API_CAROUSEL_MAX_ITEMS} campaigns for API publishing.`
     : selectedVisibleRuns.some((run) => !(run.is_affiliate || run.source_event === "affiliate_product.published"))
       ? "Carousels currently support affiliate campaigns only."
       : selectedVisibleRuns.some((run) => run.review_status !== "approved")
@@ -1039,6 +1072,42 @@ const AdminCampaigns = () => {
       await refreshAll();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not regenerate campaign");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const regenerateSelectedRuns = async () => {
+    if (!bulkRegenerateSelectionReady) {
+      toast.error(bulkRegenerateSelectionHint);
+      return;
+    }
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{
+        message?: string;
+        regenerated: number;
+        failed: number;
+        results: Array<{ id: string; ok: boolean; message?: string }>;
+      }>("/marketing-campaigns/admin/bulk-regenerate", {
+        method: "POST",
+        body: JSON.stringify({ run_ids: selectedRunIds, stage: "creative" }),
+      });
+      const regeneratedIds = new Set(response.results.filter((result) => result.ok).map((result) => result.id));
+      const failedResults = response.results.filter((result) => !result.ok);
+      setSelectedRunIds((current) => current.filter((id) => !regeneratedIds.has(id)));
+      if (response.regenerated) {
+        toast.success(response.message || `Regeneration started for ${response.regenerated} campaign${response.regenerated === 1 ? "" : "s"}`);
+      }
+      if (response.failed) {
+        toast.error(`${response.failed} campaign${response.failed === 1 ? "" : "s"} could not be regenerated. ${failedResults[0]?.message || "Open the campaign details to review."}`);
+      }
+      await Promise.all([
+        loadCampaigns({ silent: true }),
+        selectedId ? loadDetail(selectedId, { silent: true, open: false }) : Promise.resolve(),
+      ]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not regenerate selected campaigns");
     } finally {
       setActionLoading(false);
     }
@@ -1718,6 +1787,9 @@ const AdminCampaigns = () => {
             <div>
               <p className="text-sm font-medium">Selected campaign actions</p>
               <p className="text-xs text-muted-foreground">Published campaigns can be removed from Pink Paisa; their Instagram posts remain live until removed on Instagram.</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Instagram API carousel publishing supports {INSTAGRAM_API_CAROUSEL_MIN_ITEMS}-{INSTAGRAM_API_CAROUSEL_MAX_ITEMS} slides. For manual posting in the Instagram app, download creatives and post up to {INSTAGRAM_APP_CAROUSEL_MAX_ITEMS} slides.
+              </p>
               {selectedPublishedCount > 0 ? (
                 <p className="mt-1 text-xs font-medium text-amber-700">{selectedPublishedCount} published campaign{selectedPublishedCount === 1 ? "" : "s"} selected.</p>
               ) : null}
@@ -1758,6 +1830,15 @@ const AdminCampaigns = () => {
               </Button>
               <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length}>
                 Scan readiness
+              </Button>
+              <Button
+                variant="outline"
+                className="rounded-xl"
+                onClick={regenerateSelectedRuns}
+                disabled={actionLoading || !bulkRegenerateSelectionReady}
+                title={bulkRegenerateSelectionReady ? "Regenerate image and caption for selected campaigns" : bulkRegenerateSelectionHint}
+              >
+                <RotateCcw className="mr-2 h-4 w-4" /> Regenerate image and caption
               </Button>
               <Button variant="destructive" className="rounded-xl" onClick={() => setBulkArchiveOpen(true)} disabled={actionLoading || !selectedRunIds.length}>
                 <Trash2 className="mr-2 h-4 w-4" /> Remove selected

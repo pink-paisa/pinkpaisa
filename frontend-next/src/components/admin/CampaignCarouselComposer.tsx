@@ -82,6 +82,9 @@ export type CarouselTaskResponse = {
 };
 
 const IST_OFFSET_MS = 330 * 60 * 1000;
+const INSTAGRAM_API_CAROUSEL_MIN_ITEMS = 2;
+const INSTAGRAM_API_CAROUSEL_MAX_ITEMS = 10;
+const INSTAGRAM_APP_CAROUSEL_MAX_ITEMS = 20;
 
 export const toIstDateTimeInput = (value: Date | string | number) => {
   const date = value instanceof Date ? value : new Date(value);
@@ -269,7 +272,7 @@ export default function CampaignCarouselComposer({
           <DialogHeader className="shrink-0 border-b border-border/70 px-6 py-5 pr-14">
             <DialogTitle className="font-serif text-2xl">Create affiliate carousel</DialogTitle>
             <DialogDescription>
-              Reorder approved campaign images, edit the shared caption, and publish now or schedule in IST.
+              Reorder approved campaign images, edit the shared caption, and publish now or schedule in IST. API publishing supports {INSTAGRAM_API_CAROUSEL_MIN_ITEMS}-{INSTAGRAM_API_CAROUSEL_MAX_ITEMS} slides; manual Instagram app posts can use up to {INSTAGRAM_APP_CAROUSEL_MAX_ITEMS}.
             </DialogDescription>
           </DialogHeader>
 
@@ -284,7 +287,7 @@ export default function CampaignCarouselComposer({
                       <p className="text-xs uppercase text-muted-foreground">Slides</p>
                       <h3 className="mt-1 text-lg font-semibold">Instagram order</h3>
                     </div>
-                    <span className="text-sm text-muted-foreground">{orderedItems.length} images</span>
+                    <span className="text-sm text-muted-foreground">{orderedItems.length}/{INSTAGRAM_API_CAROUSEL_MAX_ITEMS} API slides</span>
                   </div>
                   <div className="mt-4 space-y-3">
                     {orderedItems.map((item, index) => (

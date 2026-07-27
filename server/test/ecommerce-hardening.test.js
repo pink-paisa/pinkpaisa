@@ -271,8 +271,24 @@ test("affiliate carousel routes expose preview, queue, lifecycle, and compact li
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/cancel"));
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/retry"));
   assert.ok(routeSignatures.includes("POST /admin/bulk-review"));
+  assert.ok(routeSignatures.includes("POST /admin/bulk-regenerate"));
   assert.ok(routeSignatures.includes("GET /admin/:id/assets/:assetIndex/download"));
   assert.equal(campaignLinkRoutes.stack.find((layer) => layer.route)?.route.path, "/:campaignId");
+});
+
+test("bulk campaign actions normalize selected run ids conservatively", () => {
+  const normalize = marketingCampaignController._private.normalizeBulkCampaignRunIds;
+  assert.deepEqual(normalize([
+    "66f000000000000000000001",
+    "66f000000000000000000001",
+    "66f000000000000000000002",
+  ]), ["66f000000000000000000001", "66f000000000000000000002"]);
+  assert.throws(() => normalize([]), /Select at least one campaign/);
+  assert.throws(() => normalize(["not-an-id"]), /campaign IDs are invalid/);
+  assert.throws(
+    () => normalize(Array.from({ length: 26 }, (_, index) => index.toString(16).padStart(24, "0"))),
+    /25 or fewer/,
+  );
 });
 
 test("campaign creative assets expose protected download metadata", () => {

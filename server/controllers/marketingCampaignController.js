@@ -43,6 +43,34 @@ const campaignErrorResponse = (error) => ({
   ...(error.details && typeof error.details === "object" ? error.details : {}),
 });
 const isCarouselConflict = (error) => ["carousel_conflict", "carousel_not_ready", "carousel_publish_uncertain"].includes(error?.code);
+const BULK_CAMPAIGN_ACTION_LIMIT = 25;
+
+function normalizeBulkCampaignRunIds(runIds) {
+  if (!Array.isArray(runIds)) {
+    const error = new Error("run_ids must be an array");
+    error.statusCode = 400;
+    throw error;
+  }
+  const normalized = Array.from(new Set(
+    runIds.map((id) => String(id || "").trim()).filter(Boolean)
+  ));
+  if (!normalized.length) {
+    const error = new Error("Select at least one campaign");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (normalized.length > BULK_CAMPAIGN_ACTION_LIMIT) {
+    const error = new Error(`Select ${BULK_CAMPAIGN_ACTION_LIMIT} or fewer campaigns at a time`);
+    error.statusCode = 400;
+    throw error;
+  }
+  if (normalized.some((id) => !/^[0-9a-fA-F]{24}$/.test(id))) {
+    const error = new Error("One or more campaign IDs are invalid");
+    error.statusCode = 400;
+    throw error;
+  }
+  return normalized;
+}
 
 const listMarketingCampaignRuns = async (req, res) => {
   try {
@@ -294,6 +322,48 @@ const regenerateMarketingCampaign = async (req, res) => {
   }
 };
 
+const bulkRegenerateMarketingCampaignsController = async (req, res) => {
+  try {
+    const runIds = normalizeBulkCampaignRunIds(req.body?.run_ids);
+    const stage = req.body?.stage || "creative";
+    const actorAdminId = req.user?._id || req.user?.id || null;
+    const results = [];
+
+    for (const runId of runIds) {
+      try {
+        const updated = await regenerateCampaignRun(runId, stage, { actorAdminId });
+        results.push({
+          id: runId,
+          ok: true,
+          message: "Image and caption regeneration started",
+          run: updated.run || updated,
+        });
+      } catch (error) {
+        results.push({
+          id: runId,
+          ok: false,
+          message: error.message || "Could not regenerate campaign",
+          ...(error.code ? { code: error.code } : {}),
+        });
+      }
+    }
+
+    const regenerated = results.filter((result) => result.ok).length;
+    const failed = results.length - regenerated;
+    res.json({
+      message: regenerated
+        ? `Regeneration started for ${regenerated} campaign${regenerated === 1 ? "" : "s"}`
+        : "No selected campaigns could be regenerated",
+      requested: runIds.length,
+      regenerated,
+      failed,
+      results,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 400).json(campaignErrorResponse(error));
+  }
+};
+
 const updateMarketingCampaignDraftController = async (req, res) => {
   try {
     const updated = await updateCampaignDraft(req.params.id, req.body || {});
@@ -504,6 +574,7 @@ const createMarketingCampaignFromProductSource = async (req, res) => {
 module.exports = {
   archiveMarketingCampaignController,
   bulkArchiveMarketingCampaignsController,
+  bulkRegenerateMarketingCampaignsController,
   bulkReviewMarketingCampaignsController,
   cancelMarketingCarouselController,
   createMarketingCampaignFromApprovedProduct,
@@ -535,4 +606,7 @@ module.exports = {
   scanMarketingCampaignReadiness,
   scheduleMarketingCampaignController,
   updateMarketingCampaignDraftController,
+  _private: {
+    normalizeBulkCampaignRunIds,
+  },
 };
