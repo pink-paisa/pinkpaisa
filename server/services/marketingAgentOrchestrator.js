@@ -1,5 +1,7 @@
 const crypto = require("crypto");
+const fs = require("fs");
 const os = require("os");
+const path = require("path");
 const AgentTask = require("../models/AgentTask");
 const DailyBatchRun = require("../models/DailyBatchRun");
 const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
@@ -28,7 +30,7 @@ const {
 } = require("./marketingAgents");
 const { validateAmazonAffiliateUrl } = require("./amazonAffiliateCompliance");
 const { isPublicMediaUrl, publishInstagramDraft } = require("./instagramPublishService");
-const { deleteCampaignAsset } = require("./campaignAssetStorage");
+const { deleteCampaignAsset, getGeneratedCampaignAssetReference } = require("./campaignAssetStorage");
 const {
   readAndNormalizeReferenceImage,
   resolveProductReferenceImage,
@@ -134,6 +136,10 @@ function isUncategorizedValue(value) {
   return !value || String(value).trim().toLowerCase() === "uncategorized";
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function readinessIssue(code, message) {
   return { code, message };
 }
@@ -195,6 +201,102 @@ function getRunPublishAssetUrls(run = {}) {
   if (Array.isArray(publishAssets) && publishAssets.length) return publishAssets.filter(Boolean);
   if (Array.isArray(run?.asset_urls) && run.asset_urls.length) return run.asset_urls.filter(Boolean);
   return [];
+}
+
+function normalizeAssetUrlList(values = []) {
+  return (Array.isArray(values) ? values : [])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function getRunCreativeAssetUrls(run = {}) {
+  return Array.from(new Set([
+    ...normalizeAssetUrlList(run?.tracking_json?.publish_payload?.asset_urls),
+    ...normalizeAssetUrlList(run?.asset_urls),
+    ...normalizeAssetUrlList(run?.creative_json?.asset_urls),
+    String(run?.creative_json?.primary_asset_url || "").trim(),
+  ].filter(Boolean)));
+}
+
+function safeDownloadNamePart(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "campaign";
+}
+
+function getCampaignAssetFileExtension(url = "") {
+  const pathname = (() => {
+    try {
+      return new URL(String(url || "")).pathname;
+    } catch (_error) {
+      return String(url || "");
+    }
+  })();
+  const extension = path.extname(pathname).toLowerCase();
+  return [".jpg", ".jpeg", ".png", ".webp"].includes(extension) ? extension : ".jpg";
+}
+
+function buildCampaignAssetFileName(run = {}, url = "", index = 0) {
+  const campaignPart = safeDownloadNamePart(run.campaign_id || run.product_title || run._id);
+  const slidePart = Number(index || 0) + 1;
+  return `pinkpaisa-${campaignPart}-slide-${slidePart}${getCampaignAssetFileExtension(url)}`;
+}
+
+function getImageContentType(fileName = "") {
+  const extension = path.extname(fileName).toLowerCase();
+  if (extension === ".png") return "image/png";
+  if (extension === ".webp") return "image/webp";
+  return "image/jpeg";
+}
+
+function createCampaignAssetDownloadError(message, code, status = 400) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  return error;
+}
+
+function isTrustedGeneratedAssetUrlReference(value) {
+  const raw = String(value || "").trim();
+  if (!/^https?:\/\//i.test(raw)) return true;
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_error) {
+    return false;
+  }
+
+  const allowedBases = [
+    process.env.PUBLIC_MEDIA_BASE_URL,
+    process.env.SERVER_URL,
+    "http://localhost:5000",
+  ].map((base) => String(base || "").trim()).filter(Boolean);
+  return allowedBases.some((base) => {
+    try {
+      const allowed = new URL(base);
+      return parsed.protocol === allowed.protocol && parsed.host === allowed.host;
+    } catch (_error) {
+      return false;
+    }
+  });
+}
+
+function serialiseCreativeAssets(run = {}) {
+  return getRunCreativeAssetUrls(run).map((url, index) => ({
+    index,
+    url,
+    download_url: `/marketing-campaigns/admin/${run._id}/assets/${index}/download`,
+    filename: buildCampaignAssetFileName(run, url, index),
+    provider: run.creative_json?.provider || run.creative_json?.creative_json?.provider || null,
+    model: run.creative_json?.model || run.creative_json?.creative_json?.model || null,
+    checksum_sha256: index === 0
+      ? (run.creative_json?.checksum_sha256 || run.creative_json?.creative_json?.checksum_sha256 || null)
+      : null,
+    generated_at: run.creative_json?.generated_at || run.creative_json?.creative_json?.generated_at || null,
+  }));
 }
 
 function getRunPublishCaption(run = {}) {
@@ -618,6 +720,7 @@ function serialiseRun(run, taskCounts = null) {
     content_type: run.content_type || null,
     cta_text: run.cta_text || null,
     asset_urls: run.asset_urls || [],
+    creative_assets: serialiseCreativeAssets(run),
     product_image_url: referenceImageUrl,
     product_gallery_urls: productGalleryUrls,
     reference_image_url: referenceImageUrl,
@@ -4105,6 +4208,7 @@ async function listCampaignCatalogProducts({
   source = "all",
   readiness = "all",
   category = "",
+  subcategory = "",
   affiliate_only: affiliateOnly = false,
   instagram_pick: instagramPick = false,
 } = {}) {
@@ -4130,7 +4234,14 @@ async function listCampaignCatalogProducts({
   }
   if (source === "vendor") query.source_type = "vendor";
   if (instagramPick === true || instagramPick === "true" || instagramPick === "1") query.affiliate_is_instagram_pick = true;
-  if (category) query.category = { $regex: String(category).trim(), $options: "i" };
+  const trimmedCategory = String(category || "").trim();
+  const trimmedSubcategory = String(subcategory || "").trim();
+  const filterOptionQuery = { ...query };
+  if (trimmedCategory) query.category = { $regex: `^${escapeRegExp(trimmedCategory)}$`, $options: "i" };
+  if (trimmedSubcategory) query.subcategory = { $regex: `^${escapeRegExp(trimmedSubcategory)}$`, $options: "i" };
+  const subcategoryOptionQuery = trimmedCategory
+    ? { ...filterOptionQuery, category: { $regex: `^${escapeRegExp(trimmedCategory)}$`, $options: "i" } }
+    : filterOptionQuery;
 
   const safePage = Math.max(Number(page || 1), 1);
   const safeLimit = Math.min(Math.max(Number(limit || 24), 1), 100);
@@ -4164,9 +4275,11 @@ async function listCampaignCatalogProducts({
     baseQuery.skip((safePage - 1) * safeLimit).limit(safeLimit);
   }
 
-  const [rawItems, totalWithoutReadiness] = await Promise.all([
+  const [rawItems, totalWithoutReadiness, categoryOptions, subcategoryOptions] = await Promise.all([
     baseQuery,
     Product.countDocuments(query),
+    Product.distinct("category", filterOptionQuery),
+    Product.distinct("subcategory", subcategoryOptionQuery),
   ]);
   const filtered = usesReadinessFilter
     ? rawItems.filter((product) => {
@@ -4189,6 +4302,10 @@ async function listCampaignCatalogProducts({
       limit: safeLimit,
       total,
       total_pages: Math.ceil(total / safeLimit) || 1,
+    },
+    filters: {
+      categories: categoryOptions.map((value) => String(value || "").trim()).filter(Boolean).sort((a, b) => a.localeCompare(b)),
+      subcategories: subcategoryOptions.map((value) => String(value || "").trim()).filter(Boolean).sort((a, b) => a.localeCompare(b)),
     },
   };
 }
@@ -4396,6 +4513,63 @@ async function getCampaignRunDetail(runId) {
   };
 }
 
+async function getCampaignRunAssetDownload(runId, assetIndex) {
+  const run = await MarketingCampaignRun.findById(runId).lean();
+  if (!run) {
+    throw createCampaignAssetDownloadError("Campaign run not found", "campaign_not_found", 404);
+  }
+
+  const index = Number.parseInt(String(assetIndex ?? ""), 10);
+  const assets = serialiseCreativeAssets(run);
+  if (!Number.isInteger(index) || index < 0 || index >= assets.length) {
+    throw createCampaignAssetDownloadError("Campaign creative asset not found", "campaign_asset_not_found", 404);
+  }
+
+  const selected = assets[index];
+  const assetRecord = await MarketingAsset.findOne({
+    campaign_run_id: run._id,
+    url: selected.url,
+    deleted_at: null,
+  }).lean();
+
+  const urlFallback = isTrustedGeneratedAssetUrlReference(selected.url) ? selected.url : null;
+  const references = [assetRecord?.storage_key, urlFallback]
+    .map((value) => {
+      if (!value) return null;
+      try {
+        return getGeneratedCampaignAssetReference(value);
+      } catch (_error) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const reference = references[0] || null;
+  if (!reference) {
+    throw createCampaignAssetDownloadError(
+      "This campaign creative cannot be downloaded from Pink Paisa storage.",
+      "campaign_asset_not_local",
+      400,
+    );
+  }
+
+  const stats = await fs.promises.stat(reference.filePath).catch(() => null);
+  if (!stats?.isFile()) {
+    throw createCampaignAssetDownloadError("Campaign creative file is missing from storage", "campaign_asset_file_missing", 404);
+  }
+
+  return {
+    file_path: reference.filePath,
+    filename: selected.filename || buildCampaignAssetFileName(run, selected.url, index),
+    content_type: getImageContentType(reference.fileName),
+    size: stats.size,
+    asset: {
+      ...selected,
+      checksum_sha256: selected.checksum_sha256 || assetRecord?.checksum_sha256 || null,
+      storage_provider: assetRecord?.storage_provider || "local",
+    },
+  };
+}
+
 async function updateWorkerHeartbeat() {
   const now = new Date();
   await MarketingWorkerHeartbeat.findOneAndUpdate(
@@ -4498,6 +4672,7 @@ module.exports = {
   enqueueApprovedProductCampaign,
   getAffiliateCarouselTask,
   getCampaignSettings,
+  getCampaignRunAssetDownload,
   getDailyBatchRunDetail,
   getCampaignRunDetail,
   getLatestDailyBatchRun,
@@ -4546,6 +4721,7 @@ module.exports = {
     buildPublishResultFromAttempt,
     buildPublishTaskMembershipQuery,
     buildStaleTaskRecoveryFilter,
+    buildCampaignAssetFileName,
     getActiveLeaseFilter,
     getNextAutoAgent,
     buildRunPublishReadinessSnapshot,
@@ -4553,12 +4729,15 @@ module.exports = {
     buildLaneClaimQuery,
     buildOrphanPublishRecoveryUpdates,
     getQueueLane,
+    getRunCreativeAssetUrls,
     getRunNextAction,
     getRunPublishAssetUrls,
+    serialiseCreativeAssets,
     hasDurablePublishedAttempt,
     buildPublishAttemptFailureUpdates,
     getPublishAttemptLifecycleState,
     isMatchingDurableCarouselAttempt,
+    isTrustedGeneratedAssetUrlReference,
     isUnresolvedPublishAttempt,
     mergeAttemptWithRunPublishState,
     normalizeOrderedCarouselRunIds,

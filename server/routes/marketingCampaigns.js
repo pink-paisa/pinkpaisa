@@ -8,6 +8,7 @@ const {
   cancelMarketingCarouselController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
+  downloadMarketingCampaignAssetController,
   getMarketingBatchDetail,
   getMarketingCarouselController,
   getMarketingCampaignCalendar,
@@ -55,6 +56,7 @@ router.post("/admin/bulk-archive", protect, adminOnly, bulkArchiveMarketingCampa
 router.post("/admin/bulk-review", protect, adminOnly, bulkReviewMarketingCampaignsController);
 router.post("/admin/from-product/:productId", protect, adminOnly, createMarketingCampaignFromProductSource);
 router.post("/admin/from-vendor-product/:vendorProductId", protect, adminOnly, createMarketingCampaignFromApprovedProduct);
+router.get("/admin/:id/assets/:assetIndex/download", protect, adminOnly, downloadMarketingCampaignAssetController);
 router.get("/admin/:id", protect, adminOnly, getMarketingCampaignRun);
 router.patch("/admin/:id/draft", protect, adminOnly, updateMarketingCampaignDraftController);
 router.post("/admin/:id/review", protect, adminOnly, reviewMarketingCampaignRun);

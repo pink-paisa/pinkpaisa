@@ -1,5 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { downloadApiFile } from "@/lib/download";
 import { useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -9,7 +10,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 import { EmptyState, LoadingSpinner, StatusBadge } from "./AdminShared";
-import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Copy, Eye, ExternalLink, GalleryHorizontalEnd, Link as LinkIcon, Maximize2, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Copy, Download, Eye, ExternalLink, GalleryHorizontalEnd, Link as LinkIcon, Maximize2, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import InstagramConnectionPanel from "./InstagramConnectionPanel";
 import CampaignAutomationPanel, {
@@ -17,7 +18,7 @@ import CampaignAutomationPanel, {
   type CampaignAutomationSettings,
   type CampaignImageProviderRegistry,
 } from "./CampaignAutomationPanel";
-import CampaignCreativePreview from "./CampaignCreativePreview";
+import CampaignCreativePreview, { type CampaignCreativeAsset } from "./CampaignCreativePreview";
 import CampaignPostLightbox, { type CampaignPostPreview } from "./CampaignPostLightbox";
 import CampaignPublishActions from "./CampaignPublishActions";
 import CampaignBulkReviewDialog, { type BulkReviewCampaign } from "./CampaignBulkReviewDialog";
@@ -56,6 +57,7 @@ type CampaignRun = {
   content_type?: string | null;
   cta_text?: string | null;
   asset_urls?: string[];
+  creative_assets?: CampaignCreativeAsset[];
   product_image_url?: string | null;
   product_gallery_urls?: string[];
   reference_image_url?: string | null;
@@ -267,6 +269,10 @@ type CampaignDetailResponse = {
 type CatalogProductListResponse = {
   items: CatalogProduct[];
   pagination: { page: number; limit: number; total: number; total_pages: number };
+  filters?: {
+    categories?: string[];
+    subcategories?: string[];
+  };
 };
 type CalendarEntry = {
   date: string;
@@ -324,6 +330,21 @@ const getCreativeAssetUrls = (run: CampaignRun) => Array.from(new Set([
   ...(run.creative_json?.asset_urls || []),
   run.creative_json?.primary_asset_url || "",
 ].map((url) => String(url || "").trim()).filter(Boolean)));
+
+const getCampaignCreativeAssets = (run: CampaignRun): CampaignCreativeAsset[] => {
+  if (Array.isArray(run.creative_assets) && run.creative_assets.length) {
+    return run.creative_assets.filter((asset) => asset?.url);
+  }
+  return getCreativeAssetUrls(run).map((url, index) => ({
+    index,
+    url,
+    download_url: `/marketing-campaigns/admin/${run.id}/assets/${index}/download`,
+    filename: `pinkpaisa-${run.campaign_id || run.id}-slide-${index + 1}.jpg`,
+    provider: run.creative_json?.provider || null,
+    model: run.creative_json?.model || null,
+    generated_at: run.creative_json?.generated_at || null,
+  }));
+};
 
 const getCreativeImageUrl = (run: CampaignRun) => getCreativeAssetUrls(run)[0] || null;
 
@@ -438,6 +459,10 @@ const AdminCampaigns = () => {
   const [catalogDebouncedSearch, setCatalogDebouncedSearch] = useState("");
   const [catalogSource, setCatalogSource] = useState("all");
   const [catalogReadiness, setCatalogReadiness] = useState("all");
+  const [catalogCategory, setCatalogCategory] = useState("all");
+  const [catalogSubcategory, setCatalogSubcategory] = useState("all");
+  const [catalogCategoryOptions, setCatalogCategoryOptions] = useState<string[]>([]);
+  const [catalogSubcategoryOptions, setCatalogSubcategoryOptions] = useState<string[]>([]);
   const [catalogPage, setCatalogPage] = useState(1);
   const [catalogPagination, setCatalogPagination] = useState({ page: 1, limit: 24, total: 0, total_pages: 1 });
   const [selectedCatalogProductIds, setSelectedCatalogProductIds] = useState<string[]>([]);
@@ -463,6 +488,7 @@ const AdminCampaigns = () => {
   const [carouselTaskLoading, setCarouselTaskLoading] = useState(false);
   const [carouselCancelOpen, setCarouselCancelOpen] = useState(false);
   const [postPreview, setPostPreview] = useState<CampaignPostPreview | null>(null);
+  const [downloadingAssetKey, setDownloadingAssetKey] = useState<string | null>(null);
   const previousDetailState = useRef<string | null>(null);
   const previousListStates = useRef<Map<string, string>>(new Map());
 
@@ -476,9 +502,13 @@ const AdminCampaigns = () => {
         source: catalogSource,
         readiness: catalogReadiness,
       });
+      if (catalogCategory !== "all") params.set("category", catalogCategory);
+      if (catalogSubcategory !== "all") params.set("subcategory", catalogSubcategory);
       const response = await apiFetch<CatalogProductListResponse>(`/marketing-campaigns/admin/catalog-products?${params.toString()}`);
       setCatalogProducts(response.items || []);
       setCatalogPagination(response.pagination || { page: 1, limit: 24, total: 0, total_pages: 1 });
+      setCatalogCategoryOptions(response.filters?.categories || []);
+      setCatalogSubcategoryOptions(response.filters?.subcategories || []);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not load catalog products");
     } finally {
@@ -689,7 +719,7 @@ const AdminCampaigns = () => {
   useEffect(() => {
     if (!catalogOpen) return;
     loadCatalogProducts();
-  }, [catalogOpen, catalogDebouncedSearch, catalogSource, catalogReadiness, catalogPage]);
+  }, [catalogOpen, catalogDebouncedSearch, catalogSource, catalogReadiness, catalogCategory, catalogSubcategory, catalogPage]);
 
   const detailPollingActive = Boolean(
     detailOpen
@@ -832,7 +862,26 @@ const AdminCampaigns = () => {
       contentType: run.content_type || null,
       ctaText: run.cta_text || null,
       trackedUrl: getCampaignTrackedUrl(run),
+      creativeAssets: getCampaignCreativeAssets(run),
     });
+  };
+
+  const downloadCreativeAsset = async (asset: CampaignCreativeAsset) => {
+    if (!asset.download_url) {
+      toast.error("This generated image is not available for download");
+      return;
+    }
+
+    const key = `${asset.download_url}:${asset.index}`;
+    try {
+      setDownloadingAssetKey(key);
+      await downloadApiFile(asset.download_url, asset.filename || `pinkpaisa-campaign-slide-${asset.index + 1}.jpg`);
+      toast.success("Image download started");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download generated image");
+    } finally {
+      setDownloadingAssetKey(null);
+    }
   };
 
   const handleConnectInstagram = async () => {
@@ -1489,6 +1538,10 @@ const AdminCampaigns = () => {
     return detail.run.tracking_json?.publish_payload?.caption
       || [draftCaption, trackedUrl, hashtags].filter(Boolean).join("\n\n");
   }, [carouselTask?.carousel?.final_caption, detail, draftCaption, draftHashtags, trackedUrl]);
+  const detailCreativeAssets = useMemo(() => (detail ? getCampaignCreativeAssets(detail.run) : []), [detail]);
+  const detailDownloadingAssetIndex = detailCreativeAssets.find((asset) => (
+    downloadingAssetKey === `${asset.download_url}:${asset.index}`
+  ))?.index ?? null;
 
   const copyCaption = async () => {
     if (!finalCaptionPreview.trim()) {
@@ -1990,8 +2043,8 @@ const AdminCampaigns = () => {
 
             <div className="flex min-h-0 flex-1 flex-col px-6 py-5">
               <div className="flex flex-col gap-3 rounded-2xl border border-dashed border-border/70 bg-muted/20 p-3 lg:flex-row lg:items-center lg:justify-between">
-                <div className="flex flex-1 items-center gap-3">
-                  <div className="relative flex-1">
+                <div className="flex flex-1 flex-wrap items-center gap-3">
+                  <div className="relative min-w-[220px] flex-1">
                     <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                     <Input
                       className="pl-11"
@@ -2003,7 +2056,7 @@ const AdminCampaigns = () => {
                   <select
                     value={catalogSource}
                     onChange={(event) => { setCatalogSource(event.target.value); setCatalogPage(1); setSelectedCatalogProductIds([]); }}
-                    className="h-10 rounded-xl border border-border bg-background px-3 text-sm"
+                    className="h-10 min-w-[150px] rounded-xl border border-border bg-background px-3 text-sm"
                   >
                     <option value="all">All sources</option>
                     <option value="affiliate">Affiliate</option>
@@ -2013,13 +2066,60 @@ const AdminCampaigns = () => {
                   <select
                     value={catalogReadiness}
                     onChange={(event) => { setCatalogReadiness(event.target.value); setCatalogPage(1); setSelectedCatalogProductIds([]); }}
-                    className="h-10 rounded-xl border border-border bg-background px-3 text-sm"
+                    className="h-10 min-w-[150px] rounded-xl border border-border bg-background px-3 text-sm"
                   >
                     <option value="all">Any readiness</option>
                     <option value="ready">Ready/warnings</option>
                     <option value="blocked">Blocked</option>
                     <option value="warning">Warnings</option>
                   </select>
+                  <select
+                    value={catalogCategory}
+                    onChange={(event) => {
+                      setCatalogCategory(event.target.value);
+                      setCatalogSubcategory("all");
+                      setCatalogPage(1);
+                      setSelectedCatalogProductIds([]);
+                    }}
+                    className="h-10 min-w-[180px] rounded-xl border border-border bg-background px-3 text-sm"
+                  >
+                    <option value="all">All categories</option>
+                    {catalogCategoryOptions.map((category) => (
+                      <option key={category} value={category}>{category}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={catalogSubcategory}
+                    onChange={(event) => {
+                      setCatalogSubcategory(event.target.value);
+                      setCatalogPage(1);
+                      setSelectedCatalogProductIds([]);
+                    }}
+                    className="h-10 min-w-[190px] rounded-xl border border-border bg-background px-3 text-sm"
+                  >
+                    <option value="all">All subcategories</option>
+                    {catalogSubcategoryOptions.map((subcategory) => (
+                      <option key={subcategory} value={subcategory}>{subcategory}</option>
+                    ))}
+                  </select>
+                  {(catalogSource !== "all" || catalogReadiness !== "all" || catalogCategory !== "all" || catalogSubcategory !== "all" || catalogSearch.trim()) ? (
+                    <Button
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() => {
+                        setCatalogSearch("");
+                        setCatalogSource("all");
+                        setCatalogReadiness("all");
+                        setCatalogCategory("all");
+                        setCatalogSubcategory("all");
+                        setCatalogPage(1);
+                        setSelectedCatalogProductIds([]);
+                      }}
+                      disabled={catalogLoading || actionLoading}
+                    >
+                      Clear filters
+                    </Button>
+                  ) : null}
                   <Button variant="outline" className="rounded-xl" onClick={loadCatalogProducts} disabled={catalogLoading || actionLoading}>
                     Refresh
                   </Button>
@@ -2229,6 +2329,16 @@ const AdminCampaigns = () => {
                   {detail.run.archived_at ? <p className="mt-1 text-xs text-muted-foreground">Archived {formatDateTime(detail.run.archived_at)}</p> : null}
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  {detailCreativeAssets[0]?.download_url ? (
+                    <Button
+                      variant="outline"
+                      className="rounded-xl"
+                      onClick={() => void downloadCreativeAsset(detailCreativeAssets[0])}
+                      disabled={downloadingAssetKey === `${detailCreativeAssets[0].download_url}:${detailCreativeAssets[0].index}`}
+                    >
+                      <Download className="mr-2 h-4 w-4" /> Download image
+                    </Button>
+                  ) : null}
                   {detail.run.instagram_permalink ? (
                     <Button asChild variant="outline" className="rounded-xl">
                       <a href={detail.run.instagram_permalink} target="_blank" rel="noreferrer">
@@ -2450,7 +2560,10 @@ const AdminCampaigns = () => {
                     provider={detail.run.creative_json?.provider}
                     model={detail.run.creative_json?.model}
                     generatedAt={detail.run.creative_json?.generated_at}
+                    creativeAssets={detailCreativeAssets}
+                    downloadingAssetIndex={detailDownloadingAssetIndex}
                     onPreview={(index) => openPostPreview(detail.run, index)}
+                    onDownloadAsset={(asset) => void downloadCreativeAsset(asset)}
                   />
 
                   <div className="rounded-2xl border border-border p-4">
@@ -2616,6 +2729,8 @@ const AdminCampaigns = () => {
         <CampaignPostLightbox
           open
           onClose={() => setPostPreview(null)}
+          onDownloadAsset={(asset) => void downloadCreativeAsset(asset)}
+          downloadingAssetKey={downloadingAssetKey}
           {...postPreview}
         />
       ) : null}

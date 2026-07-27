@@ -271,7 +271,58 @@ test("affiliate carousel routes expose preview, queue, lifecycle, and compact li
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/cancel"));
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/retry"));
   assert.ok(routeSignatures.includes("POST /admin/bulk-review"));
+  assert.ok(routeSignatures.includes("GET /admin/:id/assets/:assetIndex/download"));
   assert.equal(campaignLinkRoutes.stack.find((layer) => layer.route)?.route.path, "/:campaignId");
+});
+
+test("campaign creative assets expose protected download metadata", () => {
+  const run = {
+    _id: "66f000000000000000000001",
+    campaign_id: "cmp-download-1",
+    tracking_json: {
+      publish_payload: {
+        asset_urls: [
+          "https://pinkpaisa.in/uploads/generated/campaigns/cmp-download-1-a.jpg",
+        ],
+      },
+    },
+    asset_urls: [
+      "https://pinkpaisa.in/uploads/generated/campaigns/cmp-download-1-a.jpg",
+      "https://pinkpaisa.in/uploads/generated/campaigns/cmp-download-1-b.png",
+    ],
+    creative_json: {
+      provider: "openai",
+      model: "gpt-image-2",
+      generated_at: "2026-07-27T00:00:00.000Z",
+      checksum_sha256: "abc123",
+    },
+  };
+
+  const assets = marketingPrivate.serialiseCreativeAssets(run);
+  assert.equal(assets.length, 2);
+  assert.deepEqual(assets.map((asset) => asset.index), [0, 1]);
+  assert.equal(assets[0].download_url, "/marketing-campaigns/admin/66f000000000000000000001/assets/0/download");
+  assert.equal(assets[0].filename, "pinkpaisa-cmp-download-1-slide-1.jpg");
+  assert.equal(assets[1].filename, "pinkpaisa-cmp-download-1-slide-2.png");
+  assert.equal(assets[0].provider, "openai");
+  assert.equal(assets[0].model, "gpt-image-2");
+});
+
+test("campaign asset storage references stay inside generated campaign directory", () => {
+  const reference = campaignAssetStoragePrivate.getGeneratedCampaignAssetReference(
+    "uploads/generated/campaigns/cmp-download-1-a.jpg"
+  );
+  assert.equal(reference.fileName, "cmp-download-1-a.jpg");
+  assert.equal(reference.storageKey, "uploads/generated/campaigns/cmp-download-1-a.jpg");
+  assert.equal(
+    campaignAssetStoragePrivate.getGeneratedCampaignAssetReference("uploads/products/not-campaign.jpg"),
+    null
+  );
+  assert.throws(
+    () => campaignAssetStoragePrivate.getGeneratedCampaignAssetReference("uploads/generated/campaigns/../secret.jpg"),
+    /Invalid campaign asset file name/
+  );
+  assert.equal(marketingPrivate.isTrustedGeneratedAssetUrlReference("https://evil.example/uploads/generated/campaigns/a.jpg"), false);
 });
 
 test("affiliate carousel caption preserves slide order, compact links, and one affiliate notice", () => {

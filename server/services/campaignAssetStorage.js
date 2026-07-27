@@ -4,6 +4,7 @@ const path = require("path");
 
 const OUTPUT_DIR = path.join(__dirname, "..", "uploads", "generated", "campaigns");
 const DEFAULT_SERVER_URL = "http://localhost:5000";
+const GENERATED_CAMPAIGN_ASSET_PREFIX = "uploads/generated/campaigns/";
 
 function trimText(value) {
   return String(value || "").trim();
@@ -19,6 +20,34 @@ function safeFileName(value) {
     throw new Error("Invalid campaign asset file name");
   }
   return fileName;
+}
+
+function getGeneratedCampaignAssetReference(value) {
+  const raw = trimText(value).replace(/\\/g, "/");
+  if (!raw) return null;
+
+  let normalized = raw;
+  try {
+    normalized = new URL(raw).pathname || "";
+  } catch (_error) {
+    normalized = raw;
+  }
+
+  normalized = normalized.replace(/^\/+/, "");
+  if (!normalized.startsWith(GENERATED_CAMPAIGN_ASSET_PREFIX)) return null;
+
+  const fileName = safeFileName(normalized.slice(GENERATED_CAMPAIGN_ASSET_PREFIX.length));
+  const filePath = path.resolve(OUTPUT_DIR, fileName);
+  const outputRoot = path.resolve(OUTPUT_DIR);
+  if (filePath !== outputRoot && !filePath.startsWith(`${outputRoot}${path.sep}`)) {
+    throw new Error("Campaign asset path is outside the campaign directory");
+  }
+
+  return {
+    fileName,
+    filePath,
+    storageKey: `${GENERATED_CAMPAIGN_ASSET_PREFIX}${fileName}`,
+  };
 }
 
 function createCampaignAssetVersion() {
@@ -50,7 +79,7 @@ async function storeCampaignAsset({ fileName, buffer }) {
     url: `${getServerBaseUrl()}/uploads/generated/campaigns/${resolvedFileName}`,
     file_path: filePath,
     storage_provider: "local",
-    storage_key: `uploads/generated/campaigns/${resolvedFileName}`,
+    storage_key: `${GENERATED_CAMPAIGN_ASSET_PREFIX}${resolvedFileName}`,
     checksum_sha256: checksum,
   };
 }
@@ -59,9 +88,9 @@ async function deleteCampaignAsset(asset = {}) {
   if (!asset.storage_key) return false;
   if (asset.storage_provider === "local") {
     const normalizedKey = trimText(asset.storage_key).replace(/\\/g, "/");
-    const expectedPrefix = "uploads/generated/campaigns/";
-    if (!normalizedKey.startsWith(expectedPrefix)) throw new Error("Campaign asset path is outside the campaign directory");
-    const resolvedPath = path.join(OUTPUT_DIR, safeFileName(normalizedKey.slice(expectedPrefix.length)));
+    const reference = getGeneratedCampaignAssetReference(normalizedKey);
+    if (!reference) throw new Error("Campaign asset path is outside the campaign directory");
+    const resolvedPath = reference.filePath;
     await fs.promises.rm(resolvedPath, { force: true });
     return true;
   }
@@ -71,6 +100,7 @@ async function deleteCampaignAsset(asset = {}) {
 module.exports = {
   createCampaignAssetVersion,
   deleteCampaignAsset,
+  getGeneratedCampaignAssetReference,
   storeCampaignAsset,
-  _private: { createCampaignAssetVersion, safeFileName, writeLocal },
+  _private: { createCampaignAssetVersion, getGeneratedCampaignAssetReference, safeFileName, writeLocal },
 };

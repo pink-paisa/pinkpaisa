@@ -7,6 +7,7 @@ const {
   enqueueAdminProductCampaign,
   enqueueApprovedProductCampaign,
   getDailyBatchRunDetail,
+  getCampaignRunAssetDownload,
   getCampaignRunDetail,
   getAffiliateCarouselTask,
   getLatestDailyBatchRun,
@@ -131,6 +132,7 @@ const listMarketingCampaignCatalogProducts = async (req, res) => {
       source: req.query.source || "all",
       readiness: req.query.readiness || "all",
       category: req.query.category || "",
+      subcategory: req.query.subcategory || "",
       affiliate_only: req.query.affiliate_only || false,
       instagram_pick: req.query.instagram_pick || false,
     });
@@ -155,6 +157,19 @@ const getLatestMarketingBatch = async (_req, res) => {
     res.json({ batch: result });
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+};
+
+const downloadMarketingCampaignAssetController = async (req, res) => {
+  try {
+    const download = await getCampaignRunAssetDownload(req.params.id, req.params.assetIndex);
+    res.setHeader("Content-Type", download.content_type);
+    res.setHeader("Content-Length", String(download.size));
+    res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+    return res.download(download.file_path, download.filename);
+  } catch (error) {
+    const status = Number(error.status || 400);
+    return res.status(status).json(campaignErrorResponse(error));
   }
 };
 
@@ -493,6 +508,7 @@ module.exports = {
   cancelMarketingCarouselController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
+  downloadMarketingCampaignAssetController,
   getMarketingBatchDetail,
   getMarketingCarouselController,
   getMarketingCampaignCalendar,

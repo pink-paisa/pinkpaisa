@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Maximize2 } from "lucide-react";
+import { AlertTriangle, Download, Maximize2 } from "lucide-react";
+
+export type CampaignCreativeAsset = {
+  index: number;
+  url: string;
+  download_url?: string | null;
+  filename?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  checksum_sha256?: string | null;
+  generated_at?: string | null;
+};
 
 const CampaignCreativePreview = ({
   title,
@@ -15,7 +26,10 @@ const CampaignCreativePreview = ({
   provider,
   model,
   generatedAt,
+  creativeAssets = [],
+  downloadingAssetIndex = null,
   onPreview,
+  onDownloadAsset,
 }: {
   title: string;
   referenceImageUrl?: string | null;
@@ -28,7 +42,10 @@ const CampaignCreativePreview = ({
   provider?: string | null;
   model?: string | null;
   generatedAt?: string | null;
+  creativeAssets?: CampaignCreativeAsset[];
+  downloadingAssetIndex?: number | null;
   onPreview?: (index: number) => void;
+  onDownloadAsset?: (asset: CampaignCreativeAsset) => void;
 }) => {
   const urls = Array.isArray(assetUrls) ? assetUrls.filter(Boolean) : [];
   const [activeIndex, setActiveIndex] = useState(0);
@@ -38,6 +55,7 @@ const CampaignCreativePreview = ({
   }, [urls.join("|")]);
 
   const selectedUrl = urls[Math.min(activeIndex, Math.max(urls.length - 1, 0))] || null;
+  const selectedAsset = creativeAssets.find((asset) => asset.index === activeIndex || asset.url === selectedUrl) || null;
   const rightsUnconfirmed = referenceRightsStatus
     && !["admin_confirmed", "owned", "licensed", "api_permitted"].includes(referenceRightsStatus);
 
@@ -49,11 +67,26 @@ const CampaignCreativePreview = ({
           {contentType ? <Badge variant="outline" className="rounded-full capitalize">{contentType.replace(/_/g, " ")}</Badge> : null}
           {ctaText ? <Badge className="rounded-full bg-[#B54777]">{ctaText}</Badge> : null}
         </div>
-        {selectedUrl && onPreview ? (
-          <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={() => onPreview(activeIndex)}>
-            <Maximize2 className="mr-2 h-4 w-4" /> Preview generated post
-          </Button>
-        ) : null}
+        <div className="flex flex-wrap gap-2">
+          {selectedAsset?.download_url && onDownloadAsset ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="rounded-lg"
+              onClick={() => onDownloadAsset(selectedAsset)}
+              disabled={downloadingAssetIndex === selectedAsset.index}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              {urls.length > 1 ? `Download slide ${activeIndex + 1}` : "Download image"}
+            </Button>
+          ) : null}
+          {selectedUrl && onPreview ? (
+            <Button type="button" size="sm" variant="outline" className="rounded-lg" onClick={() => onPreview(activeIndex)}>
+              <Maximize2 className="mr-2 h-4 w-4" /> Preview generated post
+            </Button>
+          ) : null}
+        </div>
       </div>
 
       <div className="mt-4 grid gap-4 md:grid-cols-2">
