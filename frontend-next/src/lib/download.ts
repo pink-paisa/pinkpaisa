@@ -1,4 +1,4 @@
-import { API_URL, ApiError } from "@/lib/api";
+import { API_URL, ApiError, csrfHeadersFor } from "@/lib/api";
 
 function getFileNameFromContentDisposition(value: string | null) {
   if (!value) return "";
@@ -8,8 +8,21 @@ function getFileNameFromContentDisposition(value: string | null) {
   return plainMatch?.[1]?.trim() || "";
 }
 
-export async function downloadApiFile(path: string, fallbackFileName = "pinkpaisa-download") {
+export async function downloadApiFile(
+  path: string,
+  fallbackFileName = "pinkpaisa-download",
+  init: RequestInit = {},
+) {
+  const method = String(init.method || "GET");
+  const headers = new Headers(init.headers || {});
+  const csrfHeaders = await csrfHeadersFor(method);
+  Object.entries(csrfHeaders).forEach(([key, value]) => {
+    headers.set(key, value);
+  });
+
   const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers,
     credentials: "include",
   });
 
@@ -29,4 +42,12 @@ export async function downloadApiFile(path: string, fallbackFileName = "pinkpais
   link.click();
   link.remove();
   window.URL.revokeObjectURL(objectUrl);
+}
+
+export function downloadApiPostFile(path: string, body: unknown, fallbackFileName = "pinkpaisa-download") {
+  return downloadApiFile(path, fallbackFileName, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }

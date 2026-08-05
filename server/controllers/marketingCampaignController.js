@@ -1,3 +1,4 @@
+const archiver = require("archiver");
 const {
   archiveCampaignRun,
   archiveCampaignRuns,
@@ -8,6 +9,7 @@ const {
   enqueueApprovedProductCampaign,
   getDailyBatchRunDetail,
   getCampaignRunAssetDownload,
+  getCampaignRunsAssetZipManifest,
   getCampaignRunDetail,
   getAffiliateCarouselTask,
   getLatestDailyBatchRun,
@@ -83,6 +85,7 @@ const listMarketingCampaignRuns = async (req, res) => {
       readiness: req.query.readiness || "all",
       date_from: req.query.date_from || "",
       date_to: req.query.date_to || "",
+      readiness_code: req.query.readiness_code || "",
       affiliate_only: req.query.affiliate_only || false,
       include_archived: req.query.include_archived || false,
     });
@@ -195,6 +198,41 @@ const downloadMarketingCampaignAssetController = async (req, res) => {
     res.setHeader("Content-Length", String(download.size));
     res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
     return res.download(download.file_path, download.filename);
+  } catch (error) {
+    const status = Number(error.status || 400);
+    return res.status(status).json(campaignErrorResponse(error));
+  }
+};
+
+const downloadMarketingCampaignAssetsZipController = async (req, res) => {
+  let archive;
+  try {
+    const manifest = await getCampaignRunsAssetZipManifest(req.body?.run_ids || [], {
+      mode: req.body?.mode || "primary_only",
+    });
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${manifest.filename}"`);
+    res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+    res.setHeader("X-PinkPaisa-Downloaded-Assets", String(manifest.entries.length));
+    res.setHeader("X-PinkPaisa-Skipped-Assets", String(manifest.skipped.length));
+
+    archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", (error) => {
+      if (!res.headersSent) {
+        res.status(500).json(campaignErrorResponse(error));
+      } else {
+        res.destroy(error);
+      }
+    });
+    archive.pipe(res);
+    manifest.entries.forEach((entry) => {
+      archive.file(entry.file_path, {
+        name: entry.zip_entry_name,
+        date: new Date(),
+      });
+    });
+    return archive.finalize();
   } catch (error) {
     const status = Number(error.status || 400);
     return res.status(status).json(campaignErrorResponse(error));
@@ -577,6 +615,7 @@ module.exports = {
   bulkRegenerateMarketingCampaignsController,
   bulkReviewMarketingCampaignsController,
   cancelMarketingCarouselController,
+  downloadMarketingCampaignAssetsZipController,
   createMarketingCampaignFromApprovedProduct,
   createMarketingCampaignFromProductSource,
   downloadMarketingCampaignAssetController,

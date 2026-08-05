@@ -272,6 +272,7 @@ test("affiliate carousel routes expose preview, queue, lifecycle, and compact li
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/retry"));
   assert.ok(routeSignatures.includes("POST /admin/bulk-review"));
   assert.ok(routeSignatures.includes("POST /admin/bulk-regenerate"));
+  assert.ok(routeSignatures.includes("POST /admin/assets/download-zip"));
   assert.ok(routeSignatures.includes("GET /admin/:id/assets/:assetIndex/download"));
   assert.equal(campaignLinkRoutes.stack.find((layer) => layer.route)?.route.path, "/:campaignId");
 });
@@ -322,6 +323,28 @@ test("campaign creative assets expose protected download metadata", () => {
   assert.equal(assets[1].filename, "pinkpaisa-cmp-download-1-slide-2.png");
   assert.equal(assets[0].provider, "openai");
   assert.equal(assets[0].model, "gpt-image-2");
+});
+
+test("campaign asset zip helpers validate selected runs and filenames", () => {
+  const runA = "66f000000000000000000001";
+  const runB = "66f000000000000000000002";
+  assert.deepEqual(marketingPrivate.normalizeCampaignAssetZipRunIds([runA, runA, runB]), [runA, runB]);
+  assert.throws(
+    () => marketingPrivate.normalizeCampaignAssetZipRunIds([]),
+    /Select at least one campaign/
+  );
+  assert.throws(
+    () => marketingPrivate.normalizeCampaignAssetZipRunIds(["not-an-id"]),
+    /campaign IDs are invalid/
+  );
+  assert.throws(
+    () => marketingPrivate.normalizeCampaignAssetZipRunIds(Array.from({ length: 51 }, (_, index) => index.toString(16).padStart(24, "0"))),
+    /50 or fewer/
+  );
+  assert.match(
+    marketingPrivate.buildCampaignAssetZipFileName(),
+    /^pinkpaisa-campaign-images-\d{4}-\d{2}-\d{2}\.zip$/
+  );
 });
 
 test("campaign asset storage references stay inside generated campaign directory", () => {

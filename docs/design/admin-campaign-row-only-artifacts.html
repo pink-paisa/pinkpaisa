@@ -1,0 +1,766 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pink Paisa Campaign Row UI Artifacts</title>
+  <style>
+    :root {
+      --page: #f7f2f4;
+      --card: #ffffff;
+      --soft: #fbf7f8;
+      --ink: #27111e;
+      --muted: #7c6874;
+      --line: #e8dbe1;
+      --brand: #c65380;
+      --brand-dark: #8f2f58;
+      --green: #12764d;
+      --green-soft: #e8f8ef;
+      --amber: #945d13;
+      --amber-soft: #fff3d5;
+      --red: #b4234a;
+      --red-soft: #fff1f4;
+      --blue: #235ea8;
+      --blue-soft: #edf5ff;
+      --shadow: 0 24px 70px rgba(39, 17, 30, 0.11);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(198, 83, 128, 0.12), transparent 30%),
+        var(--page);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .board {
+      width: min(1480px, 100%);
+      margin: 0 auto;
+      padding: 38px;
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 24px;
+      margin-bottom: 26px;
+    }
+
+    h1, h2, p { margin: 0; }
+
+    h1 {
+      max-width: 760px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(36px, 5vw, 64px);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    .header p {
+      max-width: 760px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.55;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .pill.green { background: var(--green-soft); color: var(--green); }
+    .pill.amber { background: var(--amber-soft); color: var(--amber); }
+    .pill.red { background: var(--red-soft); color: var(--red); }
+    .pill.blue { background: var(--blue-soft); color: var(--blue); }
+    .pill.gray { background: #f0ecef; color: #685762; }
+
+    .meta {
+      border: 1px solid var(--line);
+      background: var(--card);
+      box-shadow: 0 10px 30px rgba(39, 17, 30, 0.07);
+    }
+
+    .stack {
+      display: grid;
+      gap: 30px;
+    }
+
+    .artifact {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 30px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+    }
+
+    .artifact-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #ffffff, #fbf7f8);
+      padding: 18px 22px;
+    }
+
+    .kicker {
+      color: var(--brand-dark);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .artifact-title {
+      margin-top: 4px;
+      font-size: 18px;
+      font-weight: 900;
+    }
+
+    .canvas {
+      padding: 22px;
+      background: var(--soft);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns:
+        minmax(340px, 1.4fr)
+        minmax(210px, 0.75fr)
+        minmax(180px, 0.62fr)
+        minmax(230px, 0.82fr)
+        minmax(150px, 0.5fr);
+      gap: 14px;
+      align-items: stretch;
+      border: 1px solid var(--line);
+      border-radius: 26px;
+      background: #fff;
+      padding: 15px;
+    }
+
+    .row.compact {
+      grid-template-columns:
+        minmax(380px, 1.7fr)
+        minmax(180px, 0.62fr)
+        minmax(240px, 0.85fr)
+        minmax(140px, 0.46fr);
+    }
+
+    .row.selected {
+      border-color: rgba(198, 83, 128, 0.55);
+      box-shadow: inset 4px 0 0 var(--brand), 0 18px 36px rgba(198, 83, 128, 0.10);
+    }
+
+    .row.ready {
+      border-color: rgba(18, 118, 77, 0.35);
+    }
+
+    .row.blocked {
+      border-color: rgba(180, 35, 74, 0.28);
+    }
+
+    .product {
+      display: flex;
+      gap: 13px;
+      min-width: 0;
+    }
+
+    .checkbox {
+      width: 18px;
+      height: 18px;
+      margin-top: 4px;
+      border: 2px solid var(--brand);
+      border-radius: 6px;
+      background: #fff;
+      flex: 0 0 auto;
+    }
+
+    .checkbox.checked {
+      display: grid;
+      place-items: center;
+      background: var(--brand);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .thumb {
+      overflow: hidden;
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(145deg, rgba(198, 83, 128, 0.12), rgba(35, 94, 168, 0.11)),
+        #fff;
+    }
+
+    .product-thumb {
+      width: 68px;
+      height: 80px;
+      border-radius: 18px;
+    }
+
+    .creative-thumb {
+      width: 62px;
+      height: 82px;
+      border-radius: 16px;
+      position: relative;
+    }
+
+    .thumb::before {
+      content: "";
+      display: block;
+      width: 56%;
+      height: 58%;
+      margin: 18% auto 0;
+      border-radius: 16px;
+      border: 1px solid rgba(39, 17, 30, 0.08);
+      background: linear-gradient(160deg, #f6cad9, #fff, #dcecff);
+    }
+
+    .content {
+      min-width: 0;
+    }
+
+    .title {
+      display: -webkit-box;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      font-weight: 900;
+      line-height: 1.25;
+    }
+
+    .slug {
+      margin-top: 5px;
+      overflow-wrap: anywhere;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .caption {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      align-items: center;
+      margin-top: 9px;
+    }
+
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--soft);
+      padding: 12px;
+    }
+
+    .label {
+      margin-bottom: 9px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+
+    .creative {
+      display: flex;
+      gap: 11px;
+      min-width: 0;
+    }
+
+    .link-button {
+      display: inline-flex;
+      align-items: center;
+      margin-top: 8px;
+      color: var(--brand-dark);
+      font-size: 12px;
+      font-weight: 850;
+    }
+
+    .issue {
+      margin-top: 10px;
+      border: 1px solid #f0bdcc;
+      border-radius: 14px;
+      background: var(--red-soft);
+      padding: 9px 10px;
+      color: var(--red);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .warning {
+      margin-top: 10px;
+      border: 1px solid #f4d99c;
+      border-radius: 14px;
+      background: var(--amber-soft);
+      padding: 9px 10px;
+      color: var(--amber);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .ok-note {
+      margin-top: 10px;
+      border: 1px solid #bbe6cd;
+      border-radius: 14px;
+      background: var(--green-soft);
+      padding: 9px 10px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .actions {
+      display: grid;
+      gap: 8px;
+      align-content: start;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      color: var(--ink);
+      padding: 0 14px;
+      font-size: 13px;
+      font-weight: 900;
+      white-space: nowrap;
+      box-shadow: 0 8px 18px rgba(39, 17, 30, 0.06);
+    }
+
+    .btn.primary {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: #fff;
+    }
+
+    .btn.success {
+      border-color: var(--green);
+      background: var(--green);
+      color: #fff;
+    }
+
+    .btn.danger {
+      border-color: #f0bdcc;
+      background: var(--red-soft);
+      color: var(--red);
+    }
+
+    .btn.icon {
+      min-width: 42px;
+      padding: 0;
+      font-size: 18px;
+    }
+
+    .action-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      border: 1px solid rgba(198, 83, 128, 0.25);
+      border-radius: 18px;
+      background: #fff7fa;
+      padding: 10px;
+    }
+
+    .mobile-wrap {
+      width: min(390px, 100%);
+      margin: 0 auto;
+      border: 10px solid #24151d;
+      border-radius: 36px;
+      background: #24151d;
+      box-shadow: 0 26px 60px rgba(39, 17, 30, 0.20);
+      overflow: hidden;
+    }
+
+    .mobile-top {
+      height: 28px;
+      background: #24151d;
+    }
+
+    .mobile-body {
+      background: var(--soft);
+      padding: 14px;
+    }
+
+    .mobile-row {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: #fff;
+      padding: 13px;
+    }
+
+    .mobile-product {
+      display: grid;
+      grid-template-columns: 18px 68px minmax(0, 1fr);
+      gap: 11px;
+      align-items: start;
+    }
+
+    .mobile-panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 9px;
+      margin-top: 12px;
+    }
+
+    .mobile-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 42px;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .row-note {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 1120px) {
+      .row,
+      .row.compact {
+        grid-template-columns: 1fr;
+      }
+
+      .actions {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .board { padding: 18px; }
+      .header,
+      .artifact-head {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .actions {
+        grid-template-columns: 1fr;
+      }
+
+      .mobile-panels {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="board">
+    <header class="header">
+      <div>
+        <h1>Campaign Row UI Artifacts</h1>
+        <p>Five visual row-only design options for the admin campaign list. These focus on long product titles, blocker readability, row actions, selection state, and mobile layout.</p>
+      </div>
+      <span class="pill meta">Rows only</span>
+    </header>
+
+    <section class="stack">
+      <article class="artifact">
+        <div class="artifact-head">
+          <div>
+            <p class="kicker">Artifact 01</p>
+            <h2 class="artifact-title">Default Desktop Row</h2>
+          </div>
+          <span class="pill blue">Balanced row</span>
+        </div>
+        <div class="canvas">
+          <div class="row">
+            <div class="product">
+              <span class="checkbox"></span>
+              <div class="thumb product-thumb"></div>
+              <div class="content">
+                <p class="title">PUMP'D Women's Slim Fit Workout Jacket with Zipper</p>
+                <p class="slug">pumpd-womens-slim-fit-workout-jacket-with-zipper</p>
+                <div class="badges">
+                  <span class="pill amber">Affiliate</span>
+                  <span class="pill gray">PUMP'D</span>
+                </div>
+                <p class="caption" style="margin-top: 9px;">Batch: Queued | 14 Jul 2026, 9:32 pm</p>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Creative</p>
+              <div class="creative">
+                <div class="thumb creative-thumb"></div>
+                <div>
+                  <p class="title" style="-webkit-line-clamp: 1;">Creative ready</p>
+                  <p class="caption">1 asset</p>
+                  <span class="pill gray" style="margin-top: 7px;">Single image</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Workflow</p>
+              <div class="badges" style="margin-top: 0;">
+                <span class="pill green">Approved</span>
+                <span class="pill green">Ready</span>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Publish</p>
+              <span class="pill green">Ready</span>
+              <p class="caption" style="margin-top: 10px;">No blockers. Instagram account connected.</p>
+            </div>
+
+            <div class="actions">
+              <button class="btn">Details</button>
+              <button class="btn success">Post now</button>
+              <button class="btn">More</button>
+            </div>
+          </div>
+          <p class="row-note">Use this as the standard row when everything is normal. Product title gets the most width; actions stay fixed to three buttons.</p>
+        </div>
+      </article>
+
+      <article class="artifact">
+        <div class="artifact-head">
+          <div>
+            <p class="kicker">Artifact 02</p>
+            <h2 class="artifact-title">Blocked Row With Clear Issue</h2>
+          </div>
+          <span class="pill red">Needs fix</span>
+        </div>
+        <div class="canvas">
+          <div class="row blocked">
+            <div class="product">
+              <span class="checkbox"></span>
+              <div class="thumb product-thumb"></div>
+              <div class="content">
+                <p class="title">PUMP'D Women's Slim Fit Workout Jacket with Zipper</p>
+                <p class="slug">pumpd-womens-slim-fit-workout-jacket-with-zipper</p>
+                <div class="badges">
+                  <span class="pill amber">Affiliate</span>
+                  <span class="pill gray">Haircare campaign</span>
+                </div>
+                <p class="caption" style="margin-top: 9px;">Updated 15 Jul 2026, 8:19 pm</p>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Creative</p>
+              <div class="creative">
+                <div class="thumb creative-thumb"></div>
+                <div>
+                  <p class="title" style="-webkit-line-clamp: 1;">Creative ready</p>
+                  <p class="caption">1 local asset</p>
+                  <span class="pill red" style="margin-top: 7px;">Localhost</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Workflow</p>
+              <div class="badges" style="margin-top: 0;">
+                <span class="pill green">Approved</span>
+                <span class="pill red">Blocked</span>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Publish blocker</p>
+              <span class="pill red">Cannot post</span>
+              <div class="issue">Instagram creative media must be a public HTTPS URL. Current image is local server media.</div>
+            </div>
+
+            <div class="actions">
+              <button class="btn">Details</button>
+              <button class="btn danger">Fix blockers</button>
+              <button class="btn">More</button>
+            </div>
+          </div>
+          <p class="row-note">Use a red row edge and one plain-language blocker. Do not make admins hunt inside a modal to understand why posting is blocked.</p>
+        </div>
+      </article>
+
+      <article class="artifact">
+        <div class="artifact-head">
+          <div>
+            <p class="kicker">Artifact 03</p>
+            <h2 class="artifact-title">Compact Operations Row</h2>
+          </div>
+          <span class="pill green">Less clutter</span>
+        </div>
+        <div class="canvas">
+          <div class="row compact ready">
+            <div class="product">
+              <span class="checkbox"></span>
+              <div class="thumb product-thumb"></div>
+              <div class="content">
+                <p class="title">L'Oreal Paris Total Repair 5 Shampoo for Damaged Hair with Pro-Keratin and Ceramide</p>
+                <p class="slug">loreal-paris-total-repair-5-shampoo-damaged-hair</p>
+                <div class="badges">
+                  <span class="pill amber">Affiliate</span>
+                  <span class="pill blue">Beauty and Self Care</span>
+                  <span class="pill gray">Haircare</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Creative</p>
+              <div class="creative">
+                <div class="thumb creative-thumb"></div>
+                <div>
+                  <p class="caption">Ready</p>
+                  <span class="pill gray" style="margin-top: 7px;">1 image</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Status summary</p>
+              <div class="badges" style="margin-top: 0;">
+                <span class="pill green">Approved</span>
+                <span class="pill green">HTTPS media</span>
+                <span class="pill green">Disclosure</span>
+              </div>
+            </div>
+
+            <div class="actions">
+              <button class="btn">Details</button>
+              <button class="btn success">Schedule</button>
+              <button class="btn">More</button>
+            </div>
+          </div>
+          <p class="row-note">This is the cleanest production row: product, creative, status summary, and exactly three actions.</p>
+        </div>
+      </article>
+
+      <article class="artifact">
+        <div class="artifact-head">
+          <div>
+            <p class="kicker">Artifact 04</p>
+            <h2 class="artifact-title">Selected Row State</h2>
+          </div>
+          <span class="pill blue">Bulk ready</span>
+        </div>
+        <div class="canvas">
+          <div class="row compact selected">
+            <div class="product">
+              <span class="checkbox checked">✓</span>
+              <div class="thumb product-thumb"></div>
+              <div class="content">
+                <p class="title">CeraVe Hydrating Cleanser for Normal to Dry Skin with Hyaluronic Acid and Ceramides</p>
+                <p class="slug">cerave-hydrating-cleanser-normal-dry-skin</p>
+                <div class="badges">
+                  <span class="pill amber">Affiliate</span>
+                  <span class="pill green">Ready</span>
+                  <span class="pill gray">Skincare</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel">
+              <p class="label">Creative</p>
+              <div class="creative">
+                <div class="thumb creative-thumb"></div>
+                <div>
+                  <p class="caption">AI generated</p>
+                  <span class="pill gray" style="margin-top: 7px;">2 slides</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="action-strip">
+              <button class="btn">Scan</button>
+              <button class="btn">Regenerate</button>
+              <button class="btn primary">Download ZIP</button>
+              <button class="btn">Carousel</button>
+            </div>
+
+            <div class="actions">
+              <button class="btn">Details</button>
+              <button class="btn">More</button>
+            </div>
+          </div>
+          <p class="row-note">Selected rows should visibly change state. Bulk actions can appear in a toolbar above the list; this mock shows the same visual language at row level.</p>
+        </div>
+      </article>
+
+      <article class="artifact">
+        <div class="artifact-head">
+          <div>
+            <p class="kicker">Artifact 05</p>
+            <h2 class="artifact-title">Mobile Row Card</h2>
+          </div>
+          <span class="pill green">375px safe</span>
+        </div>
+        <div class="canvas">
+          <div class="mobile-wrap">
+            <div class="mobile-top"></div>
+            <div class="mobile-body">
+              <div class="mobile-row">
+                <div class="mobile-product">
+                  <span class="checkbox"></span>
+                  <div class="thumb product-thumb"></div>
+                  <div class="content">
+                    <p class="title">PUMP'D Women's Slim Fit Workout Jacket with Zipper</p>
+                    <p class="slug">pumpd-womens-slim-fit-workout-jacket-with-zipper</p>
+                    <div class="badges">
+                      <span class="pill amber">Affiliate</span>
+                      <span class="pill red">Blocked</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mobile-panels">
+                  <div class="panel">
+                    <p class="label">Creative</p>
+                    <p class="caption">1 asset ready</p>
+                    <span class="pill red" style="margin-top: 7px;">Local URL</span>
+                  </div>
+                  <div class="panel">
+                    <p class="label">Updated</p>
+                    <p class="caption">15 Jul, 8:19 pm</p>
+                    <span class="pill green" style="margin-top: 7px;">Approved</span>
+                  </div>
+                </div>
+
+                <div class="issue">Creative media must be public HTTPS before posting.</div>
+
+                <div class="mobile-actions">
+                  <button class="btn">Details</button>
+                  <button class="btn danger">Fix</button>
+                  <button class="btn icon">...</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <p class="row-note">Mobile rows become cards. No horizontal scroll, no five-column table, and no long action labels.</p>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

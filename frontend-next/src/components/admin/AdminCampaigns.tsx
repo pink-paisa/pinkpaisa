@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api";
-import { downloadApiFile } from "@/lib/download";
+import { downloadApiFile, downloadApiPostFile } from "@/lib/download";
 import { useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -8,9 +8,17 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 import { EmptyState, LoadingSpinner, StatusBadge } from "./AdminShared";
-import { AlertTriangle, Archive, CalendarDays, CheckCircle2, Copy, Download, Eye, ExternalLink, GalleryHorizontalEnd, Link as LinkIcon, Maximize2, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
+import { AlertTriangle, Archive, CalendarClock, CalendarDays, CheckCircle2, Copy, Download, Eye, ExternalLink, GalleryHorizontalEnd, Link as LinkIcon, Maximize2, MoreHorizontal, Rocket, RotateCcw, Search, Sparkles, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import InstagramConnectionPanel from "./InstagramConnectionPanel";
 import CampaignAutomationPanel, {
@@ -301,11 +309,24 @@ const EMPTY_PLACEHOLDER = "-";
 const INSTAGRAM_API_CAROUSEL_MIN_ITEMS = 2;
 const INSTAGRAM_API_CAROUSEL_MAX_ITEMS = 10;
 const INSTAGRAM_APP_CAROUSEL_MAX_ITEMS = 20;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 
 const formatDateTime = (value: string | null | undefined) => {
   if (!value) return EMPTY_PLACEHOLDER;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? EMPTY_PLACEHOLDER : date.toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+};
+
+const toIstDateTimeInput = (value: number | string | Date) => {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Date(date.getTime() + IST_OFFSET_MS).toISOString().slice(0, 16);
+};
+
+const fromIstDateTimeInput = (value: string) => {
+  if (!value) return null;
+  const date = new Date(`${value}:00+05:30`);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 };
 
 const canSelectCampaignRun = (run: CampaignRun) => (
@@ -415,6 +436,8 @@ const getQuickFilterParams = (quickFilter: string): Record<string, string> => {
   if (quickFilter === "published") return { status: "published" };
   if (quickFilter === "failed") return { status: "failed" };
   if (quickFilter === "affiliate") return { affiliate_only: "true" };
+  if (quickFilter === "missing_https_media") return { readiness: "blocked", readiness_code: "non_https_media_url" };
+  if (quickFilter === "needs_product_fix") return { readiness: "blocked", readiness_code: "product_or_affiliate" };
   if (quickFilter === "archived") return { include_archived: "only" };
   return {};
 };
@@ -486,6 +509,10 @@ const AdminCampaigns = () => {
   const [lifecycleAction, setLifecycleAction] = useState<"archive" | "restore" | "purge" | null>(null);
   const [bulkArchiveOpen, setBulkArchiveOpen] = useState(false);
   const [bulkReviewOpen, setBulkReviewOpen] = useState(false);
+  const [bulkScheduleOpen, setBulkScheduleOpen] = useState(false);
+  const [bulkScheduleInput, setBulkScheduleInput] = useState("");
+  const [scheduleDialogRun, setScheduleDialogRun] = useState<CampaignRun | null>(null);
+  const [scheduleInput, setScheduleInput] = useState("");
   const [carouselComposerOpen, setCarouselComposerOpen] = useState(false);
   const [carouselTask, setCarouselTask] = useState<CarouselTaskResponse | null>(null);
   const [carouselTaskLoading, setCarouselTaskLoading] = useState(false);
@@ -530,6 +557,7 @@ const AdminCampaigns = () => {
         limit: "10",
       });
       if (quickParams.readiness) params.set("readiness", quickParams.readiness);
+      if (quickParams.readiness_code) params.set("readiness_code", quickParams.readiness_code);
       if (quickParams.affiliate_only) params.set("affiliate_only", quickParams.affiliate_only);
       if (quickParams.include_archived) params.set("include_archived", quickParams.include_archived);
       const response = await apiFetch<CampaignListResponse>(`/marketing-campaigns/admin?${params.toString()}`);
@@ -656,9 +684,11 @@ const AdminCampaigns = () => {
       } else {
         setCarouselTask(null);
       }
+      return response;
     } catch (error) {
       if (!silent) toast.error(error instanceof Error ? error.message : "Could not load campaign detail");
       if (open) setDetailOpen(false);
+      return null;
     } finally {
       if (!silent) setDetailLoading(false);
     }
@@ -736,7 +766,7 @@ const AdminCampaigns = () => {
 
   useCampaignPolling({
     pollList: () => Promise.all([loadCampaigns({ silent: true }), loadQueueHealth({ silent: true })]).then(() => undefined),
-    pollDetail: () => selectedId ? loadDetail(selectedId, { silent: true, open: false }) : undefined,
+    pollDetail: () => selectedId ? loadDetail(selectedId, { silent: true, open: false }).then(() => undefined) : undefined,
     detailEnabled: detailPollingActive,
   });
 
@@ -914,6 +944,310 @@ const AdminCampaigns = () => {
       toast.error(error instanceof Error ? error.message : "Could not download generated image");
     } finally {
       setDownloadingAssetKey(null);
+    }
+  };
+
+  const refreshAfterRunAction = async (runId: string) => {
+    await Promise.all([
+      loadCampaigns({ silent: true }),
+      loadCalendar(),
+      selectedId === runId ? loadDetail(runId, { silent: true, open: false }) : Promise.resolve(null),
+    ]);
+  };
+
+  const isPublishedRun = (run: CampaignRun) => (
+    run.publish_status === "published" || run.status === "published" || Boolean(run.instagram_media_id)
+  );
+
+  const canPostRunFromCard = (run: CampaignRun) => (
+    run.review_status === "approved"
+    && !run.archived_at
+    && !run.carousel_task_id
+    && !isPublishedRun(run)
+    && run.status !== "publishing"
+    && run.publish_status !== "publishing"
+    && ["ready", "failed", "scheduled", "draft"].includes(run.publish_status || "")
+    && run.publish_readiness?.can_publish === true
+    && connection?.is_connected === true
+  );
+
+  const canRegenerateRunFromCard = (run: CampaignRun) => (
+    !run.archived_at
+    && !run.carousel_task_id
+    && run.status !== "publishing"
+    && run.status !== "published"
+    && run.publish_status !== "publishing"
+    && run.publish_status !== "published"
+    && !run.instagram_media_id
+    && run.next_action !== "verify_instagram_publish"
+  );
+
+  const canResetRunTask = (run: CampaignRun) => (
+    run.task_counts?.running
+    || run.status === "batch_running"
+    || run.status === "publishing"
+    || run.publish_status === "publishing"
+  );
+
+  const getRunProductUrl = (run: CampaignRun) => {
+    if (!run.product_slug || typeof window === "undefined") return null;
+    return `${window.location.origin}/product/${encodeURIComponent(run.product_slug)}`;
+  };
+
+  const copyText = async (value: string | null | undefined, label: string) => {
+    if (!value) {
+      toast.error(`${label} is not available yet`);
+      return;
+    }
+    await navigator.clipboard.writeText(value);
+    toast.success(`${label} copied`);
+  };
+
+  const openRunDetails = async (run: CampaignRun) => {
+    await loadDetail(run.id);
+  };
+
+  const openRunFixPanel = async (run: CampaignRun) => {
+    await loadDetail(run.id);
+  };
+
+  const openRunLifecycleAction = async (run: CampaignRun, action: "archive" | "restore" | "purge") => {
+    const response = await loadDetail(run.id, { silent: false, open: false });
+    if (!response) return;
+    setLifecycleAction(action);
+  };
+
+  const scanRunReadiness = async (run: CampaignRun) => {
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{ results: Array<{ ok: boolean; message?: string; run?: CampaignRun }> }>("/marketing-campaigns/admin/readiness-scan", {
+        method: "POST",
+        body: JSON.stringify({ run_ids: [run.id] }),
+      });
+      const result = response.results?.[0];
+      if (result?.ok) toast.success(`${run.product_title || "Campaign"} passed readiness scan`);
+      else toast.error(result?.message || "Campaign is blocked. Open details to review blockers.");
+      await refreshAfterRunAction(run.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not scan campaign readiness");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const retryRunById = async (run: CampaignRun) => {
+    try {
+      setActionLoading(true);
+      await apiFetch(`/marketing-campaigns/admin/${run.id}/retry`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      toast.success("Campaign task re-queued");
+      await refreshAfterRunAction(run.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not retry campaign");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const resetRunTaskById = async (run: CampaignRun) => {
+    try {
+      setActionLoading(true);
+      const response = await apiFetch<{ message?: string }>(`/marketing-campaigns/admin/${run.id}/reset-stuck`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      toast.success(response.message || "Stuck campaign task reset");
+      await refreshAfterRunAction(run.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not reset the stuck task");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const regenerateRunById = async (run: CampaignRun, stage: "creative" | "caption" = "creative") => {
+    if (!canRegenerateRunFromCard(run)) {
+      toast.error("This campaign cannot be regenerated from the list. Open details to review its status.");
+      return;
+    }
+    try {
+      setActionLoading(true);
+      await apiFetch(`/marketing-campaigns/admin/${run.id}/regenerate`, {
+        method: "POST",
+        body: JSON.stringify({ stage }),
+      });
+      toast.success(stage === "caption" ? "Caption regeneration started" : "Image and caption regeneration started");
+      await refreshAfterRunAction(run.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not regenerate campaign");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const publishRunNow = async (run: CampaignRun) => {
+    if (!canPostRunFromCard(run)) {
+      const firstBlocker = getReadinessBlockers(run)[0]?.message
+        || (connection?.is_connected !== true ? "Instagram must be connected before publishing." : "Open details to review publish blockers.");
+      toast.error(firstBlocker);
+      return;
+    }
+    try {
+      setActionLoading(true);
+      await apiFetch(`/marketing-campaigns/admin/${run.id}/post`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      toast.success("Instagram publish queued");
+      await refreshAfterRunAction(run.id);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not publish to Instagram");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const openScheduleDialog = (run: CampaignRun) => {
+    if (!canPostRunFromCard(run)) {
+      const firstBlocker = getReadinessBlockers(run)[0]?.message
+        || (connection?.is_connected !== true ? "Instagram must be connected before scheduling." : "Open details to review schedule blockers.");
+      toast.error(firstBlocker);
+      return;
+    }
+    setScheduleDialogRun(run);
+    setScheduleInput(toIstDateTimeInput(Date.now() + (10 * 60 * 1000)));
+  };
+
+  const scheduleSelectedRun = async () => {
+    if (!scheduleDialogRun) return;
+    const scheduledFor = fromIstDateTimeInput(scheduleInput);
+    if (!scheduledFor) {
+      toast.error("Choose a valid schedule time");
+      return;
+    }
+    try {
+      setActionLoading(true);
+      await apiFetch(`/marketing-campaigns/admin/${scheduleDialogRun.id}/schedule`, {
+        method: "POST",
+        body: JSON.stringify({ scheduled_for: scheduledFor }),
+      });
+      toast.success("Campaign scheduled for Instagram");
+      const runId = scheduleDialogRun.id;
+      setScheduleDialogRun(null);
+      setScheduleInput("");
+      await refreshAfterRunAction(runId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not schedule campaign");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const selectedRunsCanSchedule = selectedRunIds.length > 0
+    && selectedVisibleRuns.length === selectedRunIds.length
+    && selectedVisibleRuns.every((run) => canPostRunFromCard(run));
+
+  const bulkScheduleHint = selectedVisibleRuns.length !== selectedRunIds.length
+    ? "Only campaigns visible in the current list can be scheduled in bulk."
+    : selectedVisibleRuns.some((run) => !canPostRunFromCard(run))
+      ? "Every selected campaign must be approved, unblocked, unpublished, and connected to Instagram."
+      : "Schedule selected campaigns for the same IST time.";
+
+  const openBulkScheduleDialog = () => {
+    if (!selectedRunsCanSchedule) {
+      toast.error(bulkScheduleHint);
+      return;
+    }
+    setBulkScheduleInput(toIstDateTimeInput(Date.now() + (10 * 60 * 1000)));
+    setBulkScheduleOpen(true);
+  };
+
+  const scheduleSelectedRuns = async () => {
+    const scheduledFor = fromIstDateTimeInput(bulkScheduleInput);
+    if (!scheduledFor) {
+      toast.error("Choose a valid schedule time");
+      return;
+    }
+    if (!selectedRunsCanSchedule) {
+      toast.error(bulkScheduleHint);
+      return;
+    }
+
+    try {
+      setActionLoading(true);
+      const results = await Promise.allSettled(selectedVisibleRuns.map((run) => (
+        apiFetch(`/marketing-campaigns/admin/${run.id}/schedule`, {
+          method: "POST",
+          body: JSON.stringify({ scheduled_for: scheduledFor }),
+        }).then(() => run.id)
+      )));
+      const scheduledIds = new Set(
+        results
+          .filter((result): result is PromiseFulfilledResult<string> => result.status === "fulfilled")
+          .map((result) => result.value)
+      );
+      const failed = results.filter((result) => result.status === "rejected");
+      setSelectedRunIds((current) => current.filter((id) => !scheduledIds.has(id)));
+      setBulkScheduleOpen(false);
+      setBulkScheduleInput("");
+      if (scheduledIds.size) toast.success(`Scheduled ${scheduledIds.size} campaign${scheduledIds.size === 1 ? "" : "s"}`);
+      if (failed.length) {
+        const firstFailure = failed[0] as PromiseRejectedResult;
+        const message = firstFailure.reason instanceof Error ? firstFailure.reason.message : "Some selected campaigns could not be scheduled";
+        toast.error(`${failed.length} campaign${failed.length === 1 ? "" : "s"} could not be scheduled. ${message}`);
+      }
+      await Promise.all([loadCampaigns({ silent: true }), loadCalendar()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not schedule selected campaigns");
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const downloadRunPrimaryAsset = async (run: CampaignRun) => {
+    const asset = getCampaignCreativeAssets(run)[0];
+    if (!asset) {
+      toast.error("No generated image is available yet");
+      return;
+    }
+    await downloadCreativeAsset(asset);
+  };
+
+  const downloadSelectedImages = async () => {
+    if (!selectedRunIds.length) {
+      toast.error("Select at least one campaign to download");
+      return;
+    }
+    if (selectedVisibleRuns.length !== selectedRunIds.length) {
+      toast.error("Only campaigns visible in the current list can be downloaded in bulk");
+      return;
+    }
+
+    const selectedWithAssets = selectedVisibleRuns.filter((run) => getCampaignCreativeAssets(run).length > 0);
+    if (!selectedWithAssets.length) {
+      toast.error("Selected campaigns do not have downloadable generated images");
+      return;
+    }
+
+    try {
+      setActionLoading(true);
+      await downloadApiPostFile(
+        "/marketing-campaigns/admin/assets/download-zip",
+        { run_ids: selectedRunIds, mode: "all_assets" },
+        "pinkpaisa-campaign-images.zip",
+      );
+      const missingAssetCount = selectedRunIds.length - selectedWithAssets.length;
+      toast.success(
+        missingAssetCount
+          ? `ZIP download started. ${missingAssetCount} selected campaign${missingAssetCount === 1 ? "" : "s"} had no generated image.`
+          : "ZIP download started",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not download selected campaign images");
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -1414,6 +1748,8 @@ const AdminCampaigns = () => {
     { id: "published", label: "Published" },
     { id: "failed", label: "Failed" },
     { id: "affiliate", label: "Affiliate only" },
+    { id: "missing_https_media", label: "Missing HTTPS media" },
+    { id: "needs_product_fix", label: "Needs product fix" },
     { id: "archived", label: "Archived" },
   ]), []);
 
@@ -1828,6 +2164,15 @@ const AdminCampaigns = () => {
               >
                 <GalleryHorizontalEnd className="mr-2 h-4 w-4" /> Create carousel
               </Button>
+              <Button
+                variant="outline"
+                className="rounded-xl"
+                onClick={openBulkScheduleDialog}
+                disabled={actionLoading || !selectedRunIds.length || !selectedRunsCanSchedule}
+                title={selectedRunsCanSchedule ? "Schedule selected campaigns" : bulkScheduleHint}
+              >
+                <CalendarClock className="mr-2 h-4 w-4" /> Schedule selected
+              </Button>
               <Button variant="outline" className="rounded-xl" onClick={scanSelectedReadiness} disabled={actionLoading || !selectedRunIds.length}>
                 Scan readiness
               </Button>
@@ -1839,6 +2184,9 @@ const AdminCampaigns = () => {
                 title={bulkRegenerateSelectionReady ? "Regenerate image and caption for selected campaigns" : bulkRegenerateSelectionHint}
               >
                 <RotateCcw className="mr-2 h-4 w-4" /> Regenerate image and caption
+              </Button>
+              <Button variant="outline" className="rounded-xl" onClick={downloadSelectedImages} disabled={actionLoading || !selectedRunIds.length}>
+                <Download className="mr-2 h-4 w-4" /> Download ZIP
               </Button>
               <Button variant="destructive" className="rounded-xl" onClick={() => setBulkArchiveOpen(true)} disabled={actionLoading || !selectedRunIds.length}>
                 <Trash2 className="mr-2 h-4 w-4" /> Remove selected
@@ -1959,149 +2307,283 @@ const AdminCampaigns = () => {
       </div>
 
       <div className="overflow-hidden rounded-3xl border border-border bg-card">
-        <div className="overflow-auto">
-          <table className="min-w-full text-sm">
-            <thead className="bg-muted/60 text-left text-xs uppercase tracking-[0.14em] text-muted-foreground">
-              <tr>
-                <th className="px-4 py-4">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-input text-primary"
-                    checked={allSelectableVisibleSelected}
-                    onChange={toggleSelectAllVisible}
-                    disabled={selectableVisibleRuns.length === 0}
-                    aria-label="Select visible campaigns"
-                  />
-                </th>
-                <th className="px-4 py-4">Product</th>
-                <th className="px-4 py-4">Creative</th>
-                <th className="px-4 py-4">Pipeline</th>
-                <th className="px-4 py-4">Review</th>
-                <th className="px-4 py-4">Publish</th>
-                <th className="px-4 py-4">Updated</th>
-                <th className="px-4 py-4">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr><td colSpan={8}><LoadingSpinner /></td></tr>
-              ) : data.items.length === 0 ? (
-                <tr><td colSpan={8}><EmptyState icon={Sparkles} text="No Instagram campaign runs yet." /></td></tr>
-              ) : data.items.map((run) => (
-                <tr key={run.id} className={`border-t border-border/70 align-top ${selectedRunIds.includes(run.id) ? "bg-primary/5" : ""}`}>
-                  <td className="px-4 py-4">
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 rounded border-input text-primary"
-                      checked={selectedRunIds.includes(run.id)}
-                      onChange={() => toggleRunSelection(run.id)}
-                      disabled={!canSelectCampaignRun(run)}
-                      aria-label={`Select ${run.product_title || run.campaign_id}`}
-                    />
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="flex min-w-[19rem] gap-3">
-                      <div className="h-16 w-16 shrink-0 overflow-hidden rounded-2xl border border-border/70 bg-muted/30">
-                        {getProductImageUrl(run) ? (
-                          <img src={getProductImageUrl(run)!} alt={run.product_title || "Product"} className="h-full w-full object-cover" />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">No image</div>
-                        )}
-                      </div>
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">{run.product_title || "Untitled product"}</p>
-                        <p className="truncate text-xs text-muted-foreground">{run.product_slug || EMPTY_PLACEHOLDER}</p>
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                          <span className={`rounded-full px-2 py-0.5 font-medium ${getCampaignSourceLabel(run) === "Affiliate" ? "bg-amber-100 text-amber-800" : "bg-muted text-muted-foreground"}`}>
-                            {getCampaignSourceLabel(run)}
-                          </span>
-                          {run.carousel_task_id && run.carousel_position && run.carousel_size ? (
-                            <span className="rounded-full bg-pink-100 px-2 py-0.5 font-medium text-pink-800">Carousel {run.carousel_position}/{run.carousel_size}</span>
-                          ) : null}
-                          <span>{run.vendor_shop_name || (run.source_event === "admin_product.published" ? "Pink Paisa" : EMPTY_PLACEHOLDER)}</span>
+        <div className="flex flex-col gap-3 border-b border-border/70 bg-muted/40 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Campaign runs</p>
+            <h3 className="mt-1 font-serif text-xl">Review queue</h3>
+          </div>
+          <label className="inline-flex w-fit items-center gap-2 rounded-xl border border-border bg-background px-3 py-2 text-xs font-medium text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-input text-primary"
+              checked={allSelectableVisibleSelected}
+              onChange={toggleSelectAllVisible}
+              disabled={selectableVisibleRuns.length === 0}
+              aria-label="Select visible campaigns"
+            />
+            Select visible
+          </label>
+        </div>
+
+        {loading ? (
+          <LoadingSpinner />
+        ) : data.items.length === 0 ? (
+          <EmptyState icon={Sparkles} text="No Instagram campaign runs yet." />
+        ) : (
+          <div className="divide-y divide-border/70">
+            {data.items.map((run) => {
+              const productImageUrl = getProductImageUrl(run);
+              const creativeImageUrl = getCreativeImageUrl(run);
+              const creativeAssetCount = getCreativeAssetUrls(run).length;
+              const readinessBlockers = getReadinessBlockers(run);
+              const selected = selectedRunIds.includes(run.id);
+              const creativeAssets = getCampaignCreativeAssets(run);
+              const hasCreativeAsset = creativeAssets.length > 0;
+              const published = isPublishedRun(run);
+              const canPost = canPostRunFromCard(run);
+              const canRetry = run.status === "failed" || run.publish_status === "failed";
+              const canRegenerate = canRegenerateRunFromCard(run);
+              const canReview = run.status === "waiting_review";
+              const productUrl = getRunProductUrl(run);
+              const trackedRunUrl = getCampaignTrackedUrl(run);
+              const affiliateUrl = getAffiliateUrl(run);
+              const primaryAction = published
+                ? (run.instagram_permalink ? "open_instagram" : "details")
+                : canRetry
+                  ? "retry"
+                  : canReview
+                    ? "review"
+                    : readinessBlockers.length || connection?.is_connected !== true
+                      ? "fix"
+                      : canPost
+                        ? "post"
+                        : hasCreativeAsset
+                          ? "preview"
+                          : "details";
+
+              return (
+                <article key={run.id} className={`p-4 transition-colors ${selected ? "bg-primary/5" : "bg-card"}`}>
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(220px,0.75fr)_minmax(180px,0.65fr)_minmax(190px,0.7fr)_minmax(150px,auto)] xl:items-start">
+                    <div className="min-w-0">
+                      <div className="flex gap-3">
+                        <input
+                          type="checkbox"
+                          className="mt-1 h-4 w-4 shrink-0 rounded border-input text-primary"
+                          checked={selected}
+                          onChange={() => toggleRunSelection(run.id)}
+                          disabled={!canSelectCampaignRun(run)}
+                          aria-label={`Select ${run.product_title || run.campaign_id}`}
+                        />
+                        <div className="h-16 w-16 shrink-0 overflow-hidden rounded-2xl border border-border/70 bg-muted/30">
+                          {productImageUrl ? (
+                            <img src={productImageUrl} alt={run.product_title || "Product"} className="h-full w-full object-cover" />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">No image</div>
+                          )}
                         </div>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          Batch: {run.batch_key || "Queued"} | {formatDateTime(run.approved_at)}
-                        </p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="flex min-w-[12rem] gap-3">
-                      <div className="h-16 w-14 shrink-0 overflow-hidden rounded-2xl border border-border/70 bg-[#fff8fa]">
-                        {getCreativeImageUrl(run) ? (
-                          <button
-                            type="button"
-                            onClick={() => openPostPreview(run)}
-                            className="group relative block h-full w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-                            aria-label={`Preview ${run.product_title || "campaign"} post`}
-                            title="Preview generated post"
-                          >
-                            <img src={getCreativeImageUrl(run)!} alt={`${run.product_title || "Campaign"} creative`} className="h-full w-full object-cover" />
-                            <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-all group-hover:bg-black/30 group-hover:opacity-100 group-focus-visible:bg-black/30 group-focus-visible:opacity-100" aria-hidden="true">
-                              <Maximize2 className="h-4 w-4" />
+                        <div className="min-w-0 flex-1">
+                          <p className="line-clamp-3 break-words font-medium leading-5 text-foreground">{run.product_title || "Untitled product"}</p>
+                          <p className="mt-1 line-clamp-2 break-all text-xs leading-5 text-muted-foreground">{run.product_slug || EMPTY_PLACEHOLDER}</p>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <span className={`rounded-full px-2 py-0.5 font-medium ${getCampaignSourceLabel(run) === "Affiliate" ? "bg-amber-100 text-amber-800" : "bg-muted text-muted-foreground"}`}>
+                              {getCampaignSourceLabel(run)}
                             </span>
-                          </button>
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">Draft</div>
-                        )}
-                      </div>
-                      <div className="min-w-0 space-y-1">
-                        <p className="text-xs font-medium text-foreground">
-                          {getCreativeImageUrl(run) ? "Creative ready" : "No generated creative"}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {getCreativeAssetUrls(run).length
-                            ? `${getCreativeAssetUrls(run).length} asset${getCreativeAssetUrls(run).length === 1 ? "" : "s"}`
-                            : "Waiting for creative stage"}
-                        </p>
-                        {run.content_type ? <div><StatusBadge status={run.content_type} /></div> : null}
-                        {getCreativeImageUrl(run) ? (
-                          <button type="button" onClick={() => openPostPreview(run)} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
-                            <Maximize2 className="h-3.5 w-3.5" /> Preview post
-                          </button>
-                        ) : null}
+                            {run.carousel_task_id && run.carousel_position && run.carousel_size ? (
+                              <span className="rounded-full bg-pink-100 px-2 py-0.5 font-medium text-pink-800">Carousel {run.carousel_position}/{run.carousel_size}</span>
+                            ) : null}
+                            <span className="break-words">{run.vendor_shop_name || (run.source_event === "admin_product.published" ? "Pink Paisa" : EMPTY_PLACEHOLDER)}</span>
+                          </div>
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Batch: {run.batch_key || "Queued"} | {formatDateTime(run.approved_at)}
+                          </p>
+                        </div>
                       </div>
                     </div>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="min-w-[12rem] space-y-2">
-                      <StatusBadge status={run.status} />
-                      <div><StatusBadge status={run.current_stage} /></div>
-                      {run.last_error ? <p className="text-xs text-rose-600">{truncateText(run.last_error, 120)}</p> : null}
+
+                    <div className="min-w-0 rounded-2xl border border-border/70 bg-background/60 p-3">
+                      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Creative</p>
+                      <div className="flex gap-3">
+                        <div className="h-20 w-16 shrink-0 overflow-hidden rounded-xl border border-border/70 bg-[#fff8fa]">
+                          {creativeImageUrl ? (
+                            <button
+                              type="button"
+                              onClick={() => openPostPreview(run)}
+                              className="group relative block h-full w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                              aria-label={`Preview ${run.product_title || "campaign"} post`}
+                              title="Preview generated post"
+                            >
+                              <img src={creativeImageUrl} alt={`${run.product_title || "Campaign"} creative`} className="h-full w-full object-cover" />
+                              <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-all group-hover:bg-black/30 group-hover:opacity-100 group-focus-visible:bg-black/30 group-focus-visible:opacity-100" aria-hidden="true">
+                                <Maximize2 className="h-4 w-4" />
+                              </span>
+                            </button>
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-[10px] text-muted-foreground">Draft</div>
+                          )}
+                        </div>
+                        <div className="min-w-0 space-y-1">
+                          <p className="text-xs font-medium text-foreground">
+                            {creativeImageUrl ? "Creative ready" : "No generated creative"}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            {creativeAssetCount ? `${creativeAssetCount} asset${creativeAssetCount === 1 ? "" : "s"}` : "Waiting for creative stage"}
+                          </p>
+                          {run.content_type ? <div><StatusBadge status={run.content_type} /></div> : null}
+                          {creativeImageUrl ? (
+                            <button type="button" onClick={() => openPostPreview(run)} className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+                              <Maximize2 className="h-3.5 w-3.5" /> Preview post
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="min-w-[8rem] space-y-2">
-                      {run.review_status ? <StatusBadge status={run.review_status} /> : EMPTY_PLACEHOLDER}
-                      {run.review_stage ? <p className="text-xs text-muted-foreground">{run.review_stage.replace(/_/g, " ")}</p> : null}
+
+                    <div className="min-w-0 rounded-2xl border border-border/70 bg-background/60 p-3">
+                      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Workflow</p>
+                      <div className="flex flex-wrap gap-2">
+                        <StatusBadge status={run.status} />
+                        <StatusBadge status={run.current_stage} />
+                        {run.review_status ? <StatusBadge status={run.review_status} /> : null}
+                      </div>
+                      {run.review_stage ? <p className="mt-2 text-xs text-muted-foreground">Review: {run.review_stage.replace(/_/g, " ")}</p> : null}
+                      {run.last_error ? <p className="mt-2 break-words text-xs text-rose-600">{truncateText(run.last_error, 120)}</p> : null}
                     </div>
-                  </td>
-                  <td className="px-4 py-4">
-                    <div className="min-w-[9rem] space-y-2">
-                      {run.publish_status ? <StatusBadge status={run.publish_status} /> : EMPTY_PLACEHOLDER}
-                      {run.carousel_task_id && run.carousel_position && run.carousel_size ? <p className="text-xs font-medium text-pink-700">Carousel {run.carousel_position}/{run.carousel_size}</p> : null}
-                      {run.instagram_media_id ? <p className="text-xs text-muted-foreground">Media ID saved</p> : null}
-                      {getReadinessBlockers(run).length ? (
-                        <p className="text-xs text-rose-600">{truncateText(getReadinessBlockers(run)[0].message, 110)}</p>
+
+                    <div className="min-w-0 rounded-2xl border border-border/70 bg-background/60 p-3">
+                      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Publish</p>
+                      <div className="flex flex-wrap gap-2">
+                        {run.publish_status ? <StatusBadge status={run.publish_status} /> : null}
+                        {run.carousel_task_id && run.carousel_position && run.carousel_size ? <span className="rounded-full bg-pink-100 px-2.5 py-1 text-xs font-medium text-pink-800">Carousel {run.carousel_position}/{run.carousel_size}</span> : null}
+                      </div>
+                      {run.instagram_media_id ? <p className="mt-2 text-xs text-muted-foreground">Media ID saved</p> : null}
+                      {readinessBlockers.length ? (
+                        <p className="mt-2 break-words text-xs text-rose-600">{truncateText(readinessBlockers[0].message, 130)}</p>
                       ) : run.publish_readiness?.warnings?.length ? (
-                        <p className="text-xs text-amber-700">{truncateText(run.publish_readiness.warnings[0].message, 110)}</p>
+                        <p className="mt-2 break-words text-xs text-amber-700">{truncateText(run.publish_readiness.warnings[0].message, 130)}</p>
                       ) : run.publish_readiness?.can_publish ? (
-                        <p className="text-xs text-emerald-700">Ready to post</p>
+                        <p className="mt-2 text-xs text-emerald-700">Ready to post</p>
                       ) : null}
                     </div>
-                  </td>
-                  <td className="px-4 py-4">{formatDateTime(run.updated_at)}</td>
-                  <td className="px-4 py-4">
-                    <button onClick={() => loadDetail(run.id)} className="rounded-xl border border-border p-2 text-muted-foreground transition-all hover:bg-accent hover:text-foreground" title="View details">
-                      <Eye className="h-4 w-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+
+                    <div className="flex min-w-0 flex-col gap-3 rounded-2xl border border-border/70 bg-background/60 p-3 sm:flex-row sm:items-center sm:justify-between xl:flex-col xl:items-stretch">
+                      <div>
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">Updated</p>
+                        <p className="mt-1 text-xs text-foreground">{formatDateTime(run.updated_at)}</p>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-1">
+                        <Button variant="outline" className="rounded-xl" onClick={() => void openRunDetails(run)}>
+                          <Eye className="mr-2 h-4 w-4" /> Details
+                        </Button>
+
+                        {primaryAction === "open_instagram" && run.instagram_permalink ? (
+                          <Button asChild className="rounded-xl">
+                            <a href={run.instagram_permalink} target="_blank" rel="noreferrer">
+                              <ExternalLink className="mr-2 h-4 w-4" /> Instagram
+                            </a>
+                          </Button>
+                        ) : primaryAction === "retry" ? (
+                          <Button className="rounded-xl" onClick={() => void retryRunById(run)} disabled={actionLoading}>
+                            <RotateCcw className="mr-2 h-4 w-4" /> Retry
+                          </Button>
+                        ) : primaryAction === "review" ? (
+                          <Button className="rounded-xl" onClick={() => void openRunDetails(run)} disabled={actionLoading}>
+                            <CheckCircle2 className="mr-2 h-4 w-4" /> Review
+                          </Button>
+                        ) : primaryAction === "fix" ? (
+                          <Button variant="outline" className="rounded-xl border-rose-200 text-rose-700 hover:bg-rose-50" onClick={() => void openRunFixPanel(run)} disabled={actionLoading}>
+                            <AlertTriangle className="mr-2 h-4 w-4" /> Fix blockers
+                          </Button>
+                        ) : primaryAction === "post" ? (
+                          <Button className="rounded-xl" onClick={() => void publishRunNow(run)} disabled={actionLoading}>
+                            <Rocket className="mr-2 h-4 w-4" /> Post now
+                          </Button>
+                        ) : primaryAction === "preview" ? (
+                          <Button variant="outline" className="rounded-xl" onClick={() => openPostPreview(run)}>
+                            <Maximize2 className="mr-2 h-4 w-4" /> Preview
+                          </Button>
+                        ) : null}
+
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" className="rounded-xl">
+                              <MoreHorizontal className="mr-2 h-4 w-4" /> More
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-64">
+                            <DropdownMenuLabel>Campaign actions</DropdownMenuLabel>
+                            <DropdownMenuItem onSelect={(event) => { event.preventDefault(); void openRunDetails(run); }}>
+                              <Eye className="mr-2 h-4 w-4" /> View details
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!hasCreativeAsset} onSelect={(event) => { event.preventDefault(); openPostPreview(run); }}>
+                              <Maximize2 className="mr-2 h-4 w-4" /> Preview post
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!hasCreativeAsset} onSelect={(event) => { event.preventDefault(); void downloadRunPrimaryAsset(run); }}>
+                              <Download className="mr-2 h-4 w-4" /> Download image
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem disabled={!canRegenerate || actionLoading} onSelect={(event) => { event.preventDefault(); void regenerateRunById(run, "creative"); }}>
+                              <Wand2 className="mr-2 h-4 w-4" /> Regenerate image and caption
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!canRegenerate || actionLoading} onSelect={(event) => { event.preventDefault(); void regenerateRunById(run, "caption"); }}>
+                              <RotateCcw className="mr-2 h-4 w-4" /> Regenerate caption
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!canRetry || actionLoading} onSelect={(event) => { event.preventDefault(); void retryRunById(run); }}>
+                              <RotateCcw className="mr-2 h-4 w-4" /> Retry failed task
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!canResetRunTask(run) || actionLoading} onSelect={(event) => { event.preventDefault(); void resetRunTaskById(run); }}>
+                              <AlertTriangle className="mr-2 h-4 w-4" /> Reset stuck task
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem disabled={!canPost || actionLoading} onSelect={(event) => { event.preventDefault(); void publishRunNow(run); }}>
+                              <Rocket className="mr-2 h-4 w-4" /> Post now
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!canPost || actionLoading} onSelect={(event) => { event.preventDefault(); openScheduleDialog(run); }}>
+                              <CalendarClock className="mr-2 h-4 w-4" /> Schedule
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={(event) => { event.preventDefault(); void scanRunReadiness(run); }}>
+                              <CheckCircle2 className="mr-2 h-4 w-4" /> Scan readiness
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem disabled={!getCampaignCaption(run)} onSelect={(event) => { event.preventDefault(); void copyText(getCampaignCaption(run), "Caption"); }}>
+                              <Copy className="mr-2 h-4 w-4" /> Copy caption
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!trackedRunUrl} onSelect={(event) => { event.preventDefault(); void copyText(trackedRunUrl, "Tracked link"); }}>
+                              <Copy className="mr-2 h-4 w-4" /> Copy tracked link
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!productUrl} onSelect={(event) => { event.preventDefault(); void copyText(productUrl, "Product link"); }}>
+                              <Copy className="mr-2 h-4 w-4" /> Copy product link
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem disabled={!productUrl} onSelect={(event) => { event.preventDefault(); if (productUrl) window.open(productUrl, "_blank", "noopener,noreferrer"); }}>
+                              <ExternalLink className="mr-2 h-4 w-4" /> Open product page
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!affiliateUrl} onSelect={(event) => { event.preventDefault(); if (affiliateUrl) window.open(affiliateUrl, "_blank", "noopener,noreferrer"); }}>
+                              <ExternalLink className="mr-2 h-4 w-4" /> Open Amazon
+                            </DropdownMenuItem>
+                            <DropdownMenuItem disabled={!run.instagram_permalink} onSelect={(event) => { event.preventDefault(); if (run.instagram_permalink) window.open(run.instagram_permalink, "_blank", "noopener,noreferrer"); }}>
+                              <ExternalLink className="mr-2 h-4 w-4" /> Open Instagram
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              className="text-rose-700 focus:text-rose-700"
+                              disabled={actionLoading || (Boolean(run.archived_at) && isPublishedRun(run))}
+                              onSelect={(event) => {
+                                event.preventDefault();
+                                void openRunLifecycleAction(run, run.archived_at && !isPublishedRun(run) ? "purge" : "archive");
+                              }}
+                            >
+                              <Trash2 className="mr-2 h-4 w-4" /> {run.archived_at ? "Delete campaign" : "Remove campaign"}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between rounded-2xl border border-border bg-card p-4 text-sm">
@@ -2372,6 +2854,73 @@ const AdminCampaigns = () => {
                 disabled={actionLoading || (reviewDialogAction === "reject" && !reviewDialogNotes.trim())}
               >
                 {reviewDialogAction === "reject" ? "Reject draft" : "Approve draft"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(scheduleDialogRun)} onOpenChange={(open) => { if (!open) setScheduleDialogRun(null); }}>
+        <DialogContent className="max-w-lg rounded-[28px] border border-border/80 p-0 shadow-2xl">
+          <DialogHeader className="border-b border-border/70 px-6 py-5 pr-14">
+            <DialogTitle className="font-serif text-2xl">Schedule Instagram post</DialogTitle>
+            <DialogDescription className="text-sm">
+              Choose an IST publish time for this approved campaign. Pink Paisa rechecks readiness before scheduling.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 px-6 py-5">
+            <div className="rounded-2xl border border-border/70 bg-muted/20 p-4">
+              <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Campaign</p>
+              <p className="mt-2 font-medium leading-5">{scheduleDialogRun?.product_title || scheduleDialogRun?.campaign_id || EMPTY_PLACEHOLDER}</p>
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-medium">Publish time, IST</label>
+              <Input
+                type="datetime-local"
+                value={scheduleInput}
+                min={toIstDateTimeInput(Date.now() + (6 * 60 * 1000))}
+                onChange={(event) => setScheduleInput(event.target.value)}
+              />
+            </div>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button variant="outline" className="rounded-2xl" onClick={() => setScheduleDialogRun(null)} disabled={actionLoading}>
+                Cancel
+              </Button>
+              <Button className="rounded-2xl" onClick={scheduleSelectedRun} disabled={actionLoading || !scheduleInput}>
+                <CalendarClock className="mr-2 h-4 w-4" /> Schedule post
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={bulkScheduleOpen} onOpenChange={setBulkScheduleOpen}>
+        <DialogContent className="max-w-lg rounded-[28px] border border-border/80 p-0 shadow-2xl">
+          <DialogHeader className="border-b border-border/70 px-6 py-5 pr-14">
+            <DialogTitle className="font-serif text-2xl">Schedule selected campaigns</DialogTitle>
+            <DialogDescription className="text-sm">
+              Schedule {selectedVisibleRuns.length} approved campaign{selectedVisibleRuns.length === 1 ? "" : "s"} for the same IST publish time.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 px-6 py-5">
+            <div className="rounded-2xl border border-border/70 bg-muted/20 p-4 text-sm text-muted-foreground">
+              Only visible selected campaigns are included. Any campaign that becomes blocked will fail safely and remain selected.
+            </div>
+            <div>
+              <label className="mb-2 block text-sm font-medium">Publish time, IST</label>
+              <Input
+                type="datetime-local"
+                value={bulkScheduleInput}
+                min={toIstDateTimeInput(Date.now() + (6 * 60 * 1000))}
+                onChange={(event) => setBulkScheduleInput(event.target.value)}
+              />
+            </div>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button variant="outline" className="rounded-2xl" onClick={() => setBulkScheduleOpen(false)} disabled={actionLoading}>
+                Cancel
+              </Button>
+              <Button className="rounded-2xl" onClick={scheduleSelectedRuns} disabled={actionLoading || !bulkScheduleInput || !selectedRunsCanSchedule}>
+                <CalendarClock className="mr-2 h-4 w-4" /> Schedule selected
               </Button>
             </div>
           </div>

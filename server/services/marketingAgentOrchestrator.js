@@ -54,6 +54,8 @@ const MAX_TASK_ATTEMPTS = Math.max(parseInt(process.env.MARKETING_MAX_TASK_ATTEM
 const MIN_SCHEDULE_DELAY_MS = Math.max(parseInt(process.env.MARKETING_MIN_SCHEDULE_DELAY_MS || String(5 * 60 * 1000), 10), 60 * 1000);
 const MAX_BULK_CAMPAIGN_ACTIONS = 100;
 const MAX_BULK_REVIEW_ACTIONS = 25;
+const MAX_CAMPAIGN_ASSET_ZIP_RUNS = 50;
+const MAX_CAMPAIGN_ASSET_ZIP_ASSETS = 100;
 const MAX_CAROUSEL_ITEMS = 10;
 const CAMPAIGN_OPEN_STATUSES = ["queued", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing"];
 const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = [
@@ -243,6 +245,35 @@ function buildCampaignAssetFileName(run = {}, url = "", index = 0) {
   const campaignPart = safeDownloadNamePart(run.campaign_id || run.product_title || run._id);
   const slidePart = Number(index || 0) + 1;
   return `pinkpaisa-${campaignPart}-slide-${slidePart}${getCampaignAssetFileExtension(url)}`;
+}
+
+function buildCampaignAssetZipFileName() {
+  const stamp = new Date().toISOString().slice(0, 10);
+  return `pinkpaisa-campaign-images-${stamp}.zip`;
+}
+
+function sanitizeCampaignZipEntryName(value = "campaign-image.jpg") {
+  const parsed = path.parse(String(value || "campaign-image.jpg"));
+  const extension = [".jpg", ".jpeg", ".png", ".webp"].includes(parsed.ext.toLowerCase()) ? parsed.ext.toLowerCase() : ".jpg";
+  return `${safeDownloadNamePart(parsed.name)}${extension}`;
+}
+
+function getUniqueCampaignZipEntryName(fileName, usedNames) {
+  const sanitized = sanitizeCampaignZipEntryName(fileName);
+  if (!usedNames.has(sanitized)) {
+    usedNames.add(sanitized);
+    return sanitized;
+  }
+
+  const parsed = path.parse(sanitized);
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${parsed.name}-${index}${parsed.ext}`;
+    if (!usedNames.has(candidate)) {
+      usedNames.add(candidate);
+      return candidate;
+    }
+  }
+  throw createCampaignAssetDownloadError("Could not create unique ZIP file names", "campaign_asset_zip_name_conflict", 400);
 }
 
 function getImageContentType(fileName = "") {
@@ -1525,6 +1556,23 @@ function normalizeBulkReviewRunIds(values = []) {
   if (!runIds.length) throw new Error("Select at least one campaign to approve");
   if (runIds.length > MAX_BULK_REVIEW_ACTIONS) {
     throw new Error(`Select no more than ${MAX_BULK_REVIEW_ACTIONS} campaigns to approve at once`);
+  }
+  return runIds;
+}
+
+function normalizeCampaignAssetZipRunIds(values = []) {
+  const runIds = Array.from(new Set((Array.isArray(values) ? values : [])
+    .map((value) => getObjectIdString(value))
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)));
+  if (!runIds.length) {
+    throw createCampaignAssetDownloadError("Select at least one campaign", "campaign_asset_zip_empty", 400);
+  }
+  if (runIds.some((id) => !/^[0-9a-fA-F]{24}$/.test(id))) {
+    throw createCampaignAssetDownloadError("One or more campaign IDs are invalid", "campaign_asset_zip_invalid_ids", 400);
+  }
+  if (runIds.length > MAX_CAMPAIGN_ASSET_ZIP_RUNS) {
+    throw createCampaignAssetDownloadError(`Select ${MAX_CAMPAIGN_ASSET_ZIP_RUNS} or fewer campaigns to download`, "campaign_asset_zip_too_many_runs", 400);
   }
   return runIds;
 }
@@ -4083,15 +4131,34 @@ function buildCampaignRunListQuery({
   return query;
 }
 
-function matchesReadinessFilter(run, readiness) {
-  if (!readiness || readiness === "all") return true;
+function matchesReadinessCodeFilter(snapshot, readinessCode) {
+  if (!readinessCode || readinessCode === "all") return true;
+  const issues = [
+    ...(snapshot?.blockers || []),
+    ...(snapshot?.warnings || []),
+  ];
+  if (readinessCode === "product_or_affiliate") {
+    return issues.some((issue) => (
+      String(issue.code || "").startsWith("product_")
+      || String(issue.code || "").startsWith("affiliate_")
+      || String(issue.code || "").startsWith("amazon")
+      || issue.code === "associate_account_unapproved"
+    ));
+  }
+  return issues.some((issue) => issue.code === readinessCode);
+}
+
+function matchesReadinessFilter(run, readiness, readinessCode = "") {
+  if ((!readiness || readiness === "all") && !readinessCode) return true;
   const snapshot = serialiseRun(run).publish_readiness;
   const blockers = snapshot?.blockers || [];
   const warnings = snapshot?.warnings || [];
+  const matchesCode = matchesReadinessCodeFilter(snapshot, readinessCode);
+  if (!matchesCode) return false;
   if (readiness === "ready") return snapshot?.can_publish === true;
   if (readiness === "blocked") return blockers.length > 0;
   if (readiness === "warnings") return blockers.length === 0 && warnings.length > 0;
-  return true;
+  return matchesCode;
 }
 
 async function listCampaignRuns({
@@ -4101,6 +4168,7 @@ async function listCampaignRuns({
   limit = 10,
   source_event: sourceEvent = "",
   readiness = "all",
+  readiness_code: readinessCode = "",
   date_from: dateFrom = "",
   date_to: dateTo = "",
   affiliate_only: affiliateOnly = false,
@@ -4118,7 +4186,7 @@ async function listCampaignRuns({
 
   const safePage = Math.max(Number(page || 1), 1);
   const safeLimit = Math.min(Math.max(Number(limit || 10), 1), 50);
-  const usesReadinessFilter = readiness && readiness !== "all";
+  const usesReadinessFilter = (readiness && readiness !== "all") || Boolean(readinessCode);
   const baseFind = MarketingCampaignRun.find(query)
       .sort({ updated_at: -1 })
       .populate("vendor_product_id", "featured_image additional_images")
@@ -4144,7 +4212,7 @@ async function listCampaignRuns({
   ]);
 
   const filteredItems = usesReadinessFilter
-    ? rawItems.filter((item) => matchesReadinessFilter(item, readiness))
+    ? rawItems.filter((item) => matchesReadinessFilter(item, readiness, readinessCode))
     : rawItems;
   const total = usesReadinessFilter ? filteredItems.length : totalWithoutReadiness;
   const items = usesReadinessFilter
@@ -4513,12 +4581,7 @@ async function getCampaignRunDetail(runId) {
   };
 }
 
-async function getCampaignRunAssetDownload(runId, assetIndex) {
-  const run = await MarketingCampaignRun.findById(runId).lean();
-  if (!run) {
-    throw createCampaignAssetDownloadError("Campaign run not found", "campaign_not_found", 404);
-  }
-
+async function resolveCampaignRunAssetDownload(run, assetIndex) {
   const index = Number.parseInt(String(assetIndex ?? ""), 10);
   const assets = serialiseCreativeAssets(run);
   if (!Number.isInteger(index) || index < 0 || index >= assets.length) {
@@ -4567,6 +4630,87 @@ async function getCampaignRunAssetDownload(runId, assetIndex) {
       checksum_sha256: selected.checksum_sha256 || assetRecord?.checksum_sha256 || null,
       storage_provider: assetRecord?.storage_provider || "local",
     },
+  };
+}
+
+async function getCampaignRunAssetDownload(runId, assetIndex) {
+  const run = await MarketingCampaignRun.findById(runId).lean();
+  if (!run) {
+    throw createCampaignAssetDownloadError("Campaign run not found", "campaign_not_found", 404);
+  }
+
+  return resolveCampaignRunAssetDownload(run, assetIndex);
+}
+
+async function getCampaignRunsAssetZipManifest(runIds, { mode = "primary_only" } = {}) {
+  const normalizedRunIds = normalizeCampaignAssetZipRunIds(runIds);
+  const normalizedMode = mode === "all_assets" ? "all_assets" : "primary_only";
+  const runs = await MarketingCampaignRun.find({ _id: { $in: normalizedRunIds } }).lean();
+  const runMap = new Map(runs.map((run) => [String(run._id), run]));
+  const usedEntryNames = new Set();
+  const entries = [];
+  const skipped = [];
+
+  for (const runId of normalizedRunIds) {
+    const run = runMap.get(runId);
+    if (!run) {
+      skipped.push({ id: runId, reason: "Campaign run not found" });
+      continue;
+    }
+
+    const assets = serialiseCreativeAssets(run);
+    if (!assets.length) {
+      skipped.push({
+        id: runId,
+        campaign_id: run.campaign_id || null,
+        product_title: run.product_title || null,
+        reason: "No generated image is available",
+      });
+      continue;
+    }
+
+    const assetIndexes = normalizedMode === "all_assets"
+      ? assets.map((asset) => asset.index)
+      : [assets[0].index];
+
+    for (const assetIndex of assetIndexes) {
+      if (entries.length >= MAX_CAMPAIGN_ASSET_ZIP_ASSETS) {
+        throw createCampaignAssetDownloadError(`Download no more than ${MAX_CAMPAIGN_ASSET_ZIP_ASSETS} image assets at once`, "campaign_asset_zip_too_many_assets", 400);
+      }
+
+      try {
+        const download = await resolveCampaignRunAssetDownload(run, assetIndex);
+        entries.push({
+          ...download,
+          run_id: runId,
+          campaign_id: run.campaign_id || null,
+          product_title: run.product_title || null,
+          asset_index: assetIndex,
+          zip_entry_name: getUniqueCampaignZipEntryName(download.filename, usedEntryNames),
+        });
+      } catch (error) {
+        skipped.push({
+          id: runId,
+          campaign_id: run.campaign_id || null,
+          product_title: run.product_title || null,
+          asset_index: assetIndex,
+          reason: error.message || "Image could not be added to ZIP",
+          code: error.code || null,
+        });
+      }
+    }
+  }
+
+  if (!entries.length) {
+    throw createCampaignAssetDownloadError("No selected campaign images can be downloaded", "campaign_asset_zip_no_files", 404);
+  }
+
+  return {
+    filename: buildCampaignAssetZipFileName(),
+    mode: normalizedMode,
+    requested: normalizedRunIds.length,
+    entries,
+    skipped,
   };
 }
 
@@ -4673,6 +4817,7 @@ module.exports = {
   getAffiliateCarouselTask,
   getCampaignSettings,
   getCampaignRunAssetDownload,
+  getCampaignRunsAssetZipManifest,
   getDailyBatchRunDetail,
   getCampaignRunDetail,
   getLatestDailyBatchRun,
@@ -4722,6 +4867,7 @@ module.exports = {
     buildPublishTaskMembershipQuery,
     buildStaleTaskRecoveryFilter,
     buildCampaignAssetFileName,
+    buildCampaignAssetZipFileName,
     getActiveLeaseFilter,
     getNextAutoAgent,
     buildRunPublishReadinessSnapshot,
@@ -4743,6 +4889,7 @@ module.exports = {
     normalizeOrderedCarouselRunIds,
     normalizeBulkCampaignRunIds,
     normalizeBulkReviewRunIds,
+    normalizeCampaignAssetZipRunIds,
     collectBulkCampaignReviewResults,
     parseCarouselScheduleDate,
     sameRunIdSet,
