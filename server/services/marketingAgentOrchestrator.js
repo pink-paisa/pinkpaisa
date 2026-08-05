@@ -985,7 +985,7 @@ function getRunTrackedUrl(run) {
 }
 
 function buildCarouselTrackingUrl(run) {
-  const baseUrl = String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || "https://www.pinkpaisa.in").replace(/\/+$/, "");
+  const baseUrl = String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || "https://pinkpaisa.in").replace(/\/+$/, "");
   return `${baseUrl}/api/c/${encodeURIComponent(String(run?.campaign_id || ""))}`;
 }
 

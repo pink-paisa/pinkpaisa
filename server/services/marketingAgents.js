@@ -14,7 +14,7 @@ const {
   validateCaptionPackage,
 } = require("./openAiCaptionService");
 
-const DEFAULT_FRONTEND_URL = "https://www.pinkpaisa.in";
+const DEFAULT_FRONTEND_URL = "https://pinkpaisa.in";
 const BLOCKED_CLAIMS = ["cure", "guaranteed", "instant results", "100% safe", "risk-free", "miracle", "clinically proven"];
 const AFFILIATE_INSTAGRAM_DISCLOSURE = "#Ad";
 const AFFILIATE_DISCLOSURE_RE = /(?:^|\s)#ad\b/i;

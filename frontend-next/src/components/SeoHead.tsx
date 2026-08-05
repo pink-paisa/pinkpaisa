@@ -1,4 +1,5 @@
 import Head from "next/head";
+import { absoluteSiteUrl, normalizeSiteUrl } from "@/lib/siteUrl";
 
 type SeoHeadProps = {
   title: string;
@@ -10,13 +11,11 @@ type SeoHeadProps = {
 };
 
 const SITE_NAME = "Pink Paisa";
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://www.pinkpaisa.in";
+const SITE_URL = normalizeSiteUrl(process.env.NEXT_PUBLIC_SITE_URL);
 const DEFAULT_OG_IMAGE = `${SITE_URL}/og-pink-paisa.png`;
 
 function absoluteUrl(path?: string | null) {
-  if (!path) return null;
-  if (/^https?:\/\//i.test(path)) return path;
-  return `${SITE_URL.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+  return absoluteSiteUrl(path, SITE_URL);
 }
 
 export default function SeoHead({

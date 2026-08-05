@@ -19,4 +19,4 @@ Disallow: /checkout
 Disallow: /vendor
 Disallow: /phonepe-return
 
-Sitemap: https://www.pinkpaisa.in/sitemap.xml
+Sitemap: https://pinkpaisa.in/sitemap.xml

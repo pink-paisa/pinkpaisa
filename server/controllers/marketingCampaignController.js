@@ -500,7 +500,7 @@ const retryMarketingCarouselController = async (req, res) => {
 };
 
 const redirectMarketingCampaignLinkController = async (req, res) => {
-  const frontendBase = String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || "https://www.pinkpaisa.in").replace(/\/+$/, "");
+  const frontendBase = String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || "https://pinkpaisa.in").replace(/\/+$/, "");
   const fallbackUrl = `${frontendBase}/products`;
   try {
     const campaignId = String(req.params.campaignId || "").trim().slice(0, 80);

@@ -1,6 +1,8 @@
+import { normalizeSiteUrl } from "@/lib/siteUrl";
+
 const configuredApiUrl = process.env.SERVER_API_URL || process.env.NEXT_PUBLIC_API_URL;
 const API_URL = configuredApiUrl && !configuredApiUrl.startsWith("/") ? configuredApiUrl : "http://127.0.0.1:5001/api";
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://www.pinkpaisa.in";
+const SITE_URL = normalizeSiteUrl(process.env.NEXT_PUBLIC_SITE_URL);
 
 export function getApiUrl() {
   return API_URL.replace(/\/$/, "");
