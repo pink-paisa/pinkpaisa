@@ -650,6 +650,38 @@ test("affiliate bulk delete archives both published products and drafts", async 
   });
 });
 
+test("affiliate permanent delete blockers ignore analytics-only references", () => {
+  const blockers = affiliateProductPrivate.buildAffiliatePurgeBlockers({
+    campaigns: [],
+    orderItems: 0,
+  });
+  assert.equal(blockers.blocked, false);
+
+  const draftCampaignBlockers = affiliateProductPrivate.buildAffiliatePurgeBlockers({
+    campaigns: [{ status: "queued", publish_status: "draft", instagram_media_id: null, published_at: null }],
+    orderItems: 0,
+  });
+  assert.equal(draftCampaignBlockers.blocked, false);
+
+  assert.equal(affiliateProductPrivate.isPublishedCampaignReference({
+    status: "published",
+    publish_status: "published",
+  }), true);
+  const publishedBlockers = affiliateProductPrivate.buildAffiliatePurgeBlockers({
+    campaigns: [{ status: "published", publish_status: "published", instagram_media_id: "ig-media-1" }],
+    orderItems: 0,
+  });
+  assert.equal(publishedBlockers.blocked, true);
+  assert.match(publishedBlockers.blockers.join(" "), /published campaign audit record/);
+
+  const orderBlockers = affiliateProductPrivate.buildAffiliatePurgeBlockers({
+    campaigns: [],
+    orderItems: 1,
+  });
+  assert.equal(orderBlockers.blocked, true);
+  assert.match(orderBlockers.blockers.join(" "), /order item/);
+});
+
 test("affiliate bulk assign category validates taxonomy and updates selected products", async () => {
   await withAffiliateBulkMocks(async ({ docs }) => {
     const summary = await affiliateProductPrivate.performAffiliateBulkAction({

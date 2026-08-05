@@ -20,6 +20,10 @@ const {
   buildImagePayload,
   normalizeManualAffiliateImageUrl,
 } = require("../services/affiliateImagePolicy");
+const {
+  archiveCampaignRun,
+  purgeCampaignRun,
+} = require("../services/marketingAgentOrchestrator");
 const { getUncategorizedRefs, resolveTaxonomySelection } = require("../utils/taxonomy");
 const { ensureUniqueProductSlug } = require("../utils/productSlug");
 
@@ -824,19 +828,58 @@ const purgeAffiliateProduct = async (req, res) => {
     const product = await Product.findOne({ _id: req.params.id, is_affiliate: true, source_type: "admin" }).lean();
     if (!product) return res.status(404).json({ message: "Affiliate product not found" });
     if (!product.archived_at) return res.status(409).json({ message: "Archive the affiliate product before permanent deletion" });
+
     const [campaigns, orderItems, events] = await Promise.all([
-      MarketingCampaignRun.countDocuments({ public_product_id: product._id }),
-      OrderItem.countDocuments({ product_id: product._id }),
+      MarketingCampaignRun.find({ public_product_id: product._id })
+        .select("_id campaign_id status publish_status published_at instagram_media_id archived_at")
+        .lean(),
+      OrderItem.countDocuments({ product_id: String(product._id) }),
       AffiliateEvent.countDocuments({ product_id: product._id }),
     ]);
-    if (campaigns || orderItems || events) {
+
+    let purgeDecision = buildAffiliatePurgeBlockers({ campaigns, orderItems });
+    if (purgeDecision.blocked) {
       return res.status(409).json({
-        message: "Affiliate product is referenced and cannot be permanently deleted",
-        references: { campaigns, order_items: orderItems, affiliate_events: events },
+        message: `Affiliate product cannot be permanently deleted because it is referenced by ${purgeDecision.blockers.join(", ")}.`,
+        references: {
+          campaigns: campaigns.length,
+          published_campaigns: purgeDecision.publishedCampaigns.length,
+          order_items: orderItems,
+          affiliate_events: events,
+        },
       });
     }
-    await Product.deleteOne({ _id: product._id });
-    return res.json({ message: "Affiliate product permanently deleted" });
+
+    const campaignCleanup = await purgeUnpublishedAffiliateCampaignReferences(campaigns, {
+      actorAdminId: req.user?._id || null,
+    });
+    purgeDecision = buildAffiliatePurgeBlockers({
+      campaigns,
+      orderItems,
+      cleanupFailures: campaignCleanup.cleanupFailures,
+    });
+    if (purgeDecision.blocked) {
+      return res.status(409).json({
+        message: `Affiliate product cannot be permanently deleted because ${purgeDecision.blockers.join(", ")} must be resolved first.`,
+        references: {
+          campaigns: campaigns.length,
+          published_campaigns: purgeDecision.publishedCampaigns.length,
+          order_items: orderItems,
+          affiliate_events: events,
+        },
+        cleanup_failures: campaignCleanup.cleanupFailures,
+      });
+    }
+
+    const [deletedEvents] = await Promise.all([
+      AffiliateEvent.deleteMany({ product_id: product._id }),
+      Product.deleteOne({ _id: product._id }),
+    ]);
+    return res.json({
+      message: "Affiliate product permanently deleted",
+      deleted_affiliate_events: Number(deletedEvents.deletedCount || 0),
+      deleted_campaigns: campaignCleanup.deletedCampaigns.length,
+    });
   } catch (err) {
     return res.status(400).json({ message: err.message });
   }
@@ -1034,6 +1077,64 @@ async function publishAffiliateProductDocument(product) {
   });
   await product.save();
   return { product, validation };
+}
+
+function isPublishedCampaignReference(run = {}) {
+  return Boolean(
+    run.instagram_media_id
+    || run.published_at
+    || run.publish_status === "published"
+    || run.status === "published"
+  );
+}
+
+function buildAffiliatePurgeBlockers({ campaigns = [], orderItems = 0, cleanupFailures = [] } = {}) {
+  const publishedCampaigns = campaigns.filter(isPublishedCampaignReference);
+  const blockers = [];
+  if (Number(orderItems || 0) > 0) {
+    blockers.push(`${orderItems} order item${Number(orderItems) === 1 ? "" : "s"}`);
+  }
+  if (publishedCampaigns.length > 0) {
+    blockers.push(`${publishedCampaigns.length} published campaign audit record${publishedCampaigns.length === 1 ? "" : "s"}`);
+  }
+  if (cleanupFailures.length > 0) {
+    blockers.push(`${cleanupFailures.length} campaign cleanup failure${cleanupFailures.length === 1 ? "" : "s"}`);
+  }
+  return {
+    blocked: blockers.length > 0,
+    blockers,
+    publishedCampaigns,
+  };
+}
+
+async function purgeUnpublishedAffiliateCampaignReferences(campaigns = [], { actorAdminId = null } = {}) {
+  const deletedCampaigns = [];
+  const cleanupFailures = [];
+
+  for (const campaign of campaigns) {
+    if (isPublishedCampaignReference(campaign)) continue;
+    try {
+      if (!campaign.archived_at || campaign.status !== "archived") {
+        await archiveCampaignRun(campaign._id, {
+          actorAdminId,
+          reason: "Source affiliate product was permanently deleted.",
+        });
+      }
+      const result = await purgeCampaignRun(campaign._id, { actorAdminId });
+      deletedCampaigns.push({
+        id: String(campaign._id),
+        campaign_id: result.campaign_id || campaign.campaign_id || null,
+      });
+    } catch (error) {
+      cleanupFailures.push({
+        id: String(campaign._id),
+        campaign_id: campaign.campaign_id || null,
+        message: error.message || "Campaign cleanup failed",
+      });
+    }
+  }
+
+  return { deletedCampaigns, cleanupFailures };
 }
 
 async function applyAffiliateBulkAction(product, action, payload = {}) {
@@ -1467,6 +1568,8 @@ module.exports = {
     buildAffiliateImageContent,
     buildAffiliatePayloadSnapshot,
     buildRequiredAffiliateFieldErrors,
+    buildAffiliatePurgeBlockers,
+    isPublishedCampaignReference,
     normalizeAdminAffiliateDataSource,
     performAffiliateBulkAction,
     resolveManualAffiliateImageUrl,
