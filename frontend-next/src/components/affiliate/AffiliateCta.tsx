@@ -53,7 +53,7 @@ export function AffiliateCta({
           <a
             href={href}
             target="_blank"
-            rel="sponsored noopener nofollow"
+            rel="sponsored noopener noreferrer nofollow"
             onClick={handleClick}
           >
             <ExternalLink className="h-4 w-4" />

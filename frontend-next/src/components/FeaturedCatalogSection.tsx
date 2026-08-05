@@ -128,9 +128,14 @@ const FeaturedCatalogSection = ({ initialCatalogResponse }: { initialCatalogResp
               Approved admin and vendor-backed products now surface here, so shoppers can discover the live catalog straight from the homepage.
             </p>
           </div>
-          <Button asChild size="lg" className="rounded-2xl">
-            <Link href="/products">View all products</Link>
-          </Button>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <Button asChild size="lg" variant="secondary" className="rounded-2xl">
+              <Link href="/wellness">Wellness guides</Link>
+            </Button>
+            <Button asChild size="lg" className="rounded-2xl">
+              <Link href="/products">View all products</Link>
+            </Button>
+          </div>
         </div>
 
         <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">

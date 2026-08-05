@@ -15,6 +15,12 @@ const Footer = () => {
           </div>
           <div className="flex flex-wrap items-center justify-center gap-6 text-sm text-muted-foreground">
             <Link
+              href="/wellness"
+              className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
+            >
+              Wellness
+            </Link>
+            <Link
               href="/vendor/signup"
               className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
             >

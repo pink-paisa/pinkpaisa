@@ -4,6 +4,7 @@ import Footer from "@/components/Footer";
 import Navbar from "@/components/Navbar";
 import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
 import type { CatalogProduct } from "@/hooks/useCatalogProducts";
+import { WELLNESS_INSTAGRAM_PICKS_PATH } from "@/lib/wellnessSeo";
 
 type InstagramAffiliateLandingProps = {
   title: string;
@@ -51,6 +52,12 @@ export default function InstagramAffiliateLanding({
               Campaign
             </span>
           ) : null}
+          <Link
+            href={WELLNESS_INSTAGRAM_PICKS_PATH}
+            className="inline-flex min-h-11 items-center rounded-full border border-border bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+          >
+            Wellness Instagram Picks
+          </Link>
         </div>
 
         {products.length ? (

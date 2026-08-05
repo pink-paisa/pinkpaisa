@@ -4,10 +4,12 @@ import type { Blog } from "@/hooks/useBlogs";
 import type { CatalogProductsResponse } from "@/hooks/useCatalogProducts";
 import type { Workshop } from "@/hooks/useWorkshops";
 import { getSiteUrl, serverFetch } from "@/lib/server-api";
+import { fetchIndexableWellnessCollections } from "@/lib/wellnessServer";
 
 const STATIC_PATHS = [
   "",
   "/products",
+  "/wellness",
   "/instagram",
   "/instagram/picks",
   "/instagram/trending",
@@ -54,10 +56,11 @@ function renderSitemap(items: SitemapItem[]) {
 export const getServerSideProps: GetServerSideProps = async ({ res }) => {
   const siteUrl = getSiteUrl();
 
-  const [products, blogs, workshops] = await Promise.all([
+  const [products, blogs, workshops, wellnessCollections] = await Promise.all([
     serverFetch<CatalogProductsResponse>("/products?include_meta=true&_page=1&_limit=5000").catch(() => null),
     serverFetch<Blog[]>("/blogs").catch(() => []),
     serverFetch<Workshop[]>("/workshops").catch(() => []),
+    fetchIndexableWellnessCollections().catch(() => []),
   ]);
 
   const calculatorPaths = financialCalculatorGroups.flatMap((group) =>
@@ -66,6 +69,7 @@ export const getServerSideProps: GetServerSideProps = async ({ res }) => {
 
   const items: SitemapItem[] = [
     ...STATIC_PATHS.map((path) => ({ loc: `${siteUrl}${path}` })),
+    ...wellnessCollections.map((collection) => ({ loc: `${siteUrl}${collection.path}` })),
     ...calculatorPaths.map((path) => ({ loc: `${siteUrl}${path}` })),
     ...((products?.items ?? []).map((product) => ({
       loc: `${siteUrl}/product/${product.slug}`,

@@ -3,6 +3,13 @@ import ProductDetailPage from "@/pages/ProductDetail";
 import SeoHead from "@/components/SeoHead";
 import { CatalogProductDetail } from "@/hooks/useCatalogProducts";
 import { getSiteUrl, serverFetch } from "@/lib/server-api";
+import {
+  buildProductPageJsonLd,
+  getProductSeoDescription,
+  getProductSeoImage,
+  getProductSeoTitle,
+  isIndexableProduct,
+} from "@/lib/productSeo";
 
 type ProductPageProps = {
   slug: string;
@@ -20,38 +27,13 @@ export const getServerSideProps: GetServerSideProps<ProductPageProps> = async ({
 };
 
 export default function ProductPage({ slug, initialProduct }: ProductPageProps) {
-  const title = initialProduct?.title || "Product";
-  const description =
-    initialProduct?.short_description ||
-    initialProduct?.full_description ||
-    `Explore ${title} on Pink Paisa.`;
-  const image = initialProduct?.featured_image || initialProduct?.images?.[0] || null;
-  const price = initialProduct?.sale_price ?? initialProduct?.price ?? null;
-  const isAffiliate = Boolean(initialProduct?.is_affiliate);
-
-  const productJsonLd =
-    initialProduct && !isAffiliate && price != null
-      ? {
-          "@context": "https://schema.org",
-          "@type": "Product",
-          name: initialProduct.title,
-          image: image ? [image] : undefined,
-          description,
-          sku: initialProduct.sku || undefined,
-          brand: { "@type": "Brand", name: initialProduct.brand_name || "Pink Paisa" },
-          category: initialProduct.category || undefined,
-          offers: {
-            "@type": "Offer",
-            priceCurrency: "INR",
-            price,
-            availability:
-              initialProduct.stock_quantity > 0
-                ? "https://schema.org/InStock"
-                : "https://schema.org/OutOfStock",
-            url: `${getSiteUrl()}/product/${slug}`,
-          },
-        }
-      : null;
+  const title = getProductSeoTitle(initialProduct);
+  const description = getProductSeoDescription(initialProduct);
+  const image = getProductSeoImage(initialProduct);
+  const noindex = !isIndexableProduct(initialProduct);
+  const productJsonLd = initialProduct
+    ? buildProductPageJsonLd(initialProduct, getSiteUrl(), `/product/${slug}`)
+    : null;
 
   return (
     <>
@@ -61,6 +43,7 @@ export default function ProductPage({ slug, initialProduct }: ProductPageProps) 
         canonicalPath={`/product/${slug}`}
         image={image}
         type="product"
+        noindex={noindex}
       />
       {productJsonLd ? (
         <script

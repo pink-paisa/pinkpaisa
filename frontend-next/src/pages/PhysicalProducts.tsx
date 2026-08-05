@@ -378,6 +378,9 @@ const PhysicalProducts = ({
           <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-primary md:text-sm">Wellness Products</p>
           <h1 className="mb-2 max-w-full font-serif text-2xl leading-tight md:text-4xl">Curated Products for Your Journey</h1>
           <p className="max-w-2xl text-base leading-7 text-muted-foreground md:text-lg">Wellness, self-growth & financial empowerment - handpicked for you.</p>
+          <Link href="/wellness" className="mt-3 inline-flex text-sm font-semibold text-primary hover:underline">
+            Explore Pink Paisa Wellness guides
+          </Link>
         </div>
 
         <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(18rem,28rem)_auto] lg:items-center lg:justify-between">

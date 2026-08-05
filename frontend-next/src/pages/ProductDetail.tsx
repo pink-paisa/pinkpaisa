@@ -17,6 +17,7 @@ import {
 import Footer from "@/components/Footer";
 import Navbar from "@/components/Navbar";
 import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
+import AffiliateProductSeoSection from "@/components/affiliate/AffiliateProductSeoSection";
 import { useCart } from "@/contexts/CartContext";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -28,7 +29,12 @@ import {
 import { useWishlist } from "@/hooks/useWishlist";
 import { trackAffiliateEvent } from "@/lib/affiliateTracking";
 import { formatAffiliateDataRefreshTime, hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
+import { getWellnessPathFromLabels } from "@/lib/wellnessSeo";
 import { toast } from "sonner";
+
+const getWellnessCategoryPath = (product?: CatalogProductDetail | null) => {
+  return getWellnessPathFromLabels(product?.subcategory, product?.category);
+};
 
 const formatPrice = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
@@ -165,6 +171,7 @@ const ProductDetail = ({
   const wished = isWishlisted(product.id);
   const showStickyAffiliateCta = isAffiliate && product.affiliate_compliance_status === "compliant";
   const showStickyPhysicalCta = !isAffiliate && !outOfStock;
+  const wellnessCategoryPath = getWellnessCategoryPath(product);
 
   const handleAdd = () => {
     if (outOfStock || isAffiliate || quantity <= 0) return;
@@ -311,6 +318,11 @@ const ProductDetail = ({
               {product.category}
               {product.subcategory ? ` · ${product.subcategory}` : ""}
             </p>
+            {isAffiliate ? (
+              <Link href={wellnessCategoryPath} className="mb-3 inline-flex text-sm font-medium text-primary hover:underline">
+                Browse related Pink Paisa Wellness picks
+              </Link>
+            ) : null}
             <h1 className="mb-3 font-serif text-3xl leading-tight md:text-4xl">{product.title}</h1>
 
             {!isAffiliate || showAffiliateApiPrice ? (
@@ -440,6 +452,10 @@ const ProductDetail = ({
                   </div>
                 ) : null}
               </div>
+            ) : null}
+
+            {isAffiliate ? (
+              <AffiliateProductSeoSection product={product} wellnessPath={wellnessCategoryPath} />
             ) : null}
 
             {product.tags && product.tags.length > 0 ? (

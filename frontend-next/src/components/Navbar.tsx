@@ -14,6 +14,7 @@ import { useWishlist } from "@/hooks/useWishlist";
 
 const navLinks = [
   { label: "Featured Products", href: "/#products", isHash: true },
+  { label: "Wellness", href: "/wellness" },
   { label: "Pink Pages", href: "/pink-pages" },
   { label: "Workshops", href: "/workshops" },
   { label: "Predictions", href: "/predictions" },
@@ -67,6 +68,15 @@ const Navbar = () => {
                   className="absolute left-1/2 top-[calc(100%-8px)] z-50 w-[min(90vw,900px)] -translate-x-1/2 pt-4"
                 >
                   <div className="rounded-3xl border border-border bg-background p-6 shadow-2xl">
+                    <div className="mb-5 flex items-center justify-between gap-4 rounded-2xl bg-secondary/60 p-4">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Wellness guides</p>
+                        <p className="mt-1 text-sm text-muted-foreground">Browse curated affiliate pages for haircare, skincare and natural beauty.</p>
+                      </div>
+                      <Link href="/wellness" className="shrink-0 rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground">
+                        Open Wellness
+                      </Link>
+                    </div>
                     <div className="grid gap-6 md:grid-cols-3 xl:grid-cols-4">
                       {visibleTaxonomy.map((category) => (
                         <div key={category.id} className="min-w-0">
@@ -199,6 +209,9 @@ const Navbar = () => {
                 <AccordionItem value="wellness" className="border-none">
                   <AccordionTrigger className="py-3 text-sm font-medium text-foreground hover:no-underline">Wellness Products</AccordionTrigger>
                   <AccordionContent>
+                    <Link href="/wellness" onClick={() => setMobileOpen(false)} className="mb-3 block text-sm font-medium text-primary">
+                      Wellness buying guides
+                    </Link>
                     <Link href="/products" onClick={() => setMobileOpen(false)} className="mb-3 block text-sm font-medium text-primary">
                       View all wellness products
                     </Link>

@@ -49,6 +49,7 @@ export function getClarityPageType(asPath = "") {
   if (pathname === "/") return "home";
   if (pathname === "/products") return "products";
   if (pathname.startsWith("/product/")) return "product";
+  if (pathname.startsWith("/wellness")) return "wellness";
   if (pathname.startsWith("/instagram")) return "instagram";
   if (pathname.startsWith("/blogs")) return "blog";
   if (pathname.startsWith("/financial-calculator")) return "calculator";
@@ -61,7 +62,7 @@ export function getClarityPageType(asPath = "") {
 
 export function isAffiliateClarityPath(asPath = "") {
   const pathname = getPathname(asPath);
-  return pathname === "/products" || pathname.startsWith("/product/") || pathname.startsWith("/instagram");
+  return pathname === "/products" || pathname.startsWith("/product/") || pathname.startsWith("/wellness") || pathname.startsWith("/instagram");
 }
 
 export function getClarityTags(asPath = "") {
