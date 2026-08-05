@@ -1,5 +1,6 @@
 import type { GetServerSideProps } from "next";
 import SeoHead from "@/components/SeoHead";
+import ErrorBoundary from "@/components/ui/error-boundary";
 import type { CatalogProduct } from "@/hooks/useCatalogProducts";
 import { getSiteUrl } from "@/lib/server-api";
 import { fetchWellnessCategoryProducts, fetchWellnessCollectionBySlug } from "@/lib/wellnessServer";
@@ -45,9 +46,17 @@ export default function WellnessDynamicPage({ config, collections, products }: W
         description={config.seoDescription}
         canonicalPath={config.path}
         image="/og-pink-paisa.png"
+        noindex={!config.indexable}
       />
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
-      <WellnessCategoryLanding config={config} collections={collections} products={products} />
+      <ErrorBoundary
+        resetKey={config.path}
+        title="Wellness collection could not load"
+        description="This wellness collection hit a browser rendering issue. Reload this page or return to the main wellness hub."
+        actionLabel="Try again"
+      >
+        <WellnessCategoryLanding config={config} collections={collections} products={products} />
+      </ErrorBoundary>
     </>
   );
 }

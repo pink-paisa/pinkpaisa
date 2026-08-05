@@ -1,5 +1,6 @@
 import type { GetServerSideProps } from "next";
 import SeoHead from "@/components/SeoHead";
+import ErrorBoundary from "@/components/ui/error-boundary";
 import type { CatalogProduct } from "@/hooks/useCatalogProducts";
 import { getSiteUrl } from "@/lib/server-api";
 import { fetchWellnessCollections, fetchWellnessHubProducts } from "@/lib/wellnessServer";
@@ -42,7 +43,14 @@ export default function WellnessPage({ products, collections }: WellnessPageProp
         image="/og-pink-paisa.png"
       />
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }} />
-      <WellnessLanding products={products} collections={collections} />
+      <ErrorBoundary
+        resetKey={WELLNESS_HUB_PATH}
+        title="Wellness page could not load"
+        description="The wellness hub hit a browser rendering issue. Reload this page or browse products while we recover this section."
+        actionLabel="Try again"
+      >
+        <WellnessLanding products={products} collections={collections} />
+      </ErrorBoundary>
     </>
   );
 }

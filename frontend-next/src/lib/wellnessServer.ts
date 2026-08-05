@@ -1,7 +1,7 @@
 import type { CatalogProduct, CatalogProductsResponse } from "@/hooks/useCatalogProducts";
 import type { ProductCategoryNode } from "@/hooks/useProductTaxonomy";
 import { serverFetch } from "@/lib/server-api";
-import { buildWellnessConfigsFromTaxonomy, type WellnessPageConfig } from "@/lib/wellnessSeo";
+import { buildWellnessConfigsFromTaxonomy, isIndexableWellnessConfig, type WellnessPageConfig } from "@/lib/wellnessSeo";
 
 const PRODUCT_LIMIT = 24;
 
@@ -20,16 +20,18 @@ async function fetchCatalogProducts(path: string) {
   return response?.items ?? [];
 }
 
-export async function fetchWellnessCollections() {
+export async function fetchWellnessCollections(options: { indexableOnly?: boolean } = { indexableOnly: true }) {
   const taxonomy = await serverFetch<ProductCategoryNode[]>("/categories/tree").catch(() => []);
-  return buildWellnessConfigsFromTaxonomy(taxonomy);
+  const collections = buildWellnessConfigsFromTaxonomy(taxonomy);
+  return options.indexableOnly === false ? collections : collections.filter(isIndexableWellnessConfig);
 }
 
 export async function fetchWellnessCollectionBySlug(slug: string) {
-  const collections = await fetchWellnessCollections();
+  const allCollections = await fetchWellnessCollections({ indexableOnly: false });
+  const collections = allCollections.filter(isIndexableWellnessConfig);
   return {
     collections,
-    config: collections.find((collection) => collection.key === slug || collection.path === `/wellness/${slug}`) || null,
+    config: allCollections.find((collection) => collection.key === slug || collection.path === `/wellness/${slug}`) || null,
   };
 }
 
@@ -86,10 +88,9 @@ export async function fetchIndexableWellnessCollections() {
   const collections = await fetchWellnessCollections();
   const products = await fetchCatalogProducts("/products?include_meta=true&is_affiliate=true&_page=1&_limit=5000");
   const subcategoryIds = new Set(products.map((product) => product.subcategory_id).filter(Boolean));
-  const hasInstagramProducts = products.some((product) => product.affiliate_is_instagram_pick || product.is_featured_affiliate);
 
   return collections.filter((collection) => {
-    if (collection.source === "instagram") return hasInstagramProducts;
+    if (collection.source === "instagram") return true;
     return Boolean(collection.subcategoryId && subcategoryIds.has(collection.subcategoryId));
   });
 }

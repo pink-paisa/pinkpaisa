@@ -16,6 +16,7 @@ export type WellnessPageConfig = {
   key: string;
   path: string;
   label: string;
+  indexable: boolean;
   seoTitle: string;
   seoDescription: string;
   eyebrow: string;
@@ -35,6 +36,14 @@ export type WellnessPageConfig = {
 
 export const WELLNESS_HUB_PATH = "/wellness";
 export const WELLNESS_INSTAGRAM_PICKS_PATH = `${WELLNESS_HUB_PATH}/instagram-picks`;
+export const INDEXABLE_WELLNESS_SLUGS = ["haircare", "skincare", "natural-beauty", "instagram-picks"] as const;
+
+const INDEXABLE_WELLNESS_SLUG_SET = new Set<string>(INDEXABLE_WELLNESS_SLUGS);
+
+export const isIndexableWellnessSlug = (slug = "") => INDEXABLE_WELLNESS_SLUG_SET.has(slugifyWellnessSegment(slug));
+
+export const isIndexableWellnessConfig = (config: Pick<WellnessPageConfig, "key" | "source" | "indexable">) =>
+  config.indexable || config.source === "instagram" || isIndexableWellnessSlug(config.key);
 
 export const WELLNESS_HUB_SEO = {
   title: "Pink Paisa Wellness Finds",
@@ -85,7 +94,7 @@ export const slugifyWellnessSegment = (value = "") =>
     .replace(/^-+|-+$/g, "");
 
 export const getWellnessPathFromLabels = (...values: Array<string | null | undefined>) => {
-  const slug = values.map((value) => slugifyWellnessSegment(String(value || ""))).find(Boolean);
+  const slug = values.map((value) => slugifyWellnessSegment(String(value || ""))).find(isIndexableWellnessSlug);
   return slug ? `${WELLNESS_HUB_PATH}/${slug}` : WELLNESS_HUB_PATH;
 };
 
@@ -161,6 +170,7 @@ export function buildTaxonomyWellnessConfig(category: ProductCategoryNode, subca
     key: subcategory.slug,
     path: `${WELLNESS_HUB_PATH}/${subcategory.slug}`,
     label,
+    indexable: isIndexableWellnessSlug(subcategory.slug),
     seoTitle,
     seoDescription,
     eyebrow: categoryName || "Pink Paisa Wellness",
@@ -187,6 +197,7 @@ export function buildInstagramWellnessConfig(): WellnessPageConfig {
     key: "instagram-picks",
     path: WELLNESS_INSTAGRAM_PICKS_PATH,
     label,
+    indexable: true,
     seoTitle: "Instagram Wellness Picks | Pink Paisa Wellness",
     seoDescription:
       "Shop Pink Paisa Wellness finds featured for Instagram reels, stories, and campaign collections. Open each pick for context before checking Amazon.",
