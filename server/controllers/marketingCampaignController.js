@@ -1,4 +1,4 @@
-const archiver = require("archiver");
+const { ZipArchive } = require("archiver");
 const {
   archiveCampaignRun,
   archiveCampaignRuns,
@@ -46,6 +46,10 @@ const campaignErrorResponse = (error) => ({
 });
 const isCarouselConflict = (error) => ["carousel_conflict", "carousel_not_ready", "carousel_publish_uncertain"].includes(error?.code);
 const BULK_CAMPAIGN_ACTION_LIMIT = 25;
+
+function createCampaignZipArchive() {
+  return new ZipArchive({ zlib: { level: 9 } });
+}
 
 function normalizeBulkCampaignRunIds(runIds) {
   if (!Array.isArray(runIds)) {
@@ -217,7 +221,7 @@ const downloadMarketingCampaignAssetsZipController = async (req, res) => {
     res.setHeader("X-PinkPaisa-Downloaded-Assets", String(manifest.entries.length));
     res.setHeader("X-PinkPaisa-Skipped-Assets", String(manifest.skipped.length));
 
-    archive = archiver("zip", { zlib: { level: 9 } });
+    archive = createCampaignZipArchive();
     archive.on("error", (error) => {
       if (!res.headersSent) {
         res.status(500).json(campaignErrorResponse(error));
@@ -646,6 +650,7 @@ module.exports = {
   scheduleMarketingCampaignController,
   updateMarketingCampaignDraftController,
   _private: {
+    createCampaignZipArchive,
     normalizeBulkCampaignRunIds,
   },
 };

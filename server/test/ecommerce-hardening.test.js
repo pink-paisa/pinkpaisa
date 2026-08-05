@@ -328,6 +328,9 @@ test("campaign creative assets expose protected download metadata", () => {
 test("campaign asset zip helpers validate selected runs and filenames", () => {
   const runA = "66f000000000000000000001";
   const runB = "66f000000000000000000002";
+  const archive = marketingCampaignController._private.createCampaignZipArchive();
+  assert.equal(typeof archive.file, "function");
+  assert.equal(typeof archive.finalize, "function");
   assert.deepEqual(marketingPrivate.normalizeCampaignAssetZipRunIds([runA, runA, runB]), [runA, runB]);
   assert.throws(
     () => marketingPrivate.normalizeCampaignAssetZipRunIds([]),
