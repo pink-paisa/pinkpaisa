@@ -3,6 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const AgentTask = require("../models/AgentTask");
+const AffiliateEvent = require("../models/AffiliateEvent");
 const DailyBatchRun = require("../models/DailyBatchRun");
 const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
@@ -13,6 +14,20 @@ const Product = require("../models/Product");
 const Vendor = require("../models/Vendor");
 const VendorProduct = require("../models/VendorProduct");
 const { getCampaignSettings } = require("../utils/campaignSettings");
+const {
+  AUTOPILOT_CAROUSEL_MODE,
+  AUTOPILOT_MODES,
+  AUTOPILOT_SINGLE_MODE,
+  MAX_CAROUSEL_ITEMS,
+  buildAutopilotEligibleProductQuery,
+  buildAutopilotSelectionReport,
+  getAutopilotProductScore,
+  normalizeAutopilotCarouselCount,
+  normalizeAutopilotMode,
+  selectCarouselAutopilotProducts,
+  selectSingleAutopilotProduct,
+  shouldReturnExistingAutopilotBatch,
+} = require("../utils/campaignAutopilot");
 const logger = require("../utils/logger");
 const {
   AFFILIATE_INSTAGRAM_DISCLOSURE,
@@ -56,7 +71,6 @@ const MAX_BULK_CAMPAIGN_ACTIONS = 100;
 const MAX_BULK_REVIEW_ACTIONS = 25;
 const MAX_CAMPAIGN_ASSET_ZIP_RUNS = 50;
 const MAX_CAMPAIGN_ASSET_ZIP_ASSETS = 100;
-const MAX_CAROUSEL_ITEMS = 10;
 const CAMPAIGN_OPEN_STATUSES = ["queued", "batch_running", "waiting_review", "approved_for_publish", "scheduled", "publishing"];
 const PUBLIC_PRODUCT_CAMPAIGN_FIELDS = [
   "title slug status is_visible category subcategory category_id subcategory_id featured_image images",
@@ -196,6 +210,10 @@ function isAffiliateCampaignRun(run = {}, product = null) {
     || run.brief_json?.is_affiliate
     || run.source_event === "affiliate_product.published"
   );
+}
+
+function isAutopilotRun(run = {}) {
+  return AUTOPILOT_MODES.includes(String(run.automation_mode || ""));
 }
 
 function getRunPublishAssetUrls(run = {}) {
@@ -730,6 +748,10 @@ function serialiseRun(run, taskCounts = null) {
     campaign_id: run.campaign_id,
     source_event: run.source_event,
     source_event_key: run.source_event_key,
+    automation_mode: run.automation_mode || null,
+    autopilot_key: run.autopilot_key || null,
+    autopilot_group_key: run.autopilot_group_key || null,
+    autopilot_position: Number(run.autopilot_position || 0) || null,
     vendor_product_id: run.vendor_product_id?._id?.toString?.() || run.vendor_product_id?.toString?.() || run.vendor_product_id || null,
     public_product_id: run.public_product_id?._id?.toString?.() || run.public_product_id?.toString?.() || run.public_product_id || null,
     vendor_id: run.vendor_id?._id?.toString?.() || run.vendor_id?.toString?.() || run.vendor_id || null,
@@ -814,6 +836,7 @@ function serialiseBatchRun(batch) {
     success_count: Number(batch.success_count || 0),
     failed_count: Number(batch.failed_count || 0),
     error_summary: batch.error_summary || null,
+    metadata_json: batch.metadata_json || null,
     created_at: batch.created_at || null,
     updated_at: batch.updated_at || null,
   };
@@ -946,6 +969,118 @@ function shouldReturnExistingRunningBatch(batch, createdBatch = false) {
   return assignedRuns > 0 || Number(batch.total_runs || 0) > 0;
 }
 
+function isProductEligibleForAutopilot(product = {}, openProductIds = new Set()) {
+  if (!product?._id) return false;
+  if (openProductIds.has(String(product._id))) return false;
+  if ((product.source_type || "admin") !== "admin") return false;
+  if (!product.is_affiliate) return false;
+  if (product.archived_at || product.status !== "active" || product.is_visible !== true) return false;
+  if (product.affiliate_compliance_status !== "compliant") return false;
+  if (!product.affiliate_url || !product.affiliate_tag) return false;
+  if (["failed", "paused"].includes(String(product.affiliate_link_check_status || "").toLowerCase())) return false;
+  if (isUncategorizedValue(product.category) || isUncategorizedValue(product.subcategory)) return false;
+  if (!resolveProductReferenceImage(product)) return false;
+  try {
+    validateAffiliateProductForCampaign(product);
+  } catch (_error) {
+    return false;
+  }
+  return true;
+}
+
+async function applyAutopilotMarketSignals(products = [], { now = new Date() } = {}) {
+  if (!products.length) return products;
+  const productIds = products.map((product) => product._id).filter(Boolean);
+  const productIdSet = new Set(productIds.map((id) => getObjectIdString(id)));
+  const categories = Array.from(new Set(products.map((product) => normalizeProductGroupValue(product.category)).filter(Boolean)));
+  const productMeta = new Map(products.map((product) => [getObjectIdString(product._id), {
+    category: normalizeProductGroupValue(product.category),
+    title: product.title || null,
+  }]));
+  const window30d = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const window7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const [productEvents, productInstagramEvents, categoryEvents, recentRuns] = await Promise.all([
+    AffiliateEvent.aggregate([
+      { $match: { createdAt: { $gte: window30d }, is_bot: false, product_id: { $in: productIds } } },
+      {
+        $group: {
+          _id: "$product_id",
+          views: { $sum: { $cond: [{ $eq: ["$event_type", "product_view"] }, 1, 0] } },
+          cta_clicks: { $sum: { $cond: [{ $eq: ["$event_type", "cta_click"] }, 1, 0] } },
+          outbound_clicks: { $sum: { $cond: [{ $eq: ["$event_type", "outbound_click"] }, 1, 0] } },
+        },
+      },
+    ]),
+    AffiliateEvent.aggregate([
+      {
+        $match: {
+          createdAt: { $gte: window30d },
+          is_bot: false,
+          product_id: { $in: productIds },
+          utm_source: /instagram/i,
+        },
+      },
+      { $group: { _id: "$product_id", events: { $sum: 1 } } },
+    ]),
+    categories.length
+      ? AffiliateEvent.aggregate([
+        { $match: { createdAt: { $gte: window30d }, is_bot: false, category: { $in: categories } } },
+        {
+          $group: {
+            _id: "$category",
+            views: { $sum: { $cond: [{ $eq: ["$event_type", "product_view"] }, 1, 0] } },
+            outbound_clicks: { $sum: { $cond: [{ $eq: ["$event_type", "outbound_click"] }, 1, 0] } },
+          },
+        },
+      ])
+      : Promise.resolve([]),
+    MarketingCampaignRun.find({
+      source_event: "affiliate_product.published",
+      public_product_id: { $in: productIds },
+      created_at: { $gte: window30d },
+      status: { $ne: "archived" },
+    }).select("public_product_id created_at").lean(),
+  ]);
+
+  const eventMap = new Map(productEvents.map((row) => [getObjectIdString(row._id), row]));
+  const instagramEventMap = new Map(productInstagramEvents.map((row) => [getObjectIdString(row._id), Number(row.events || 0)]));
+  const categoryEventMap = new Map(categoryEvents.map((row) => [normalizeProductGroupValue(row._id), row]));
+  const recentProductCampaigns = new Map();
+  const recentCategoryCampaigns7d = new Map();
+
+  for (const run of recentRuns) {
+    const productId = getObjectIdString(run.public_product_id);
+    if (!productIdSet.has(productId)) continue;
+    recentProductCampaigns.set(productId, (recentProductCampaigns.get(productId) || 0) + 1);
+    const runCreatedAt = run.created_at ? new Date(run.created_at) : null;
+    const productCategory = productMeta.get(productId)?.category;
+    if (productCategory && runCreatedAt && runCreatedAt >= window7d) {
+      recentCategoryCampaigns7d.set(productCategory, (recentCategoryCampaigns7d.get(productCategory) || 0) + 1);
+    }
+  }
+
+  return products.map((product) => {
+    const productId = getObjectIdString(product._id);
+    const category = normalizeProductGroupValue(product.category);
+    const productRow = eventMap.get(productId) || {};
+    const categoryRow = categoryEventMap.get(category) || {};
+    return {
+      ...product,
+      autopilot_signals: {
+        views_30d: Number(productRow.views || 0),
+        cta_clicks_30d: Number(productRow.cta_clicks || 0),
+        outbound_clicks_30d: Number(productRow.outbound_clicks || 0),
+        instagram_events_30d: Number(instagramEventMap.get(productId) || 0),
+        category_views_30d: Number(categoryRow.views || 0),
+        category_outbound_clicks_30d: Number(categoryRow.outbound_clicks || 0),
+        recent_product_campaigns_30d: Number(recentProductCampaigns.get(productId) || 0),
+        recent_category_campaigns_7d: Number(recentCategoryCampaigns7d.get(category) || 0),
+      },
+    };
+  });
+}
+
 function buildTaskInput(run, agentName) {
   if (agentName === "intake") {
     return {
@@ -959,7 +1094,15 @@ function buildTaskInput(run, agentName) {
   if (agentName === "caption") return { brief_json: run.brief_json || null, creative_json: run.creative_json || null };
   if (agentName === "compliance") return { brief_json: run.brief_json || null, caption_json: run.caption_json || null, creative_json: run.creative_json || null };
   if (agentName === "tracking") return { brief_json: run.brief_json || null, caption_json: run.caption_json || null, compliance_json: run.compliance_json || null, creative_json: run.creative_json || null };
-  if (agentName === "publish") return { tracking_json: run.tracking_json || null, creative_json: run.creative_json || null, caption_json: run.caption_json || null };
+  if (agentName === "publish") {
+    return {
+      tracking_json: run.tracking_json || null,
+      creative_json: run.creative_json || null,
+      caption_json: run.caption_json || null,
+      automatic: isAutopilotRun(run),
+      automation_mode: run.automation_mode || null,
+    };
+  }
   if (agentName === "carousel") return { grouped_run_ids: [], actor_admin_id: null };
   return {};
 }
@@ -1241,6 +1384,170 @@ async function markRunFailed(runId, agentName, errorMessage) {
   await refreshBatchRun(run?.batch_run_id);
 }
 
+async function failAutopilotRun(run, message, {
+  actionType = "failed_publish",
+  metadata = null,
+} = {}) {
+  const failed = await MarketingCampaignRun.findOneAndUpdate(
+    {
+      _id: run._id,
+      archived_at: null,
+      status: { $nin: ["archived", "published"] },
+      publish_status: { $ne: "published" },
+      instagram_media_id: null,
+    },
+    {
+      $set: {
+        status: "failed",
+        current_stage: "autopilot",
+        publish_status: "failed",
+        review_status: "not_required",
+        review_stage: null,
+        last_error: message,
+        publish_attempted_at: new Date(),
+      },
+    },
+    { new: true }
+  );
+  await refreshBatchRun((failed || run).batch_run_id);
+  await recordPublishEvent(failed || run, {
+    actionType,
+    status: "failed",
+    errorMessage: message,
+    readinessSnapshot: failed
+      ? await buildCurrentRunPublishReadiness(failed, { requireApproval: false }).catch(() => null)
+      : null,
+    metadata: {
+      automatic: true,
+      automation_mode: run.automation_mode || null,
+      ...(metadata || {}),
+    },
+  });
+  return failed;
+}
+
+async function approveAutopilotRunForPublishing(run, readiness, extraUpdates = {}) {
+  const updated = await MarketingCampaignRun.findOneAndUpdate(
+    {
+      _id: run._id,
+      archived_at: null,
+      status: { $nin: ["archived", "published", "publishing"] },
+      publish_status: { $ne: "published" },
+      instagram_media_id: null,
+    },
+    {
+      $set: {
+        review_status: "approved",
+        review_stage: null,
+        review_notes: "Instagram autopilot approved this campaign after compliance and publish-readiness gates passed.",
+        last_error: null,
+        ...extraUpdates,
+      },
+    },
+    { new: true }
+  );
+  if (!updated) return null;
+  await recordPublishEvent(updated, {
+    actionType: "review",
+    status: "success",
+    readinessSnapshot: readiness,
+    metadata: {
+      automatic: true,
+      automation_mode: updated.automation_mode || null,
+      bypassed_manual_review: true,
+    },
+  });
+  return updated;
+}
+
+async function maybeQueueAutopilotCarousel(groupKey) {
+  if (!groupKey) return null;
+  const groupRuns = await MarketingCampaignRun.find({
+    autopilot_group_key: groupKey,
+    automation_mode: AUTOPILOT_CAROUSEL_MODE,
+    archived_at: null,
+  }).sort({ autopilot_position: 1, created_at: 1 });
+  if (groupRuns.length < 2) return null;
+  const expectedSize = Math.max(...groupRuns.map((run) => Number(run.autopilot_position || 0)).filter(Boolean));
+  if (expectedSize < 2 || groupRuns.length !== expectedSize) return null;
+
+  const allReady = groupRuns.every((run) => (
+    run.review_status === "approved"
+    && run.publish_status === "ready"
+    && run.status === "approved_for_publish"
+    && run.tracking_json?.publish_payload
+    && !run.carousel_task_id
+  ));
+  if (!allReady) return null;
+
+  const runIds = groupRuns.map((run) => String(run._id));
+  try {
+    return await queueAffiliateCarousel({
+      runIds,
+      actorAdminId: null,
+    });
+  } catch (error) {
+    const message = describeExecutionError(error);
+    if (error?.code === "carousel_conflict") {
+      logger.info({ groupKey, runIds, err: error }, "autopilot carousel already queued or claimed");
+      return null;
+    }
+    await Promise.all(groupRuns.map((run) => failAutopilotRun(run, message, {
+      actionType: "carousel_publish",
+      metadata: {
+        selected_run_ids: runIds,
+        carousel_autopilot_group_key: groupKey,
+      },
+    })));
+    logger.error({ groupKey, runIds, err: error }, "autopilot carousel could not be queued");
+    return null;
+  }
+}
+
+async function completeAutopilotAfterTracking(run) {
+  const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: false });
+  if (!readiness.can_publish) {
+    await failAutopilotRun(run, formatReadinessBlockers(readiness, "Autopilot campaign is not ready to publish"), {
+      metadata: { readiness },
+    });
+    return;
+  }
+
+  if (run.automation_mode === AUTOPILOT_SINGLE_MODE) {
+    const updated = await approveAutopilotRunForPublishing(run, readiness, {
+      status: "publishing",
+      current_stage: "publish",
+      publish_status: "publishing",
+      scheduled_for: null,
+      publish_attempted_at: new Date(),
+    });
+    if (!updated) return;
+    await recordPublishEvent(updated, {
+      actionType: "publish",
+      status: "started",
+      readinessSnapshot: await buildCurrentRunPublishReadiness(updated, { requireApproval: true, allowPublishingState: true }).catch(() => readiness),
+      metadata: {
+        automatic: true,
+        automation_mode: updated.automation_mode,
+      },
+    });
+    await upsertTask(updated, "publish", "queued");
+    return;
+  }
+
+  if (run.automation_mode === AUTOPILOT_CAROUSEL_MODE) {
+    const updated = await approveAutopilotRunForPublishing(run, readiness, {
+      status: "approved_for_publish",
+      current_stage: "approved_for_publish",
+      publish_status: "ready",
+      scheduled_for: null,
+    });
+    if (!updated) return;
+    await refreshBatchRun(updated.batch_run_id);
+    await maybeQueueAutopilotCarousel(updated.autopilot_group_key);
+  }
+}
+
 function buildOrphanPublishRecoveryUpdates(run = {}, attempt = null, recoveredAt = new Date()) {
   const durableAttempt = mergeAttemptWithRunPublishState(attempt, run);
   if (hasDurablePublishedAttempt(durableAttempt)) {
@@ -1505,6 +1812,10 @@ async function advanceRun(run, agentName, output) {
   };
   const nextAgent = getNextAutoAgent(agentName);
   if (!nextAgent) {
+    if (isAutopilotRun(run)) {
+      await completeAutopilotAfterTracking(run);
+      return;
+    }
     const updated = await MarketingCampaignRun.findOneAndUpdate(transitionFilter, {
       $set: {
         status: "waiting_review",
@@ -2422,6 +2733,234 @@ async function enqueueAffiliateProductCampaign({ productId, queuedAt }) {
   return serialiseRun({ ...run.toObject(), public_product_id: product });
 }
 
+async function getOpenAutopilotProductIds() {
+  const rows = await MarketingCampaignRun.find({
+    source_event: "affiliate_product.published",
+    public_product_id: { $ne: null },
+    archived_at: null,
+    status: { $in: CAMPAIGN_OPEN_STATUSES },
+  }).select("public_product_id").lean();
+  return new Set(rows.map((row) => getObjectIdString(row.public_product_id)).filter(Boolean));
+}
+
+async function getEligibleAutopilotProducts({ limit = 250 } = {}) {
+  const [products, openProductIds] = await Promise.all([
+    Product.find(buildAutopilotEligibleProductQuery())
+      .sort({
+        affiliate_is_instagram_pick: -1,
+        is_featured_affiliate: -1,
+        affiliate_sort_order: 1,
+        createdAt: -1,
+      })
+      .limit(Math.max(Number(limit || 1), 1))
+      .lean(),
+    getOpenAutopilotProductIds(),
+  ]);
+
+  const eligibleProducts = products.filter((product) => isProductEligibleForAutopilot(product, openProductIds));
+  return applyAutopilotMarketSignals(eligibleProducts);
+}
+
+async function createAutopilotAffiliateCampaignRun({
+  product,
+  queuedAt,
+  batch,
+  batchKey,
+  batchDateIst,
+  automationMode,
+  groupKey,
+  position = null,
+}) {
+  await assertCampaignReferenceReady(resolveProductReferenceImage(product));
+  const sourceEventKey = `affiliate_product.${automationMode}:${batchDateIst}:${String(product._id)}`;
+  const existing = await MarketingCampaignRun.findOne({ source_event_key: sourceEventKey });
+  if (existing) return existing;
+
+  return MarketingCampaignRun.create({
+    campaign_id: buildCampaignId(product._id),
+    source_event: "affiliate_product.published",
+    source_event_key: sourceEventKey,
+    automation_mode: automationMode,
+    autopilot_key: batchKey,
+    autopilot_group_key: groupKey,
+    autopilot_position: position,
+    vendor_product_id: null,
+    public_product_id: product._id,
+    vendor_id: null,
+    product_title: product.title,
+    product_slug: product.slug,
+    vendor_shop_name: product.brand_name || product.affiliate_source_platform || "Affiliate Partner",
+    status: "batch_running",
+    current_stage: "intake",
+    batch_key: batchKey,
+    batch_run_id: batch._id,
+    review_status: "not_required",
+    review_stage: null,
+    review_notes: "Instagram autopilot will publish automatically after compliance gates pass.",
+    publish_status: "not_ready",
+    approved_at: queuedAt,
+  });
+}
+
+async function markAutopilotBatchSkipped(batch, {
+  mode,
+  reason,
+  batchDateIst,
+  selectedCategory = null,
+  requestedCount = null,
+} = {}) {
+  const updated = await DailyBatchRun.findByIdAndUpdate(batch._id, {
+    $set: {
+      status: "completed_with_errors",
+      finished_at: new Date(),
+      total_runs: 0,
+      success_count: 0,
+      failed_count: 0,
+      run_ids: [],
+      error_summary: reason || "Instagram autopilot skipped because no eligible product was available.",
+      metadata_json: {
+        ...(batch.metadata_json || {}),
+        autopilot_attempted: true,
+        autopilot_mode: mode,
+        batch_date_ist: batchDateIst,
+        selected_category: selectedCategory,
+        requested_count: requestedCount,
+        skipped: true,
+        skip_reason: reason || null,
+      },
+    },
+  }, { new: true });
+  logger.warn({ mode, reason, batchKey: batch.batch_key }, "Instagram autopilot daily batch skipped");
+  return serialiseBatchRun(updated);
+}
+
+async function runAutopilotDailyBatch({
+  batch,
+  settings,
+  date,
+  batchKey,
+  batchDateIst,
+} = {}) {
+  if (shouldReturnExistingAutopilotBatch(batch)) {
+    return serialiseBatchRun(batch);
+  }
+
+  const mode = normalizeAutopilotMode(settings);
+  const queuedAt = date ? new Date(date) : new Date();
+  const eligibleProducts = await getEligibleAutopilotProducts();
+  if (!eligibleProducts.length) {
+    return markAutopilotBatchSkipped(batch, {
+      mode,
+      batchDateIst,
+      reason: "No eligible, compliant, active, visible affiliate products are available for Instagram autopilot.",
+    });
+  }
+
+  let selectedProducts = [];
+  let selectedCategory = null;
+  let requestedCount = null;
+  let categoryReasons = [];
+
+  if (mode === "single_post") {
+    const selected = selectSingleAutopilotProduct(eligibleProducts);
+    selectedProducts = selected ? [selected] : [];
+  } else if (mode === "carousel") {
+    requestedCount = normalizeAutopilotCarouselCount(settings.campaign_autopilot_carousel_count);
+    const selection = selectCarouselAutopilotProducts(eligibleProducts, requestedCount);
+    selectedProducts = selection.products;
+    selectedCategory = selection.category;
+    categoryReasons = selection.reasons || [];
+    if (!selectedProducts.length) {
+      return markAutopilotBatchSkipped(batch, {
+        mode,
+        batchDateIst,
+        selectedCategory,
+        requestedCount,
+        reason: selection.reason || `Not enough eligible products are available for a ${requestedCount}-slide carousel.`,
+      });
+    }
+  } else {
+    return markAutopilotBatchSkipped(batch, {
+      mode,
+      batchDateIst,
+      reason: "Instagram autopilot mode is not enabled.",
+    });
+  }
+
+  if (!selectedProducts.length) {
+    return markAutopilotBatchSkipped(batch, {
+      mode,
+      batchDateIst,
+      selectedCategory,
+      requestedCount,
+      reason: "No eligible product was selected for Instagram autopilot.",
+    });
+  }
+
+  const selectionReport = buildAutopilotSelectionReport({
+    mode,
+    products: eligibleProducts,
+    selectedProducts,
+    selectedCategory,
+    requestedCount,
+    categoryReasons,
+  });
+
+  const automationMode = mode === "carousel" ? AUTOPILOT_CAROUSEL_MODE : AUTOPILOT_SINGLE_MODE;
+  const groupKey = `${automationMode}:${batchDateIst}:${crypto
+    .createHash("sha1")
+    .update(selectedProducts.map((product) => String(product._id)).join(":"))
+    .digest("hex")
+    .slice(0, 12)}`;
+  const runs = [];
+  for (let index = 0; index < selectedProducts.length; index += 1) {
+    const run = await createAutopilotAffiliateCampaignRun({
+      product: selectedProducts[index],
+      queuedAt,
+      batch,
+      batchKey,
+      batchDateIst,
+      automationMode,
+      groupKey,
+      position: index + 1,
+    });
+    runs.push(run);
+    await upsertTask(run, "intake", "queued");
+  }
+
+  const runIds = runs.map((run) => run._id);
+  const updated = await DailyBatchRun.findByIdAndUpdate(batch._id, {
+    $set: {
+      status: "running",
+      total_runs: runIds.length,
+      run_ids: runIds,
+      started_at: batch.started_at || new Date(),
+      finished_at: null,
+      error_summary: null,
+      metadata_json: {
+        ...(batch.metadata_json || {}),
+        autopilot_attempted: true,
+        autopilot_mode: mode,
+        selected_category: selectedCategory,
+        selected_product_ids: selectedProducts.map((product) => String(product._id)),
+        selected_product_titles: selectedProducts.map((product) => product.title || null),
+        requested_count: requestedCount,
+        autopilot_group_key: groupKey,
+        autopilot_strategy: selectionReport,
+      },
+    },
+  }, { new: true });
+  logger.info({
+    mode,
+    selectedCategory,
+    selectedCount: selectedProducts.length,
+    productIds: selectedProducts.map((product) => String(product._id)),
+    strategy: selectionReport,
+    batchKey,
+  }, "Instagram autopilot daily batch started");
+  return serialiseBatchRun(updated);
+}
+
 async function runDailyBatch({ triggerType = "manual", date = new Date() } = {}) {
   const parts = getIstParts(date);
   const batchDateIst = `${parts.year}-${parts.month}-${parts.day}`;
@@ -2445,6 +2984,18 @@ async function runDailyBatch({ triggerType = "manual", date = new Date() } = {})
         throw error;
       }
     }
+  }
+
+  const settings = await getCampaignSettings();
+  const autopilotMode = normalizeAutopilotMode(settings);
+  if (autopilotMode !== "manual_review") {
+    return runAutopilotDailyBatch({
+      batch,
+      settings,
+      date,
+      batchKey,
+      batchDateIst,
+    });
   }
 
   if (shouldReturnExistingRunningBatch(batch, createdBatch)) {
@@ -4857,6 +5408,7 @@ module.exports = {
   validateAffiliateProductForCampaign,
   _private: {
     accumulateQueueLaneCounts,
+    applyAutopilotMarketSignals,
     buildCampaignAssetReferenceQuery,
     buildCarouselGroupIdentity,
     buildCarouselTrackingUrl,
@@ -4868,6 +5420,9 @@ module.exports = {
     buildStaleTaskRecoveryFilter,
     buildCampaignAssetFileName,
     buildCampaignAssetZipFileName,
+    buildAutopilotEligibleProductQuery,
+    buildAutopilotSelectionReport,
+    getAutopilotProductScore,
     getActiveLeaseFilter,
     getNextAutoAgent,
     buildRunPublishReadinessSnapshot,
@@ -4892,7 +5447,12 @@ module.exports = {
     normalizeCampaignAssetZipRunIds,
     collectBulkCampaignReviewResults,
     parseCarouselScheduleDate,
+    normalizeAutopilotCarouselCount,
+    normalizeAutopilotMode,
+    selectCarouselAutopilotProducts,
+    selectSingleAutopilotProduct,
     sameRunIdSet,
+    shouldReturnExistingAutopilotBatch,
     shouldReturnExistingRunningBatch,
   },
 };

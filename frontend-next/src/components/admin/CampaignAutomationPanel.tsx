@@ -8,6 +8,8 @@ import { AlertTriangle, Clock3, MessageSquareQuote, Rocket, ShieldCheck, Sparkle
 
 export type CampaignAutomationSettings = {
   campaign_mode: "manual" | "automatic";
+  campaign_autopilot_mode: "manual_review" | "single_post" | "carousel";
+  campaign_autopilot_carousel_count: number;
   campaign_batch_hour_ist: number;
   campaign_batch_minute_ist: number;
   campaign_creative_mode: "template" | "ai_generated";
@@ -157,6 +159,9 @@ const CampaignAutomationPanel = ({
 }) => {
   const [activePrompt, setActivePrompt] = useState<"affiliate" | "catalog">("affiliate");
   const scheduledTime = `${pad(settings.campaign_batch_hour_ist)}:${pad(settings.campaign_batch_minute_ist)}`;
+  const activeMode = settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode !== "manual_review"
+    ? settings.campaign_autopilot_mode
+    : "manual_review";
   const providerOptions = (imageRegistry?.providers || [])
     .map((provider) => ({
       ...provider,
@@ -181,9 +186,9 @@ const CampaignAutomationPanel = ({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Campaign automation</p>
-          <h3 className="mt-2 font-serif text-2xl">Manual or automatic draft generation</h3>
+          <h3 className="mt-2 font-serif text-2xl">Instagram autopilot mode</h3>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-            Both modes stop every generated image and caption for admin review. Automatic mode only starts the scheduled draft pipeline; it never publishes by itself.
+            Choose whether campaigns stop for review or publish automatically after the same compliance and Instagram readiness gates pass.
           </p>
         </div>
         <Button className="rounded-2xl" onClick={onSave} disabled={loading || saving}>
@@ -194,40 +199,58 @@ const CampaignAutomationPanel = ({
       <div className="mt-5 grid gap-4 lg:grid-cols-[1.2fr,0.8fr]">
         <div className="rounded-2xl border border-border/70 bg-background/50 p-4">
           <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Mode</p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="mt-3 grid gap-3 lg:grid-cols-3">
             <button
               type="button"
-              onClick={() => onChange({ campaign_mode: "manual" })}
+              onClick={() => onChange({ campaign_mode: "manual", campaign_autopilot_mode: "manual_review" })}
               className={`rounded-2xl border p-4 text-left transition-all ${
-                settings.campaign_mode === "manual"
+                activeMode === "manual_review"
                   ? "border-primary bg-primary/5"
                   : "border-border/70 bg-background hover:border-border"
               }`}
             >
               <div className="flex items-center gap-2 text-foreground">
                 <ShieldCheck className="h-4 w-4 text-primary" />
-                <p className="font-medium">Manual draft generation</p>
+                <p className="font-medium">Review queue</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Start batches yourself. Every completed draft waits for visual review and approval.
+                Campaigns generate drafts and wait for admin approval before posting.
               </p>
             </button>
 
             <button
               type="button"
-              onClick={() => onChange({ campaign_mode: "automatic" })}
+              onClick={() => onChange({ campaign_mode: "automatic", campaign_autopilot_mode: "single_post" })}
               className={`rounded-2xl border p-4 text-left transition-all ${
-                settings.campaign_mode === "automatic"
+                activeMode === "single_post"
                   ? "border-primary bg-primary/5"
                   : "border-border/70 bg-background hover:border-border"
               }`}
             >
               <div className="flex items-center gap-2 text-foreground">
                 <Rocket className="h-4 w-4 text-primary" />
-                <p className="font-medium">Automatic draft generation</p>
+                <p className="font-medium">Single post autopilot</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Start queued products at the scheduled time, then stop every result at mandatory review.
+                Selects one eligible affiliate product and publishes one Instagram post per day.
+              </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onChange({ campaign_mode: "automatic", campaign_autopilot_mode: "carousel" })}
+              className={`rounded-2xl border p-4 text-left transition-all ${
+                activeMode === "carousel"
+                  ? "border-primary bg-primary/5"
+                  : "border-border/70 bg-background hover:border-border"
+              }`}
+            >
+              <div className="flex items-center gap-2 text-foreground">
+                <Rocket className="h-4 w-4 text-primary" />
+                <p className="font-medium">Carousel autopilot</p>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Selects one category, fills 2-10 eligible products, and publishes one carousel per day.
               </p>
             </button>
           </div>
@@ -239,7 +262,7 @@ const CampaignAutomationPanel = ({
             <p className="font-medium">Morning IST schedule</p>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Automatic draft mode uses this time for the daily batch trigger. Manual mode ignores it until you switch modes.
+            Autopilot uses this time for the daily post trigger. Review queue mode uses it only when automatic draft generation is enabled.
           </p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -266,8 +289,23 @@ const CampaignAutomationPanel = ({
           </div>
 
           <div className="mt-4 rounded-2xl bg-[#fff8fa] px-4 py-3 text-sm text-[#6b4b57]">
-            Next draft trigger target: <span className="font-medium">{scheduledTime} IST</span>
+            Next trigger target: <span className="font-medium">{scheduledTime} IST</span>
           </div>
+          {activeMode === "carousel" ? (
+            <div className="mt-4">
+              <p className="mb-2 text-xs uppercase tracking-[0.12em] text-muted-foreground">Carousel products</p>
+              <Input
+                type="number"
+                min={2}
+                max={10}
+                value={settings.campaign_autopilot_carousel_count}
+                onChange={(event) => onChange({ campaign_autopilot_carousel_count: Number(event.target.value || 2) })}
+              />
+              <p className="mt-2 text-xs text-muted-foreground">
+                Instagram API publishing supports 2-10 carousel slides. Autopilot skips the day if it cannot find enough eligible products in one category.
+              </p>
+            </div>
+          ) : null}
         </div>
       </div>
 

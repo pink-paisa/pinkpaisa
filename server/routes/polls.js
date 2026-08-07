@@ -31,7 +31,7 @@ const commentLimiter = createRateLimiter({
 });
 
 // Polls
-router.get("/", getPolls);
+router.get("/", optionalProtect, getPolls);
 router.post("/", protect, adminOnly, createPoll);
 router.put("/:id", protect, adminOnly, updatePoll);
 router.delete("/:id", protect, adminOnly, deletePoll);

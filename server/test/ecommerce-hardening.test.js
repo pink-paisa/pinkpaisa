@@ -190,6 +190,9 @@ test("marketing campaign schema supports affiliate product source events", () =>
   assert.equal(MarketingCampaignRun.schema.path("carousel_task_id").instance, "ObjectId");
   assert.equal(MarketingCampaignRun.schema.path("carousel_position").instance, "Number");
   assert.equal(MarketingCampaignRun.schema.path("carousel_size").instance, "Number");
+  assert.deepEqual(MarketingCampaignRun.schema.path("automation_mode").enumValues, ["manual_review", "autopilot_single", "autopilot_carousel", null]);
+  assert.equal(MarketingCampaignRun.schema.path("autopilot_group_key").instance, "String");
+  assert.equal(MarketingCampaignRun.schema.path("autopilot_position").options.max, 10);
 });
 
 test("marketing publish event schema records audit fields", () => {
@@ -471,6 +474,106 @@ test("carousel run selection enforces limits, uniqueness, and preserves order", 
   assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds([runA]), /between 2 and 10/);
   assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds([runA, runA]), /only once/);
   assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds(Array.from({ length: 11 }, (_, index) => `${index}`.padStart(24, "0"))), /between 2 and 10/);
+});
+
+test("Instagram autopilot mode normalization and daily lock are conservative", () => {
+  assert.equal(marketingPrivate.normalizeAutopilotMode({ campaign_mode: "manual", campaign_autopilot_mode: "single_post" }), "manual_review");
+  assert.equal(marketingPrivate.normalizeAutopilotMode({ campaign_mode: "automatic", campaign_autopilot_mode: "single_post" }), "single_post");
+  assert.equal(marketingPrivate.normalizeAutopilotMode({ campaign_mode: "automatic", campaign_autopilot_mode: "carousel" }), "carousel");
+  assert.equal(marketingPrivate.normalizeAutopilotMode({ campaign_mode: "automatic", campaign_autopilot_mode: "unknown" }), "manual_review");
+  assert.equal(marketingPrivate.normalizeAutopilotCarouselCount(1), 2);
+  assert.equal(marketingPrivate.normalizeAutopilotCarouselCount(11), 10);
+  assert.equal(marketingPrivate.normalizeAutopilotCarouselCount("7"), 7);
+  assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: { autopilot_attempted: true }, run_ids: [] }), true);
+  assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: {}, run_ids: ["run-id"] }), true);
+  assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: {}, run_ids: [], total_runs: 0 }), false);
+});
+
+test("Instagram autopilot selects one eligible product and balances carousel products inside one category", () => {
+  const product = (id, category, subcategory, score = {}) => ({
+    _id: id,
+    title: `Product ${id}`,
+    category,
+    subcategory,
+    featured_image: `https://cdn.example.com/${id}.jpg`,
+    is_affiliate: true,
+    source_type: "admin",
+    status: "active",
+    is_visible: true,
+    affiliate_compliance_status: "compliant",
+    affiliate_url: `https://www.amazon.in/example/dp/B0${String(id).padStart(8, "0")}?tag=pinkpaisa07-21`,
+    affiliate_tag: "pinkpaisa07-21",
+    affiliate_link_check_status: "ok",
+    ...score,
+  });
+  const products = [
+    product("1", "Haircare", "Shampoo", { affiliate_is_instagram_pick: true }),
+    product("2", "Haircare", "Shampoo"),
+    product("3", "Haircare", "Serum", { is_featured_affiliate: true }),
+    product("4", "Haircare", "Oil"),
+    product("5", "Skincare", "Serum"),
+    product("6", "Skincare", "Cleanser"),
+  ];
+
+  assert.equal(marketingPrivate.selectSingleAutopilotProduct(products)._id, "1");
+  const selection = marketingPrivate.selectCarouselAutopilotProducts(products, 4);
+  assert.equal(selection.category, "Haircare");
+  assert.equal(selection.products.length, 4);
+  assert.deepEqual(new Set(selection.products.map((item) => item.category)), new Set(["Haircare"]));
+  assert.ok(new Set(selection.products.map((item) => item.subcategory)).size > 1);
+
+  const blocked = marketingPrivate.selectCarouselAutopilotProducts(products, 5);
+  assert.equal(blocked.products.length, 0);
+  assert.match(blocked.reason, /Not enough eligible products/i);
+});
+
+test("Instagram autopilot selection uses demand signals and records decision rationale", () => {
+  const product = (id, signals = {}, score = {}) => ({
+    _id: id,
+    title: `Product ${id}`,
+    category: "Skincare",
+    subcategory: id === "1" ? "Serum" : "Cleanser",
+    featured_image: `https://cdn.example.com/${id}.jpg`,
+    is_affiliate: true,
+    source_type: "admin",
+    status: "active",
+    is_visible: true,
+    affiliate_compliance_status: "compliant",
+    affiliate_url: `https://www.amazon.in/example/dp/B0${String(id).padStart(8, "0")}?tag=pinkpaisa07-21`,
+    affiliate_tag: "pinkpaisa07-21",
+    affiliate_link_check_status: "ok",
+    autopilot_signals: signals,
+    ...score,
+  });
+  const quiet = product("1");
+  const demand = product("2", {
+    views_30d: 80,
+    cta_clicks_30d: 8,
+    outbound_clicks_30d: 5,
+    instagram_events_30d: 4,
+    category_views_30d: 120,
+    category_outbound_clicks_30d: 9,
+  });
+  const fatigued = product("3", {
+    views_30d: 80,
+    cta_clicks_30d: 8,
+    outbound_clicks_30d: 5,
+    instagram_events_30d: 4,
+    recent_product_campaigns_30d: 3,
+  });
+
+  assert.equal(marketingPrivate.selectSingleAutopilotProduct([quiet, demand])._id, "2");
+  assert.ok(marketingPrivate.getAutopilotProductScore(demand) > marketingPrivate.getAutopilotProductScore(quiet));
+  assert.ok(marketingPrivate.getAutopilotProductScore(demand) > marketingPrivate.getAutopilotProductScore(fatigued));
+
+  const report = marketingPrivate.buildAutopilotSelectionReport({
+    mode: "single_post",
+    products: [quiet, demand, fatigued],
+    selectedProducts: [demand],
+  });
+  assert.equal(report.strategy.includes("internal demand"), true);
+  assert.equal(report.selected_products[0].id, "2");
+  assert.match(report.selected_products[0].reasons.join(" "), /outbound click|Instagram-sourced|CTR/i);
 });
 
 test("carousel scheduling rejects invalid and near-term times", () => {
@@ -1640,6 +1743,20 @@ test("campaign prompts separate affiliate and catalog rules and resolve canonica
   assert.equal(catalog.imageCopy.eyebrow, "PINK PAISA EDITORIAL PICK");
   assert.equal(catalog.imageCopy.cta, "EXPLORE ON PINK PAISA");
   assert.match(catalog.prompt, /Render only the supplied eyebrow/i);
+  assert.equal(normaliseCampaignSettings({
+    campaign_mode: "automatic",
+    campaign_autopilot_mode: "carousel",
+    campaign_autopilot_carousel_count: 99,
+  }).campaign_autopilot_mode, "carousel");
+  assert.equal(normaliseCampaignSettings({
+    campaign_mode: "automatic",
+    campaign_autopilot_mode: "carousel",
+    campaign_autopilot_carousel_count: 99,
+  }).campaign_autopilot_carousel_count, 10);
+  assert.equal(normaliseCampaignSettings({
+    campaign_mode: "manual",
+    campaign_autopilot_mode: "single_post",
+  }).campaign_autopilot_mode, "manual_review");
   assert.equal(settings.prompt_defaults.affiliate, DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT_TEMPLATE);
   assert.equal(settings.prompt_defaults.catalog, DEFAULT_CATALOG_CAMPAIGN_AI_PROMPT_TEMPLATE);
 });

@@ -84,7 +84,20 @@ function getClientIp(req) {
   return req.ip || req.socket?.remoteAddress || "unknown";
 }
 
-function createMemoryRateLimiter({ windowMs = DEFAULT_WINDOW_MS, max = 30, keyPrefix = "global", message = "Too many requests, please try again later." } = {}) {
+function notifyLimit(onLimit, req) {
+  if (typeof onLimit !== "function") return;
+  Promise.resolve()
+    .then(() => onLimit(req))
+    .catch(() => {});
+}
+
+function createMemoryRateLimiter({
+  windowMs = DEFAULT_WINDOW_MS,
+  max = 30,
+  keyPrefix = "global",
+  message = "Too many requests, please try again later.",
+  onLimit,
+} = {}) {
   const bucket = new Map();
   let mutationCount = 0;
 
@@ -111,6 +124,7 @@ function createMemoryRateLimiter({ windowMs = DEFAULT_WINDOW_MS, max = 30, keyPr
 
     current.count += 1;
     if (current.count > max) {
+      notifyLimit(onLimit, req);
       const retryAfterSeconds = Math.max(Math.ceil((current.resetAt - now) / 1000), 1);
       res.setHeader("Retry-After", String(retryAfterSeconds));
       return res.status(429).json({ message });
@@ -120,8 +134,14 @@ function createMemoryRateLimiter({ windowMs = DEFAULT_WINDOW_MS, max = 30, keyPr
   };
 }
 
-function createRateLimiter({ windowMs = DEFAULT_WINDOW_MS, max = 30, keyPrefix = "global", message = "Too many requests, please try again later." } = {}) {
-  const memoryLimiter = createMemoryRateLimiter({ windowMs, max, keyPrefix, message });
+function createRateLimiter({
+  windowMs = DEFAULT_WINDOW_MS,
+  max = 30,
+  keyPrefix = "global",
+  message = "Too many requests, please try again later.",
+  onLimit,
+} = {}) {
+  const memoryLimiter = createMemoryRateLimiter({ windowMs, max, keyPrefix, message, onLimit });
 
   return async (req, res, next) => {
     if (!hasRedisUrl()) {
@@ -138,6 +158,7 @@ function createRateLimiter({ windowMs = DEFAULT_WINDOW_MS, max = 30, keyPrefix =
       const count = await redis.incr(key);
       if (count === 1) await redis.pExpire(key, windowMs);
       if (count > max) {
+        notifyLimit(onLimit, req);
         const ttl = await redis.pTTL(key);
         res.setHeader("Retry-After", String(Math.max(Math.ceil(ttl / 1000), 1)));
         return res.status(429).json({ message });

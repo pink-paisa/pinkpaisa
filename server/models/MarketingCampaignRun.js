@@ -4,6 +4,15 @@ const MarketingCampaignRunSchema = new mongoose.Schema({
   campaign_id: { type: String, required: true, unique: true, index: true, trim: true },
   source_event: { type: String, enum: ["product.approved", "admin_product.published", "affiliate_product.published"], default: "product.approved" },
   source_event_key: { type: String, required: true, unique: true, index: true, trim: true },
+  automation_mode: {
+    type: String,
+    enum: ["manual_review", "autopilot_single", "autopilot_carousel", null],
+    default: null,
+    index: true,
+  },
+  autopilot_key: { type: String, default: null, trim: true, index: true },
+  autopilot_group_key: { type: String, default: null, trim: true, index: true },
+  autopilot_position: { type: Number, default: null, min: 1, max: 10 },
   vendor_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "VendorProduct", default: null, index: true },
   public_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null, index: true },
   vendor_id: { type: mongoose.Schema.Types.ObjectId, ref: "Vendor", default: null, index: true },
@@ -55,5 +64,7 @@ MarketingCampaignRunSchema.index({ vendor_product_id: 1, created_at: -1 });
 MarketingCampaignRunSchema.index({ status: 1, scheduled_for: 1 });
 MarketingCampaignRunSchema.index({ batch_key: 1, status: 1 });
 MarketingCampaignRunSchema.index({ archived_at: 1, updated_at: -1 });
+MarketingCampaignRunSchema.index({ automation_mode: 1, autopilot_key: 1 });
+MarketingCampaignRunSchema.index({ autopilot_group_key: 1, autopilot_position: 1 });
 
 module.exports = mongoose.model("MarketingCampaignRun", MarketingCampaignRunSchema);

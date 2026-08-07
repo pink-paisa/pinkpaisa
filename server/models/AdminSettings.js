@@ -11,6 +11,12 @@ const AdminSettingsSchema = new mongoose.Schema(
     warehouse_phone: { type: String, default: null },
     warehouse_email: { type: String, default: null },
     campaign_mode: { type: String, enum: ["manual", "automatic"], default: "manual" },
+    campaign_autopilot_mode: {
+      type: String,
+      enum: ["manual_review", "single_post", "carousel"],
+      default: "manual_review",
+    },
+    campaign_autopilot_carousel_count: { type: Number, default: 4, min: 2, max: 10 },
     campaign_batch_hour_ist: { type: Number, default: 9, min: 0, max: 23 },
     campaign_batch_minute_ist: { type: Number, default: 0, min: 0, max: 59 },
     campaign_creative_mode: { type: String, enum: ["template", "ai_generated", "ai_assisted", "ai_full"], default: "ai_generated" },
@@ -29,6 +35,10 @@ const AdminSettingsSchema = new mongoose.Schema(
       default: "unchecked",
     },
     affiliate_creators_api_last_error: { type: String, default: null },
+    predictions_ai_enabled: { type: Boolean, default: false },
+    predictions_daily_count: { type: Number, default: 15, min: 10, max: 20 },
+    predictions_generation_hour_ist: { type: Number, default: 6, min: 0, max: 23 },
+    predictions_generation_minute_ist: { type: Number, default: 0, min: 0, max: 59 },
   },
   { timestamps: true }
 );

@@ -143,6 +143,28 @@ type BatchRun = {
   failed_count: number;
   started_at: string | null;
   finished_at: string | null;
+  error_summary?: string | null;
+  metadata_json?: {
+    autopilot_mode?: string | null;
+    selected_category?: string | null;
+    selected_product_titles?: string[] | null;
+    requested_count?: number | null;
+    skip_reason?: string | null;
+    autopilot_strategy?: {
+      strategy?: string | null;
+      considered_products?: number;
+      considered_categories?: number;
+      selected_category?: string | null;
+      selected_products?: Array<{
+        title?: string | null;
+        category?: string | null;
+        subcategory?: string | null;
+        score?: number;
+        reasons?: string[];
+      }>;
+      category_reasons?: string[];
+    } | null;
+  } | null;
 };
 type ConnectionSummary = {
   status: string;
@@ -185,6 +207,8 @@ type CatalogProduct = {
 
 const DEFAULT_CAMPAIGN_SETTINGS: CampaignAutomationSettings = {
   campaign_mode: "manual",
+  campaign_autopilot_mode: "manual_review",
+  campaign_autopilot_carousel_count: 4,
   campaign_batch_hour_ist: 9,
   campaign_batch_minute_ist: 0,
   campaign_creative_mode: "ai_generated",
@@ -198,6 +222,16 @@ const DEFAULT_CAMPAIGN_SETTINGS: CampaignAutomationSettings = {
 };
 
 type CampaignSettingsResponse = Partial<CampaignAutomationSettings> & { message?: string };
+
+const getCampaignAutomationModeLabel = (settings: CampaignAutomationSettings) => {
+  if (settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode === "single_post") {
+    return "Single post autopilot";
+  }
+  if (settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode === "carousel") {
+    return `Carousel autopilot (${settings.campaign_autopilot_carousel_count} products)`;
+  }
+  return "Review queue";
+};
 
 const normalizeCampaignSettingsResponse = (response: CampaignSettingsResponse): CampaignAutomationSettings => ({
   ...DEFAULT_CAMPAIGN_SETTINGS,
@@ -1788,7 +1822,7 @@ const AdminCampaigns = () => {
   }, [connection]);
 
   const automationSummary = useMemo(() => ({
-    mode: campaignSettings.campaign_mode === "automatic" ? "Automatic draft generation" : "Manual draft generation",
+    mode: getCampaignAutomationModeLabel(campaignSettings),
     creativeMode: "required reference edit",
     provider: imageRegistry?.providers.find((provider) => provider.key === campaignSettings.campaign_ai_provider)?.label || campaignSettings.campaign_ai_provider,
     model: imageRegistry?.providers
@@ -1798,6 +1832,24 @@ const AdminCampaigns = () => {
     quality: campaignSettings.campaign_ai_image_quality,
     schedule: `${String(campaignSettings.campaign_batch_hour_ist).padStart(2, "0")}:${String(campaignSettings.campaign_batch_minute_ist).padStart(2, "0")} IST`,
   }), [campaignSettings, imageRegistry]);
+
+  const autopilotStrategy = useMemo(() => {
+    const metadata = data.latest_batch?.metadata_json || null;
+    const strategy = metadata?.autopilot_strategy || null;
+    if (!metadata?.autopilot_mode && !strategy) return null;
+    return {
+      mode: metadata.autopilot_mode || "autopilot",
+      selectedCategory: strategy?.selected_category || metadata.selected_category || null,
+      selectedProducts: strategy?.selected_products || (metadata.selected_product_titles || []).map((title) => ({ title })),
+      reasons: [
+        ...(strategy?.category_reasons || []),
+        ...((strategy?.selected_products || [])[0]?.reasons || []),
+      ].slice(0, 4),
+      consideredProducts: strategy?.considered_products || null,
+      consideredCategories: strategy?.considered_categories || null,
+      skipReason: metadata.skip_reason || data.latest_batch?.error_summary || null,
+    };
+  }, [data.latest_batch]);
 
   const pipelineOutputs = useMemo(() => {
     if (!detail) return [];
@@ -2232,6 +2284,43 @@ const AdminCampaigns = () => {
               <p className="mt-2 font-medium">{data.latest_batch?.success_count ?? 0}</p>
             </div>
           </div>
+          {autopilotStrategy ? (
+            <div className="mt-4 rounded-2xl border border-primary/20 bg-primary/5 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Autopilot decision</p>
+                  <h4 className="mt-1 font-medium">
+                    {autopilotStrategy.selectedCategory
+                      ? `${autopilotStrategy.selectedCategory} focus`
+                      : autopilotStrategy.mode.replace(/_/g, " ")}
+                  </h4>
+                </div>
+                <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  {autopilotStrategy.consideredProducts ? <span>{autopilotStrategy.consideredProducts} products scanned</span> : null}
+                  {autopilotStrategy.consideredCategories ? <span>{autopilotStrategy.consideredCategories} categories compared</span> : null}
+                </div>
+              </div>
+              {autopilotStrategy.skipReason ? (
+                <p className="mt-3 rounded-xl bg-background/70 px-3 py-2 text-sm text-destructive">{autopilotStrategy.skipReason}</p>
+              ) : null}
+              {autopilotStrategy.selectedProducts.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {autopilotStrategy.selectedProducts.slice(0, 10).map((product, index) => (
+                    <span key={`${product.title || "product"}-${index}`} className="rounded-full bg-background px-3 py-1 text-xs font-medium text-foreground">
+                      {product.title || `Product ${index + 1}`}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {autopilotStrategy.reasons.length ? (
+                <ul className="mt-3 grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
+                  {autopilotStrategy.reasons.map((reason) => (
+                    <li key={reason} className="min-w-0">- {reason}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
           {batchDetail ? (
             <div className="mt-4 rounded-2xl border border-border/70 bg-background/50 p-3">
               <div className="flex flex-wrap items-center justify-between gap-3">

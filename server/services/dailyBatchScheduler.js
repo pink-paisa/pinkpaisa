@@ -11,6 +11,7 @@ const { checkAffiliateProductLink, persistAffiliateLinkCheck } = require("./affi
 const { runDueCreatorsApiRefresh } = require("./amazonCreatorsApiService");
 const logger = require("../utils/logger");
 const SchedulerLease = require("../models/SchedulerLease");
+const { runDueDailyPredictions } = require("./dailyPredictionService");
 
 const CHECK_INTERVAL_MS = Math.max(parseInt(process.env.MARKETING_SCHEDULER_POLL_MS || "30000", 10), 10000);
 const PAYOUT_READINESS_SWEEP_INTERVAL_MS = Math.max(parseInt(process.env.PAYOUT_READINESS_SWEEP_MS || `${30 * 60 * 1000}`, 10), 5 * 60 * 1000);
@@ -143,6 +144,10 @@ async function tickScheduler() {
 
   await processDueScheduledPublishes().catch((error) => {
     logger.error({ err: error }, "scheduled Instagram publish failed");
+  });
+
+  await runDueDailyPredictions({ now }).catch((error) => {
+    logger.error({ err: error }, "scheduled daily prediction generation failed");
   });
 
   const payoutSweepBucket = Math.floor(now.getTime() / PAYOUT_READINESS_SWEEP_INTERVAL_MS);

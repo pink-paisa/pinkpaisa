@@ -4,6 +4,7 @@ const PollComment = require("../models/PollComment");
 const { applyQueryParams } = require("./orderController");
 const crypto = require("crypto");
 const { getClientIp } = require("../middleware/requestGuards");
+const { normalizePredictionVoteAttribution } = require("../utils/predictionVoteAttribution");
 
 const toFlat = (doc) => ({ ...doc, id: doc._id.toString() });
 const PROFANITY_WORDS = ["fuck", "shit", "bitch", "bastard", "asshole", "slut"];
@@ -17,10 +18,27 @@ function containsProfanity(value) {
   return PROFANITY_WORDS.some((word) => normalized.includes(word));
 }
 
+function serializePublicVote(vote) {
+  return {
+    id: vote._id?.toString?.() || vote.id,
+    poll_id: vote.poll_id,
+    vote: vote.vote,
+  };
+}
+
 // GET /api/polls
 const getPolls = async (req, res) => {
   try {
-    let q = Poll.find();
+    const filter = req.user?.role === "admin"
+      ? {}
+      : {
+          $or: [
+            { ends_at: null },
+            { ends_at: { $exists: false } },
+            { ends_at: { $gt: new Date() } },
+          ],
+        };
+    let q = Poll.find(filter);
     q = applyQueryParams(q, req);
     if (!req.query._sort) q = q.sort({ createdAt: -1 });
     const polls = await q.lean();
@@ -73,9 +91,19 @@ const castVote = async (req, res) => {
     const vote = String(p_vote || req.body.vote || "").trim().toLowerCase();
     const fingerprint = String(p_fingerprint || req.body.voter_fingerprint || "").trim() || null;
     const userId = req.user?._id?.toString?.() || null;
+    const attribution = normalizePredictionVoteAttribution({
+      voteSource: req.body.p_vote_source || req.body.vote_source,
+      campaign: req.body.p_campaign || req.body.campaign,
+    });
 
     if (!pollId || !["yes", "no"].includes(vote)) {
       return res.status(400).json({ message: "Valid poll and vote are required" });
+    }
+
+    const existingPoll = await Poll.findById(pollId).select("ends_at").lean();
+    if (!existingPoll) return res.status(404).json({ message: "Poll not found" });
+    if (existingPoll.ends_at && new Date(existingPoll.ends_at).getTime() <= Date.now()) {
+      return res.status(410).json({ message: "This poll has ended" });
     }
 
     const duplicateChecks = [];
@@ -88,18 +116,33 @@ const castVote = async (req, res) => {
       return res.status(409).json({ message: "duplicate key value", code: "23505" });
     }
 
-    await PollVote.create({
+    const createdVote = await PollVote.create({
       poll_id: pollId,
       user_id: userId,
       voter_fingerprint: fingerprint,
       ip_address_hash: hashIp(req),
       vote,
+      ...attribution,
     });
 
     // Increment counter on poll
     const inc = vote === "yes" ? { yes_count: 1 } : { no_count: 1 };
-    const poll = await Poll.findByIdAndUpdate(pollId, { $inc: inc }, { new: true }).lean();
-    if (!poll) return res.status(404).json({ message: "Poll not found" });
+    const poll = await Poll.findOneAndUpdate(
+      {
+        _id: pollId,
+        $or: [
+          { ends_at: null },
+          { ends_at: { $exists: false } },
+          { ends_at: { $gt: new Date() } },
+        ],
+      },
+      { $inc: inc },
+      { new: true }
+    ).lean();
+    if (!poll) {
+      await PollVote.deleteOne({ _id: createdVote._id });
+      return res.status(410).json({ message: "This poll has ended" });
+    }
 
     res.json({ yes_count: poll.yes_count, no_count: poll.no_count });
   } catch (err) {
@@ -120,7 +163,7 @@ const getPollVotes = async (req, res) => {
     if (userId) clauses.push({ user_id: userId });
     if (voterFingerprint) clauses.push({ voter_fingerprint: voterFingerprint });
     const votes = await PollVote.find(clauses.length === 1 ? clauses[0] : { $or: clauses }).lean();
-    res.json(votes.map((v) => ({ ...v, id: v._id.toString() })));
+    res.json(votes.map(serializePublicVote));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -202,4 +245,7 @@ module.exports = {
   createComment,
   updateComment,
   deleteComment,
+  _private: {
+    serializePublicVote,
+  },
 };

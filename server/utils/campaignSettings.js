@@ -4,6 +4,10 @@ const {
   getDefaultProviderKey,
   normaliseImageProviderSelection,
 } = require("../services/imageProviders");
+const {
+  DEFAULT_AUTOPILOT_CAROUSEL_COUNT,
+  normalizeAutopilotCarouselCount,
+} = require("./campaignAutopilot");
 
 const CAMPAIGN_SETTINGS_KEY = "campaigns";
 
@@ -344,6 +348,8 @@ const DEFAULT_CAMPAIGN_AI_PROMPT_TEMPLATE = DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT
 
 const DEFAULT_CAMPAIGN_SETTINGS = {
   campaign_mode: "manual",
+  campaign_autopilot_mode: "manual_review",
+  campaign_autopilot_carousel_count: DEFAULT_AUTOPILOT_CAROUSEL_COUNT,
   campaign_batch_hour_ist: 9,
   campaign_batch_minute_ist: 0,
   campaign_creative_mode: "ai_generated",
@@ -377,8 +383,16 @@ function normaliseCampaignSettings(settings = {}) {
     || (legacyPrompt && !isAffiliatePrompt(legacyPrompt) ? legacyPrompt : "")
     || DEFAULT_CATALOG_CAMPAIGN_AI_PROMPT_TEMPLATE;
 
+  const campaignMode = settings.campaign_mode === "automatic" ? "automatic" : DEFAULT_CAMPAIGN_SETTINGS.campaign_mode;
+  const requestedAutopilotMode = String(settings.campaign_autopilot_mode || "").trim();
+  const campaignAutopilotMode = campaignMode === "automatic" && ["single_post", "carousel"].includes(requestedAutopilotMode)
+    ? requestedAutopilotMode
+    : DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_mode;
+
   return {
-    campaign_mode: settings.campaign_mode === "automatic" ? "automatic" : DEFAULT_CAMPAIGN_SETTINGS.campaign_mode,
+    campaign_mode: campaignMode,
+    campaign_autopilot_mode: campaignAutopilotMode,
+    campaign_autopilot_carousel_count: normalizeAutopilotCarouselCount(settings.campaign_autopilot_carousel_count),
     campaign_batch_hour_ist: Number.isFinite(Number(settings.campaign_batch_hour_ist))
       ? Math.min(Math.max(Number(settings.campaign_batch_hour_ist), 0), 23)
       : DEFAULT_CAMPAIGN_SETTINGS.campaign_batch_hour_ist,
