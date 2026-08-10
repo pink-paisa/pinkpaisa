@@ -11,6 +11,7 @@ const OrderItem = require("../models/OrderItem");
 const AmazonReportRow = require("../models/AmazonReportRow");
 const MarketingCampaignPublishEvent = require("../models/MarketingCampaignPublishEvent");
 const MarketingCampaignRun = require("../models/MarketingCampaignRun");
+const AdminSettings = require("../models/AdminSettings");
 const Product = require("../models/Product");
 const AgentTask = require("../models/AgentTask");
 const MarketingAsset = require("../models/MarketingAsset");
@@ -274,6 +275,7 @@ test("affiliate carousel routes expose preview, queue, lifecycle, and compact li
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/cancel"));
   assert.ok(routeSignatures.includes("POST /admin/carousels/:taskId/retry"));
   assert.ok(routeSignatures.includes("POST /admin/bulk-review"));
+  assert.ok(routeSignatures.includes("POST /admin/autopilot-carousels/review"));
   assert.ok(routeSignatures.includes("POST /admin/bulk-regenerate"));
   assert.ok(routeSignatures.includes("POST /admin/assets/download-zip"));
   assert.ok(routeSignatures.includes("GET /admin/:id/assets/:assetIndex/download"));
@@ -471,6 +473,15 @@ test("carousel run selection enforces limits, uniqueness, and preserves order", 
   const runB = "507f191e810c19729de860ea";
   assert.deepEqual(marketingPrivate.normalizeOrderedCarouselRunIds([runB, runA]), [runB, runA]);
   assert.equal(marketingPrivate.buildCarouselGroupIdentity([runA, runB]), marketingPrivate.buildCarouselGroupIdentity([runB, runA]));
+  assert.equal(marketingPrivate.hasCompleteAutopilotCarouselGroup([
+    { autopilot_position: 1 },
+    { autopilot_position: 2 },
+  ]), true);
+  assert.equal(marketingPrivate.hasCompleteAutopilotCarouselGroup([
+    { autopilot_position: 1 },
+    { autopilot_position: 3 },
+    { autopilot_position: 3 },
+  ]), false);
   assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds([runA]), /between 2 and 10/);
   assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds([runA, runA]), /only once/);
   assert.throws(() => marketingPrivate.normalizeOrderedCarouselRunIds(Array.from({ length: 11 }, (_, index) => `${index}`.padStart(24, "0"))), /between 2 and 10/);
@@ -484,9 +495,23 @@ test("Instagram autopilot mode normalization and daily lock are conservative", (
   assert.equal(marketingPrivate.normalizeAutopilotCarouselCount(1), 2);
   assert.equal(marketingPrivate.normalizeAutopilotCarouselCount(11), 10);
   assert.equal(marketingPrivate.normalizeAutopilotCarouselCount("7"), 7);
+  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("require_approval"), "require_approval");
+  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("direct_publish"), "direct_publish");
+  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("unknown"), "direct_publish");
+  assert.equal(marketingPrivate.isApprovalRequiredAutopilotCarousel({
+    automation_mode: "autopilot_carousel",
+    autopilot_publish_workflow: "require_approval",
+  }), true);
+  assert.equal(marketingPrivate.isApprovalRequiredAutopilotCarousel({
+    automation_mode: "autopilot_carousel",
+    autopilot_publish_workflow: "direct_publish",
+  }), false);
   assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: { autopilot_attempted: true }, run_ids: [] }), true);
   assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: {}, run_ids: ["run-id"] }), true);
   assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: {}, run_ids: [], total_runs: 0 }), false);
+  const istDay = marketingPrivate.getIstDayRange(new Date("2026-08-10T18:45:00.000Z"));
+  assert.equal(istDay.start.toISOString(), "2026-08-10T18:30:00.000Z");
+  assert.equal(istDay.end.toISOString(), "2026-08-11T18:30:00.000Z");
 });
 
 test("Instagram autopilot selects one eligible product and balances carousel products inside one category", () => {
@@ -1741,6 +1766,12 @@ test("affiliate reference-edit prompts preserve exact products and prohibit comm
 
 test("campaign prompts separate affiliate and catalog rules and resolve canonical copy", () => {
   const settings = normaliseCampaignSettings({});
+  assert.equal(settings.campaign_autopilot_publish_workflow, "require_approval");
+  assert.equal(normaliseCampaignSettings({ _id: "legacy-settings" }).campaign_autopilot_publish_workflow, "direct_publish");
+  assert.equal(normaliseCampaignSettings({
+    _id: "saved-settings",
+    campaign_autopilot_publish_workflow: "require_approval",
+  }).campaign_autopilot_publish_workflow, "require_approval");
   const commonBrief = {
     title: "Premium Botanical Face Serum With Ceramides And Peptides",
     campaign_label: "A Verified Seven Word Product Campaign Label",
@@ -1791,6 +1822,11 @@ test("campaign prompts separate affiliate and catalog rules and resolve canonica
   }).campaign_autopilot_mode, "manual_review");
   assert.equal(settings.prompt_defaults.affiliate, DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT_TEMPLATE);
   assert.equal(settings.prompt_defaults.catalog, DEFAULT_CATALOG_CAMPAIGN_AI_PROMPT_TEMPLATE);
+});
+
+test("campaign schemas persist autopilot carousel approval workflow", () => {
+  assert.deepEqual(AdminSettings.schema.path("campaign_autopilot_publish_workflow").enumValues, ["require_approval", "direct_publish"]);
+  assert.deepEqual(MarketingCampaignRun.schema.path("autopilot_publish_workflow").enumValues, ["require_approval", "direct_publish", null]);
 });
 
 test("campaign prompt validation rejects unknown placeholders before generation", () => {

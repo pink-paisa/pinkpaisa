@@ -16,6 +16,8 @@ const VendorProduct = require("../models/VendorProduct");
 const { getCampaignSettings } = require("../utils/campaignSettings");
 const {
   AUTOPILOT_CAROUSEL_MODE,
+  AUTOPILOT_APPROVAL_REQUIRED,
+  AUTOPILOT_DIRECT_PUBLISH,
   AUTOPILOT_MODES,
   AUTOPILOT_SINGLE_MODE,
   MAX_CAROUSEL_ITEMS,
@@ -24,6 +26,7 @@ const {
   getAutopilotProductScore,
   normalizeAutopilotCarouselCount,
   normalizeAutopilotMode,
+  normalizeAutopilotPublishWorkflow,
   normalizeProductGroupValue,
   selectCarouselAutopilotProducts,
   selectSingleAutopilotProduct,
@@ -215,6 +218,19 @@ function isAffiliateCampaignRun(run = {}, product = null) {
 
 function isAutopilotRun(run = {}) {
   return AUTOPILOT_MODES.includes(String(run.automation_mode || ""));
+}
+
+function isApprovalRequiredAutopilotCarousel(run = {}) {
+  return run.automation_mode === AUTOPILOT_CAROUSEL_MODE
+    && normalizeAutopilotPublishWorkflow(run.autopilot_publish_workflow) === AUTOPILOT_APPROVAL_REQUIRED;
+}
+
+function hasCompleteAutopilotCarouselGroup(runs = []) {
+  if (!Array.isArray(runs) || runs.length < 2) return false;
+  const positions = runs.map((run) => Number(run?.autopilot_position || 0));
+  const expectedSize = Math.max(...positions);
+  return runs.length === expectedSize
+    && positions.every((position, index) => position === index + 1);
 }
 
 function getRunPublishAssetUrls(run = {}) {
@@ -642,6 +658,33 @@ function buildStaleTaskMessage(task, recoveredAt = new Date(), customMessage = "
   return `${task.agent_name} task was reset after ${elapsedMinutes} minute(s) without a heartbeat.`;
 }
 
+function getIstDayRange(date = new Date()) {
+  const parts = getIstParts(date);
+  const startMs = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day)) - (330 * 60 * 1000);
+  return {
+    start: new Date(startMs),
+    end: new Date(startMs + (24 * 60 * 60 * 1000)),
+  };
+}
+
+async function findAutopilotPublicationForDay(date = new Date(), excludeRunIds = []) {
+  const { start, end } = getIstDayRange(date);
+  const excluded = normalizeRunIdList(excludeRunIds);
+  return MarketingCampaignRun.findOne({
+    automation_mode: { $in: AUTOPILOT_MODES },
+    archived_at: null,
+    ...(excluded.length ? { _id: { $nin: excluded } } : {}),
+    $or: [
+      { published_at: { $gte: start, $lt: end } },
+      { scheduled_for: { $gte: start, $lt: end } },
+      {
+        status: "publishing",
+        publish_attempted_at: { $gte: start, $lt: end },
+      },
+    ],
+  }).select("_id product_title autopilot_group_key published_at scheduled_for").lean();
+}
+
 function buildStaleTaskRecoveryFilter(task, {
   force = false,
   now = new Date(),
@@ -753,6 +796,7 @@ function serialiseRun(run, taskCounts = null) {
     autopilot_key: run.autopilot_key || null,
     autopilot_group_key: run.autopilot_group_key || null,
     autopilot_position: Number(run.autopilot_position || 0) || null,
+    autopilot_publish_workflow: run.autopilot_publish_workflow || null,
     vendor_product_id: run.vendor_product_id?._id?.toString?.() || run.vendor_product_id?.toString?.() || run.vendor_product_id || null,
     public_product_id: run.public_product_id?._id?.toString?.() || run.public_product_id?.toString?.() || run.public_product_id || null,
     vendor_id: run.vendor_id?._id?.toString?.() || run.vendor_id?.toString?.() || run.vendor_id || null,
@@ -1469,8 +1513,7 @@ async function maybeQueueAutopilotCarousel(groupKey) {
     archived_at: null,
   }).sort({ autopilot_position: 1, created_at: 1 });
   if (groupRuns.length < 2) return null;
-  const expectedSize = Math.max(...groupRuns.map((run) => Number(run.autopilot_position || 0)).filter(Boolean));
-  if (expectedSize < 2 || groupRuns.length !== expectedSize) return null;
+  if (!hasCompleteAutopilotCarouselGroup(groupRuns)) return null;
 
   const allReady = groupRuns.every((run) => (
     run.review_status === "approved"
@@ -1507,6 +1550,46 @@ async function maybeQueueAutopilotCarousel(groupKey) {
 
 async function completeAutopilotAfterTracking(run) {
   const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: false });
+  if (isApprovalRequiredAutopilotCarousel(run)) {
+    const updated = await MarketingCampaignRun.findOneAndUpdate(
+      {
+        _id: run._id,
+        archived_at: null,
+        status: { $nin: ["archived", "published", "publishing"] },
+        instagram_media_id: null,
+      },
+      {
+        $set: {
+          status: "waiting_review",
+          current_stage: "ready_for_review",
+          review_status: "pending",
+          review_stage: "carousel_draft",
+          review_notes: readiness.can_publish
+            ? "Autopilot carousel is ready for grouped admin approval."
+            : formatReadinessBlockers(readiness, "Review and resolve the carousel blockers before approval."),
+          publish_status: "draft",
+          scheduled_for: null,
+          last_error: null,
+        },
+      },
+      { new: true }
+    );
+    if (updated) {
+      await refreshBatchRun(updated.batch_run_id);
+      await recordPublishEvent(updated, {
+        actionType: "review",
+        status: "started",
+        readinessSnapshot: readiness,
+        metadata: {
+          automatic: true,
+          automation_mode: updated.automation_mode,
+          approval_required: true,
+        },
+      });
+    }
+    return;
+  }
+
   if (!readiness.can_publish) {
     await failAutopilotRun(run, formatReadinessBlockers(readiness, "Autopilot campaign is not ready to publish"), {
       metadata: { readiness },
@@ -2769,6 +2852,7 @@ async function createAutopilotAffiliateCampaignRun({
   batchKey,
   batchDateIst,
   automationMode,
+  publishWorkflow,
   groupKey,
   position = null,
 }) {
@@ -2782,6 +2866,7 @@ async function createAutopilotAffiliateCampaignRun({
     source_event: "affiliate_product.published",
     source_event_key: sourceEventKey,
     automation_mode: automationMode,
+    autopilot_publish_workflow: publishWorkflow,
     autopilot_key: batchKey,
     autopilot_group_key: groupKey,
     autopilot_position: position,
@@ -2795,9 +2880,11 @@ async function createAutopilotAffiliateCampaignRun({
     current_stage: "intake",
     batch_key: batchKey,
     batch_run_id: batch._id,
-    review_status: "not_required",
+    review_status: publishWorkflow === AUTOPILOT_APPROVAL_REQUIRED ? "pending" : "not_required",
     review_stage: null,
-    review_notes: "Instagram autopilot will publish automatically after compliance gates pass.",
+    review_notes: publishWorkflow === AUTOPILOT_APPROVAL_REQUIRED
+      ? "Instagram autopilot will generate this carousel and wait for grouped admin approval."
+      : "Instagram autopilot will publish automatically after compliance gates pass.",
     publish_status: "not_ready",
     approved_at: queuedAt,
   });
@@ -2805,6 +2892,7 @@ async function createAutopilotAffiliateCampaignRun({
 
 async function markAutopilotBatchSkipped(batch, {
   mode,
+  publishWorkflow = null,
   reason,
   batchDateIst,
   selectedCategory = null,
@@ -2823,6 +2911,7 @@ async function markAutopilotBatchSkipped(batch, {
         ...(batch.metadata_json || {}),
         autopilot_attempted: true,
         autopilot_mode: mode,
+        autopilot_publish_workflow: publishWorkflow,
         batch_date_ist: batchDateIst,
         selected_category: selectedCategory,
         requested_count: requestedCount,
@@ -2847,11 +2936,48 @@ async function runAutopilotDailyBatch({
   }
 
   const mode = normalizeAutopilotMode(settings);
+  const publishWorkflow = mode === "carousel"
+    ? normalizeAutopilotPublishWorkflow(
+      settings.campaign_autopilot_publish_workflow,
+      AUTOPILOT_APPROVAL_REQUIRED
+    )
+    : AUTOPILOT_DIRECT_PUBLISH;
   const queuedAt = date ? new Date(date) : new Date();
+
+  const existingPublication = await findAutopilotPublicationForDay(queuedAt);
+  if (existingPublication) {
+    return markAutopilotBatchSkipped(batch, {
+      mode,
+      publishWorkflow,
+      batchDateIst,
+      reason: "Instagram autopilot already published or scheduled a post for this IST date.",
+    });
+  }
+
+  if (mode === "carousel" && publishWorkflow === AUTOPILOT_APPROVAL_REQUIRED) {
+    const pendingApproval = await MarketingCampaignRun.findOne({
+      automation_mode: AUTOPILOT_CAROUSEL_MODE,
+      autopilot_publish_workflow: AUTOPILOT_APPROVAL_REQUIRED,
+      status: "waiting_review",
+      review_status: "pending",
+      archived_at: null,
+      autopilot_key: { $ne: batchKey },
+    }).select("_id product_title autopilot_group_key").lean();
+    if (pendingApproval) {
+      return markAutopilotBatchSkipped(batch, {
+        mode,
+        publishWorkflow,
+        batchDateIst,
+        reason: "A previous autopilot carousel is still waiting for admin approval.",
+      });
+    }
+  }
+
   const eligibleProducts = await getEligibleAutopilotProducts();
   if (!eligibleProducts.length) {
     return markAutopilotBatchSkipped(batch, {
       mode,
+      publishWorkflow,
       batchDateIst,
       reason: "No eligible, compliant, active, visible affiliate products are available for Instagram autopilot.",
     });
@@ -2874,6 +3000,7 @@ async function runAutopilotDailyBatch({
     if (!selectedProducts.length) {
       return markAutopilotBatchSkipped(batch, {
         mode,
+        publishWorkflow,
         batchDateIst,
         selectedCategory,
         requestedCount,
@@ -2883,6 +3010,7 @@ async function runAutopilotDailyBatch({
   } else {
     return markAutopilotBatchSkipped(batch, {
       mode,
+      publishWorkflow,
       batchDateIst,
       reason: "Instagram autopilot mode is not enabled.",
     });
@@ -2891,6 +3019,7 @@ async function runAutopilotDailyBatch({
   if (!selectedProducts.length) {
     return markAutopilotBatchSkipped(batch, {
       mode,
+      publishWorkflow,
       batchDateIst,
       selectedCategory,
       requestedCount,
@@ -2922,6 +3051,7 @@ async function runAutopilotDailyBatch({
       batchKey,
       batchDateIst,
       automationMode,
+      publishWorkflow,
       groupKey,
       position: index + 1,
     });
@@ -2942,6 +3072,7 @@ async function runAutopilotDailyBatch({
         ...(batch.metadata_json || {}),
         autopilot_attempted: true,
         autopilot_mode: mode,
+        autopilot_publish_workflow: publishWorkflow,
         selected_category: selectedCategory,
         selected_product_ids: selectedProducts.map((product) => String(product._id)),
         selected_product_titles: selectedProducts.map((product) => product.title || null),
@@ -3070,6 +3201,13 @@ async function getLatestDailyBatchRun() {
 async function reviewCampaignRun(runId, action, notes = "", { actorAdminId = null, bulk = false } = {}) {
   const run = await MarketingCampaignRun.findById(runId);
   if (!run) throw new Error("Campaign run not found");
+  if (isApprovalRequiredAutopilotCarousel(run)) {
+    throw carouselError(
+      "carousel_group_review_required",
+      "Review this autopilot carousel as one grouped draft.",
+      { autopilot_group_key: run.autopilot_group_key || null }
+    );
+  }
   if (run.status !== "waiting_review" || !run.review_stage) throw new Error("Campaign run is not waiting for review");
 
   if (action === "reject") {
@@ -3117,6 +3255,148 @@ async function reviewCampaignRun(runId, action, notes = "", { actorAdminId = nul
     }),
   ]);
   return serialiseRun(run);
+}
+
+async function reviewAutopilotCarouselGroup(groupKey, action, {
+  notes = "",
+  actorAdminId = null,
+  scheduledFor = null,
+} = {}) {
+  const normalizedGroupKey = String(groupKey || "").trim().slice(0, 240);
+  if (!normalizedGroupKey) throw carouselError("carousel_group_required", "Autopilot carousel group is required.");
+  if (!["approve", "reject"].includes(action)) throw carouselError("unsupported_review_action", "Unsupported carousel review action.");
+
+  const runs = await MarketingCampaignRun.find({
+    autopilot_group_key: normalizedGroupKey,
+    automation_mode: AUTOPILOT_CAROUSEL_MODE,
+    autopilot_publish_workflow: AUTOPILOT_APPROVAL_REQUIRED,
+    archived_at: null,
+  }).sort({ autopilot_position: 1, created_at: 1 });
+  if (runs.length < 2) throw carouselError("carousel_not_found", "Approval carousel group was not found.");
+
+  if (!hasCompleteAutopilotCarouselGroup(runs)) {
+    throw carouselError("carousel_not_ready", "The approval carousel group is incomplete.");
+  }
+  if (runs.some((run) => run.status !== "waiting_review" || !run.review_stage || run.review_status !== "pending")) {
+    throw carouselError("carousel_not_ready", "Every carousel slide must be waiting for approval.");
+  }
+
+  const runIds = runs.map((run) => run._id);
+  const reviewNotes = String(notes || "").trim().slice(0, 1000);
+  if (action === "reject") {
+    if (!reviewNotes) throw carouselError("review_notes_required", "Add a rejection reason before rejecting this carousel.");
+    await MarketingCampaignRun.updateMany(
+      { _id: { $in: runIds }, status: "waiting_review", review_status: "pending", archived_at: null },
+      {
+        $set: {
+          status: "rejected",
+          current_stage: "review_rejected",
+          review_status: "rejected",
+          review_stage: null,
+          review_notes: reviewNotes,
+          publish_status: "failed",
+          last_error: reviewNotes,
+        },
+      }
+    );
+    await Promise.all(runs.map((run) => recordPublishEvent(run, {
+      actionType: "review",
+      status: "success",
+      actorAdminId,
+      metadata: {
+        action: "reject",
+        grouped: true,
+        autopilot_group_key: normalizedGroupKey,
+        notes: reviewNotes,
+      },
+    })));
+    const batchIds = Array.from(new Set(runs.map((run) => getObjectIdString(run.batch_run_id)).filter(Boolean)));
+    await Promise.all(batchIds.map((batchId) => refreshBatchRun(batchId)));
+    return { action, group_key: normalizedGroupKey, run_count: runs.length, carousel: null };
+  }
+
+  const readinessResults = await Promise.all(runs.map(async (run) => ({
+    run,
+    readiness: await buildCurrentRunPublishReadiness(run, { requireApproval: false }),
+  })));
+  const blockers = readinessResults.flatMap(({ run, readiness }) => (readiness.blockers || []).map((blocker) => ({
+    run_id: String(run._id),
+    product_title: run.product_title || run.campaign_id,
+    ...blocker,
+  })));
+  if (blockers.length) {
+    throw carouselError("carousel_not_ready", "Resolve every carousel blocker before approval.", { blockers });
+  }
+
+  const publicationDate = scheduledFor ? new Date(scheduledFor) : new Date();
+  if (Number.isNaN(publicationDate.getTime())) throw carouselError("invalid_schedule_time", "Scheduled publish time is invalid.");
+  const existingPublication = await findAutopilotPublicationForDay(publicationDate, runIds);
+  if (existingPublication) {
+    throw carouselError("autopilot_daily_limit", "Instagram autopilot already published or scheduled another post for that IST date.");
+  }
+
+  const approvalUpdates = {
+    status: "approved_for_publish",
+    current_stage: "approved_for_publish",
+    review_status: "approved",
+    review_stage: null,
+    review_notes: reviewNotes || "Autopilot carousel approved as one grouped draft.",
+    publish_status: "ready",
+    scheduled_for: null,
+    last_error: null,
+  };
+  const approvalResult = await MarketingCampaignRun.updateMany(
+    { _id: { $in: runIds }, status: "waiting_review", review_status: "pending", archived_at: null },
+    { $set: approvalUpdates }
+  );
+  if (approvalResult.modifiedCount !== runs.length) {
+    await MarketingCampaignRun.updateMany(
+      { _id: { $in: runIds }, carousel_task_id: null, instagram_media_id: null, archived_at: null },
+      { $set: { status: "waiting_review", current_stage: "ready_for_review", review_status: "pending", review_stage: "carousel_draft", publish_status: "draft" } }
+    );
+    throw carouselError("carousel_conflict", "Carousel review state changed. Reload and review it again.");
+  }
+
+  try {
+    const carousel = await queueAffiliateCarousel({
+      runIds: runs.map((run) => String(run._id)),
+      scheduledFor,
+      actorAdminId,
+    });
+    await Promise.all(readinessResults.map(({ run, readiness }) => recordPublishEvent(run, {
+      actionType: "review",
+      status: "success",
+      actorAdminId,
+      readinessSnapshot: readiness,
+      metadata: {
+        action: "approve",
+        grouped: true,
+        autopilot_group_key: normalizedGroupKey,
+        scheduled: Boolean(scheduledFor),
+        notes: reviewNotes || null,
+      },
+    })));
+    return { action, group_key: normalizedGroupKey, run_count: runs.length, carousel };
+  } catch (error) {
+    await MarketingCampaignRun.updateMany(
+      { _id: { $in: runIds }, carousel_task_id: null, instagram_media_id: null, archived_at: null },
+      {
+        $set: {
+          status: "waiting_review",
+          current_stage: "ready_for_review",
+          review_status: "pending",
+          review_stage: "carousel_draft",
+          publish_status: "draft",
+          scheduled_for: null,
+          last_error: describeExecutionError(error),
+        },
+      }
+    );
+    throw error;
+  } finally {
+    const batchIds = Array.from(new Set(runs.map((run) => getObjectIdString(run.batch_run_id)).filter(Boolean)));
+    await Promise.all(batchIds.map((batchId) => refreshBatchRun(batchId)));
+  }
 }
 
 async function reviewCampaignRuns(runIds, { notes = "", actorAdminId = null } = {}) {
@@ -5393,6 +5673,7 @@ module.exports = {
   rescheduleAffiliateCarousel,
   reviewCampaignRun,
   reviewCampaignRuns,
+  reviewAutopilotCarouselGroup,
   restoreCampaignRun,
   retryFailedBatchRuns,
   retryCampaignRun,
@@ -5424,6 +5705,7 @@ module.exports = {
     buildAutopilotEligibleProductQuery,
     buildAutopilotSelectionReport,
     getAutopilotProductScore,
+    getIstDayRange,
     getActiveLeaseFilter,
     getNextAutoAgent,
     buildRunPublishReadinessSnapshot,
@@ -5438,7 +5720,9 @@ module.exports = {
     hasDurablePublishedAttempt,
     buildPublishAttemptFailureUpdates,
     getPublishAttemptLifecycleState,
+    hasCompleteAutopilotCarouselGroup,
     isMatchingDurableCarouselAttempt,
+    isApprovalRequiredAutopilotCarousel,
     isTrustedGeneratedAssetUrlReference,
     isUnresolvedPublishAttempt,
     mergeAttemptWithRunPublishState,
@@ -5450,6 +5734,7 @@ module.exports = {
     parseCarouselScheduleDate,
     normalizeAutopilotCarouselCount,
     normalizeAutopilotMode,
+    normalizeAutopilotPublishWorkflow,
     selectCarouselAutopilotProducts,
     selectSingleAutopilotProduct,
     sameRunIdSet,

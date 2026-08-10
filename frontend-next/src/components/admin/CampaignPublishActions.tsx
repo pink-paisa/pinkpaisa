@@ -3,6 +3,8 @@ import { AlertTriangle, CheckCircle2, RefreshCcw, Rocket, ShieldCheck } from "lu
 
 type CampaignRunLite = {
   status: string;
+  automation_mode?: string | null;
+  autopilot_publish_workflow?: string | null;
   current_stage?: string | null;
   archived_at?: string | null;
   next_action?: string | null;
@@ -61,7 +63,16 @@ const CampaignPublishActions = ({
   instagramConnectionWarning?: string | null;
 }) => {
   const readinessBlockers = run.publish_readiness?.blockers || [];
-  const approvalBlockers = readinessBlockers.filter((blocker) => !["review_not_approved", "non_https_media_url"].includes(blocker.code));
+  const groupedCarouselApproval = run.automation_mode === "autopilot_carousel"
+    && run.autopilot_publish_workflow === "require_approval";
+  const approvalBlockers = [
+    ...readinessBlockers.filter((blocker) => groupedCarouselApproval
+      ? blocker.code !== "review_not_approved"
+      : !["review_not_approved", "non_https_media_url"].includes(blocker.code)),
+    ...(groupedCarouselApproval && !instagramConnected
+      ? [{ code: "instagram_not_connected", message: "Instagram must be connected before approving this carousel for publishing." }]
+      : []),
+  ];
   const readinessWarnings = run.publish_readiness?.warnings || [];
   const publishBlockers = [
     ...readinessBlockers,
@@ -130,10 +141,14 @@ const CampaignPublishActions = ({
             <ShieldCheck className="h-4 w-4" />
             <p className="font-medium">Review gate</p>
           </div>
-          <p className="mt-1 text-sm text-amber-800">Approve this draft to unlock Instagram posting.</p>
+          <p className="mt-1 text-sm text-amber-800">
+            {groupedCarouselApproval
+              ? "Approve the complete grouped carousel to publish or schedule every slide together."
+              : "Approve this draft to unlock Instagram posting."}
+          </p>
           <div className="mt-4">
             <Button className="rounded-2xl" onClick={onApproveReview} disabled={actionLoading || !canApprove}>
-              <CheckCircle2 className="mr-2 h-4 w-4" /> Approve review
+              <CheckCircle2 className="mr-2 h-4 w-4" /> {groupedCarouselApproval ? "Review carousel" : "Approve review"}
             </Button>
           </div>
           {!canApprove && approvalBlockers.length ? (

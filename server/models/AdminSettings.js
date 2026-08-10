@@ -16,6 +16,11 @@ const AdminSettingsSchema = new mongoose.Schema(
       enum: ["manual_review", "single_post", "carousel"],
       default: "manual_review",
     },
+    campaign_autopilot_publish_workflow: {
+      type: String,
+      enum: ["require_approval", "direct_publish"],
+      default: "require_approval",
+    },
     campaign_autopilot_carousel_count: { type: Number, default: 4, min: 2, max: 10 },
     campaign_batch_hour_ist: { type: Number, default: 9, min: 0, max: 23 },
     campaign_batch_minute_ist: { type: Number, default: 0, min: 0, max: 59 },

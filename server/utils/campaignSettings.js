@@ -349,6 +349,7 @@ const DEFAULT_CAMPAIGN_AI_PROMPT_TEMPLATE = DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT
 const DEFAULT_CAMPAIGN_SETTINGS = {
   campaign_mode: "manual",
   campaign_autopilot_mode: "manual_review",
+  campaign_autopilot_publish_workflow: "require_approval",
   campaign_autopilot_carousel_count: DEFAULT_AUTOPILOT_CAROUSEL_COUNT,
   campaign_batch_hour_ist: 9,
   campaign_batch_minute_ist: 0,
@@ -388,10 +389,19 @@ function normaliseCampaignSettings(settings = {}) {
   const campaignAutopilotMode = campaignMode === "automatic" && ["single_post", "carousel"].includes(requestedAutopilotMode)
     ? requestedAutopilotMode
     : DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_mode;
+  const hasPersistedPublishWorkflow = Object.prototype.hasOwnProperty.call(settings, "campaign_autopilot_publish_workflow");
+  const campaignAutopilotPublishWorkflow = ["require_approval", "direct_publish"].includes(settings.campaign_autopilot_publish_workflow)
+    ? settings.campaign_autopilot_publish_workflow
+    : hasPersistedPublishWorkflow
+      ? DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_publish_workflow
+      : settings?._id
+        ? "direct_publish"
+        : DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_publish_workflow;
 
   return {
     campaign_mode: campaignMode,
     campaign_autopilot_mode: campaignAutopilotMode,
+    campaign_autopilot_publish_workflow: campaignAutopilotPublishWorkflow,
     campaign_autopilot_carousel_count: normalizeAutopilotCarouselCount(settings.campaign_autopilot_carousel_count),
     campaign_batch_hour_ist: Number.isFinite(Number(settings.campaign_batch_hour_ist))
       ? Math.min(Math.max(Number(settings.campaign_batch_hour_ist), 0), 23)

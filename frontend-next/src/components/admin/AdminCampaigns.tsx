@@ -58,6 +58,10 @@ type CampaignRun = {
   affiliate_source_platform?: string | null;
   affiliate_source_mode?: string | null;
   status: string;
+  automation_mode?: "manual_review" | "autopilot_single" | "autopilot_carousel" | null;
+  autopilot_group_key?: string | null;
+  autopilot_position?: number | null;
+  autopilot_publish_workflow?: "require_approval" | "direct_publish" | null;
   current_stage: string;
   review_stage: string | null;
   review_notes: string | null;
@@ -208,6 +212,7 @@ type CatalogProduct = {
 const DEFAULT_CAMPAIGN_SETTINGS: CampaignAutomationSettings = {
   campaign_mode: "manual",
   campaign_autopilot_mode: "manual_review",
+  campaign_autopilot_publish_workflow: "require_approval",
   campaign_autopilot_carousel_count: 4,
   campaign_batch_hour_ist: 9,
   campaign_batch_minute_ist: 0,
@@ -228,7 +233,8 @@ const getCampaignAutomationModeLabel = (settings: CampaignAutomationSettings) =>
     return "Single post autopilot";
   }
   if (settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode === "carousel") {
-    return `Carousel autopilot (${settings.campaign_autopilot_carousel_count} products)`;
+    const workflow = settings.campaign_autopilot_publish_workflow === "direct_publish" ? "direct" : "approval";
+    return `Carousel autopilot (${settings.campaign_autopilot_carousel_count} products, ${workflow})`;
   }
   return "Review queue";
 };
@@ -530,6 +536,8 @@ const AdminCampaigns = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const [reviewDialogAction, setReviewDialogAction] = useState<"approve" | "reject" | null>(null);
   const [reviewDialogNotes, setReviewDialogNotes] = useState("");
+  const [reviewCarouselPublishMode, setReviewCarouselPublishMode] = useState<"now" | "schedule">("now");
+  const [reviewCarouselScheduleInput, setReviewCarouselScheduleInput] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [queueProductId, setQueueProductId] = useState("");
@@ -879,11 +887,14 @@ const AdminCampaigns = () => {
       && Boolean(run.review_stage)
       && !run.archived_at
       && !run.carousel_task_id
+      && !(run.automation_mode === "autopilot_carousel" && run.autopilot_publish_workflow === "require_approval")
     ));
   const bulkReviewSelectionHint = selectedRunIds.length > 25
     ? "Approve no more than 25 campaigns at once."
     : selectedVisibleRuns.some((run) => run.status !== "waiting_review" || !run.review_stage)
       ? "Every selected campaign must be waiting for review."
+      : selectedVisibleRuns.some((run) => run.automation_mode === "autopilot_carousel" && run.autopilot_publish_workflow === "require_approval")
+        ? "Open any approval-carousel slide and review the complete carousel as one group."
       : selectedVisibleRuns.some((run) => Boolean(run.carousel_task_id))
         ? "A campaign already assigned to a carousel cannot be reviewed here."
         : "Select one or more campaigns waiting for review.";
@@ -1349,11 +1360,15 @@ const AdminCampaigns = () => {
   const openReviewDialog = (action: "approve" | "reject") => {
     setReviewDialogAction(action);
     setReviewDialogNotes(action === "reject" ? "" : (detail?.run.review_notes || ""));
+    setReviewCarouselPublishMode("now");
+    setReviewCarouselScheduleInput(toIstDateTimeInput(Date.now() + (10 * 60 * 1000)));
   };
 
   const closeReviewDialog = () => {
     setReviewDialogAction(null);
     setReviewDialogNotes("");
+    setReviewCarouselPublishMode("now");
+    setReviewCarouselScheduleInput("");
   };
 
   const reviewRun = async (action: "approve" | "reject", notes = "") => {
@@ -1364,11 +1379,34 @@ const AdminCampaigns = () => {
     }
     try {
       setActionLoading(true);
-      await apiFetch(`/marketing-campaigns/admin/${selectedId}/review`, {
-        method: "POST",
-        body: JSON.stringify({ action, notes }),
-      });
-      toast.success(action === "approve" ? "Campaign review approved" : "Campaign draft rejected");
+      const isGroupedCarouselReview = detail?.run.automation_mode === "autopilot_carousel"
+        && detail.run.autopilot_publish_workflow === "require_approval"
+        && Boolean(detail.run.autopilot_group_key);
+      if (isGroupedCarouselReview) {
+        const scheduledFor = action === "approve" && reviewCarouselPublishMode === "schedule"
+          ? fromIstDateTimeInput(reviewCarouselScheduleInput)
+          : null;
+        if (action === "approve" && reviewCarouselPublishMode === "schedule" && !scheduledFor) {
+          toast.error("Choose a valid carousel schedule time");
+          return;
+        }
+        const response = await apiFetch<{ message?: string }>("/marketing-campaigns/admin/autopilot-carousels/review", {
+          method: "POST",
+          body: JSON.stringify({
+            group_key: detail.run.autopilot_group_key,
+            action,
+            notes,
+            scheduled_for: scheduledFor,
+          }),
+        });
+        toast.success(response.message || (action === "approve" ? "Carousel approved" : "Carousel rejected"));
+      } else {
+        await apiFetch(`/marketing-campaigns/admin/${selectedId}/review`, {
+          method: "POST",
+          body: JSON.stringify({ action, notes }),
+        });
+        toast.success(action === "approve" ? "Campaign review approved" : "Campaign draft rejected");
+      }
       closeReviewDialog();
       await refreshAll();
     } catch (error) {
@@ -2480,6 +2518,9 @@ const AdminCampaigns = () => {
                             {run.carousel_task_id && run.carousel_position && run.carousel_size ? (
                               <span className="rounded-full bg-pink-100 px-2 py-0.5 font-medium text-pink-800">Carousel {run.carousel_position}/{run.carousel_size}</span>
                             ) : null}
+                            {run.automation_mode === "autopilot_carousel" && run.autopilot_publish_workflow === "require_approval" && !run.carousel_task_id ? (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 font-medium text-amber-800">Approval carousel{run.autopilot_position ? ` slide ${run.autopilot_position}` : ""}</span>
+                            ) : null}
                             <span className="break-words">{run.vendor_shop_name || (run.source_event === "admin_product.published" ? "Pink Paisa" : EMPTY_PLACEHOLDER)}</span>
                           </div>
                           <p className="mt-2 text-xs text-muted-foreground">
@@ -2910,10 +2951,14 @@ const AdminCampaigns = () => {
         <DialogContent className="max-w-xl rounded-[28px] border border-border/80 p-0 shadow-2xl">
           <DialogHeader className="border-b border-border/70 px-6 py-5 pr-14">
             <DialogTitle className="font-serif text-2xl">
-              {reviewDialogAction === "reject" ? "Reject campaign draft" : "Approve campaign draft"}
+              {detail?.run.automation_mode === "autopilot_carousel" && detail.run.autopilot_publish_workflow === "require_approval"
+                ? reviewDialogAction === "reject" ? "Reject autopilot carousel" : "Approve autopilot carousel"
+                : reviewDialogAction === "reject" ? "Reject campaign draft" : "Approve campaign draft"}
             </DialogTitle>
             <DialogDescription className="text-sm">
-              {reviewDialogAction === "reject"
+              {detail?.run.automation_mode === "autopilot_carousel" && detail.run.autopilot_publish_workflow === "require_approval"
+                ? "This action applies to every slide in the grouped carousel. All products are revalidated before publishing."
+                : reviewDialogAction === "reject"
                 ? "Add a clear reason so the next editor knows exactly what blocked this draft."
                 : "Leave an optional approval note for the publishing team or future audits."}
             </DialogDescription>
@@ -2932,6 +2977,30 @@ const AdminCampaigns = () => {
                   : "Optional context, approvals, or publishing notes."}
               />
             </div>
+            {reviewDialogAction === "approve" && detail?.run.automation_mode === "autopilot_carousel" && detail.run.autopilot_publish_workflow === "require_approval" ? (
+              <div className="space-y-3 rounded-2xl border border-border/70 bg-muted/20 p-4">
+                <p className="text-sm font-medium">After approval</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <button type="button" onClick={() => setReviewCarouselPublishMode("now")} className={`rounded-xl border px-3 py-2 text-left text-sm ${reviewCarouselPublishMode === "now" ? "border-primary bg-primary/5" : "border-border bg-background"}`}>
+                    Post now
+                  </button>
+                  <button type="button" onClick={() => setReviewCarouselPublishMode("schedule")} className={`rounded-xl border px-3 py-2 text-left text-sm ${reviewCarouselPublishMode === "schedule" ? "border-primary bg-primary/5" : "border-border bg-background"}`}>
+                    Schedule
+                  </button>
+                </div>
+                {reviewCarouselPublishMode === "schedule" ? (
+                  <div>
+                    <label className="mb-2 block text-xs font-medium text-muted-foreground">Publish time, IST</label>
+                    <Input
+                      type="datetime-local"
+                      value={reviewCarouselScheduleInput}
+                      min={toIstDateTimeInput(Date.now() + (6 * 60 * 1000))}
+                      onChange={(event) => setReviewCarouselScheduleInput(event.target.value)}
+                    />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="flex flex-wrap justify-end gap-3">
               <Button variant="outline" className="rounded-2xl" onClick={closeReviewDialog} disabled={actionLoading}>
                 Cancel
@@ -2940,9 +3009,19 @@ const AdminCampaigns = () => {
                 className="rounded-2xl"
                 variant={reviewDialogAction === "reject" ? "destructive" : "default"}
                 onClick={() => reviewDialogAction && reviewRun(reviewDialogAction, reviewDialogNotes)}
-                disabled={actionLoading || (reviewDialogAction === "reject" && !reviewDialogNotes.trim())}
+                disabled={actionLoading
+                  || (reviewDialogAction === "reject" && !reviewDialogNotes.trim())
+                  || (reviewDialogAction === "approve"
+                    && detail?.run.automation_mode === "autopilot_carousel"
+                    && detail.run.autopilot_publish_workflow === "require_approval"
+                    && reviewCarouselPublishMode === "schedule"
+                    && !reviewCarouselScheduleInput)}
               >
-                {reviewDialogAction === "reject" ? "Reject draft" : "Approve draft"}
+                {reviewDialogAction === "reject"
+                  ? detail?.run.automation_mode === "autopilot_carousel" ? "Reject carousel" : "Reject draft"
+                  : detail?.run.automation_mode === "autopilot_carousel"
+                    ? reviewCarouselPublishMode === "schedule" ? "Approve & schedule" : "Approve & post"
+                    : "Approve draft"}
               </Button>
             </div>
           </div>

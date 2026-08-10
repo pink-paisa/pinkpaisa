@@ -26,6 +26,7 @@ const {
   rescheduleAffiliateCarousel,
   reviewCampaignRun,
   reviewCampaignRuns,
+  reviewAutopilotCarouselGroup,
   restoreCampaignRun,
   retryCampaignRun,
   retryAffiliateCarousel,
@@ -314,6 +315,30 @@ const bulkReviewMarketingCampaignsController = async (req, res) => {
     });
   } catch (error) {
     res.status(400).json(campaignErrorResponse(error));
+  }
+};
+
+const reviewAutopilotCarouselController = async (req, res) => {
+  try {
+    const result = await reviewAutopilotCarouselGroup(
+      req.body?.group_key,
+      req.body?.action,
+      {
+        notes: req.body?.notes || "",
+        scheduledFor: req.body?.scheduled_for || null,
+        actorAdminId: req.user?._id || req.user?.id || null,
+      }
+    );
+    res.json({
+      message: result.action === "reject"
+        ? `Carousel rejected (${result.run_count} slides)`
+        : result.carousel?.status === "scheduled"
+          ? `Carousel approved and scheduled (${result.run_count} slides)`
+          : `Carousel approved and queued (${result.run_count} slides)`,
+      ...result,
+    });
+  } catch (error) {
+    res.status(error.code === "carousel_not_found" ? 404 : 400).json(campaignErrorResponse(error));
   }
 };
 
@@ -641,6 +666,7 @@ module.exports = {
   resetStuckMarketingCampaignController,
   rescheduleMarketingCarouselController,
   reviewMarketingCampaignRun,
+  reviewAutopilotCarouselController,
   restoreMarketingCampaignController,
   retryFailedMarketingBatchItems,
   retryMarketingCampaign,

@@ -13,6 +13,12 @@ const MarketingCampaignRunSchema = new mongoose.Schema({
   autopilot_key: { type: String, default: null, trim: true, index: true },
   autopilot_group_key: { type: String, default: null, trim: true, index: true },
   autopilot_position: { type: Number, default: null, min: 1, max: 10 },
+  autopilot_publish_workflow: {
+    type: String,
+    enum: ["require_approval", "direct_publish", null],
+    default: null,
+    index: true,
+  },
   vendor_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "VendorProduct", default: null, index: true },
   public_product_id: { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null, index: true },
   vendor_id: { type: mongoose.Schema.Types.ObjectId, ref: "Vendor", default: null, index: true },

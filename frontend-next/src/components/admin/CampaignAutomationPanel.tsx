@@ -5,10 +5,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertTriangle, Clock3, MessageSquareQuote, Rocket, ShieldCheck, Sparkles } from "lucide-react";
+import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 
 export type CampaignAutomationSettings = {
   campaign_mode: "manual" | "automatic";
   campaign_autopilot_mode: "manual_review" | "single_post" | "carousel";
+  campaign_autopilot_publish_workflow: "require_approval" | "direct_publish";
   campaign_autopilot_carousel_count: number;
   campaign_batch_hour_ist: number;
   campaign_batch_minute_ist: number;
@@ -158,6 +160,7 @@ const CampaignAutomationPanel = ({
   onSave: () => void;
 }) => {
   const [activePrompt, setActivePrompt] = useState<"affiliate" | "catalog">("affiliate");
+  const [directPublishConfirmOpen, setDirectPublishConfirmOpen] = useState(false);
   const scheduledTime = `${pad(settings.campaign_batch_hour_ist)}:${pad(settings.campaign_batch_minute_ist)}`;
   const activeMode = settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode !== "manual_review"
     ? settings.campaign_autopilot_mode
@@ -292,18 +295,41 @@ const CampaignAutomationPanel = ({
             Next trigger target: <span className="font-medium">{scheduledTime} IST</span>
           </div>
           {activeMode === "carousel" ? (
-            <div className="mt-4">
-              <p className="mb-2 text-xs uppercase tracking-[0.12em] text-muted-foreground">Carousel products</p>
-              <Input
-                type="number"
-                min={2}
-                max={10}
-                value={settings.campaign_autopilot_carousel_count}
-                onChange={(event) => onChange({ campaign_autopilot_carousel_count: Number(event.target.value || 2) })}
-              />
-              <p className="mt-2 text-xs text-muted-foreground">
-                Instagram API publishing supports 2-10 carousel slides. Autopilot skips the day if it cannot find enough eligible products in one category.
-              </p>
+            <div className="mt-4 space-y-4">
+              <div>
+                <p className="mb-2 text-xs uppercase tracking-[0.12em] text-muted-foreground">Publishing workflow</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    onClick={() => onChange({ campaign_autopilot_publish_workflow: "require_approval" })}
+                    className={`rounded-xl border p-3 text-left transition-colors ${settings.campaign_autopilot_publish_workflow === "require_approval" ? "border-primary bg-primary/5" : "border-border bg-background hover:border-primary/40"}`}
+                  >
+                    <span className="flex items-center gap-2 text-sm font-medium"><ShieldCheck className="h-4 w-4 text-primary" /> Require approval</span>
+                    <span className="mt-1 block text-xs leading-5 text-muted-foreground">Generate the complete carousel, then wait for grouped admin review.</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDirectPublishConfirmOpen(true)}
+                    className={`rounded-xl border p-3 text-left transition-colors ${settings.campaign_autopilot_publish_workflow === "direct_publish" ? "border-primary bg-primary/5" : "border-border bg-background hover:border-primary/40"}`}
+                  >
+                    <span className="flex items-center gap-2 text-sm font-medium"><Rocket className="h-4 w-4 text-primary" /> Publish automatically</span>
+                    <span className="mt-1 block text-xs leading-5 text-muted-foreground">Publish without human approval after every safety gate passes.</span>
+                  </button>
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-xs uppercase tracking-[0.12em] text-muted-foreground">Carousel products</p>
+                <Input
+                  type="number"
+                  min={2}
+                  max={10}
+                  value={settings.campaign_autopilot_carousel_count}
+                  onChange={(event) => onChange({ campaign_autopilot_carousel_count: Number(event.target.value || 2) })}
+                />
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Instagram API publishing supports 2-10 carousel slides. Autopilot skips the day if it cannot find enough eligible products in one category.
+                </p>
+              </div>
             </div>
           ) : null}
         </div>
@@ -467,6 +493,18 @@ const CampaignAutomationPanel = ({
           />
         </div>
       </div>
+      <ConfirmActionDialog
+        open={directPublishConfirmOpen}
+        onOpenChange={setDirectPublishConfirmOpen}
+        title="Enable direct carousel publishing?"
+        description="AI-generated carousels will publish without human approval when all product, affiliate, media, disclosure, and Instagram readiness checks pass."
+        confirmLabel="Enable direct publishing"
+        pending={saving}
+        onConfirm={() => {
+          onChange({ campaign_autopilot_publish_workflow: "direct_publish" });
+          setDirectPublishConfirmOpen(false);
+        }}
+      />
     </div>
   );
 };

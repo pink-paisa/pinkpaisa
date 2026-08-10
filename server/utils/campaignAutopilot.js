@@ -3,6 +3,8 @@ const DEFAULT_AUTOPILOT_CAROUSEL_COUNT = 4;
 const AUTOPILOT_SINGLE_MODE = "autopilot_single";
 const AUTOPILOT_CAROUSEL_MODE = "autopilot_carousel";
 const AUTOPILOT_MODES = [AUTOPILOT_SINGLE_MODE, AUTOPILOT_CAROUSEL_MODE];
+const AUTOPILOT_APPROVAL_REQUIRED = "require_approval";
+const AUTOPILOT_DIRECT_PUBLISH = "direct_publish";
 const AUTOPILOT_STRATEGY_VERSION = "internal-demand-v1";
 
 function isUncategorizedValue(value) {
@@ -30,6 +32,12 @@ function normalizeAutopilotCarouselCount(value) {
   return Number.isFinite(count)
     ? Math.min(Math.max(Math.round(count), 2), MAX_CAROUSEL_ITEMS)
     : DEFAULT_AUTOPILOT_CAROUSEL_COUNT;
+}
+
+function normalizeAutopilotPublishWorkflow(value, fallback = AUTOPILOT_DIRECT_PUBLISH) {
+  return [AUTOPILOT_APPROVAL_REQUIRED, AUTOPILOT_DIRECT_PUBLISH].includes(String(value || "").trim())
+    ? String(value).trim()
+    : fallback;
 }
 
 function buildAutopilotEligibleProductQuery() {
@@ -255,6 +263,8 @@ function buildAutopilotSelectionReport({
 module.exports = {
   AUTOPILOT_STRATEGY_VERSION,
   AUTOPILOT_CAROUSEL_MODE,
+  AUTOPILOT_APPROVAL_REQUIRED,
+  AUTOPILOT_DIRECT_PUBLISH,
   AUTOPILOT_MODES,
   AUTOPILOT_SINGLE_MODE,
   DEFAULT_AUTOPILOT_CAROUSEL_COUNT,
@@ -266,6 +276,7 @@ module.exports = {
   getProductDecisionReasons,
   normalizeAutopilotCarouselCount,
   normalizeAutopilotMode,
+  normalizeAutopilotPublishWorkflow,
   normalizeProductGroupValue,
   selectCarouselAutopilotProducts,
   selectSingleAutopilotProduct,

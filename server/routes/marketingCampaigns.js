@@ -28,6 +28,7 @@ const {
   resetStuckMarketingCampaignController,
   rescheduleMarketingCarouselController,
   reviewMarketingCampaignRun,
+  reviewAutopilotCarouselController,
   restoreMarketingCampaignController,
   retryFailedMarketingBatchItems,
   retryMarketingCampaign,
@@ -57,6 +58,7 @@ router.post("/admin/carousels/:taskId/retry", protect, adminOnly, retryMarketing
 router.post("/admin/bulk-archive", protect, adminOnly, bulkArchiveMarketingCampaignsController);
 router.post("/admin/bulk-regenerate", protect, adminOnly, bulkRegenerateMarketingCampaignsController);
 router.post("/admin/bulk-review", protect, adminOnly, bulkReviewMarketingCampaignsController);
+router.post("/admin/autopilot-carousels/review", protect, adminOnly, reviewAutopilotCarouselController);
 router.post("/admin/assets/download-zip", protect, adminOnly, downloadMarketingCampaignAssetsZipController);
 router.post("/admin/from-product/:productId", protect, adminOnly, createMarketingCampaignFromProductSource);
 router.post("/admin/from-vendor-product/:vendorProductId", protect, adminOnly, createMarketingCampaignFromApprovedProduct);
