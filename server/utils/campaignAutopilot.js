@@ -266,6 +266,7 @@ module.exports = {
   getProductDecisionReasons,
   normalizeAutopilotCarouselCount,
   normalizeAutopilotMode,
+  normalizeProductGroupValue,
   selectCarouselAutopilotProducts,
   selectSingleAutopilotProduct,
   shouldReturnExistingAutopilotBatch,

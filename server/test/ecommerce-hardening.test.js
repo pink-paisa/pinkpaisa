@@ -576,6 +576,38 @@ test("Instagram autopilot selection uses demand signals and records decision rat
   assert.match(report.selected_products[0].reasons.join(" "), /outbound click|Instagram-sourced|CTR/i);
 });
 
+test("Instagram autopilot market signals normalize product categories", async () => {
+  const AffiliateEvent = require("../models/AffiliateEvent");
+  const originalAggregate = AffiliateEvent.aggregate;
+  const originalFind = MarketingCampaignRun.find;
+  AffiliateEvent.aggregate = async () => [];
+  MarketingCampaignRun.find = () => ({
+    select: () => ({ lean: async () => [] }),
+  });
+
+  try {
+    const [product] = await marketingPrivate.applyAutopilotMarketSignals([{
+      _id: "507f1f77bcf86cd799439011",
+      title: "Market signal test",
+      category: "  Fitness  ",
+    }]);
+    assert.equal(product.category, "  Fitness  ");
+    assert.deepEqual(product.autopilot_signals, {
+      views_30d: 0,
+      cta_clicks_30d: 0,
+      outbound_clicks_30d: 0,
+      instagram_events_30d: 0,
+      category_views_30d: 0,
+      category_outbound_clicks_30d: 0,
+      recent_product_campaigns_30d: 0,
+      recent_category_campaigns_7d: 0,
+    });
+  } finally {
+    AffiliateEvent.aggregate = originalAggregate;
+    MarketingCampaignRun.find = originalFind;
+  }
+});
+
 test("carousel scheduling rejects invalid and near-term times", () => {
   assert.throws(
     () => marketingPrivate.parseCarouselScheduleDate("not-a-date"),

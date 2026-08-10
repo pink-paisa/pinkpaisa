@@ -24,6 +24,7 @@ const {
   getAutopilotProductScore,
   normalizeAutopilotCarouselCount,
   normalizeAutopilotMode,
+  normalizeProductGroupValue,
   selectCarouselAutopilotProducts,
   selectSingleAutopilotProduct,
   shouldReturnExistingAutopilotBatch,
