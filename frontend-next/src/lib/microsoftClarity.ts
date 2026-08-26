@@ -7,6 +7,8 @@ const BLOCKED_CLARITY_PREFIXES = [
   "/order-confirmation",
   "/phonepe-return",
   "/workshop-booking",
+  "/workshop-booking-confirmation",
+  "/unsubscribe",
   "/pink-pages/submit",
 ];
 

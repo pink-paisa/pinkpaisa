@@ -13,6 +13,7 @@ const SOCIAL_FORMATS = Object.freeze([
 const VISUAL_MODES = Object.freeze([
   "AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC",
 ]);
+const BUNDLE_ROLES = Object.freeze(["PARENT_FEED", "COMPANION_STORY", "STANDALONE_STORY"]);
 const SELECTED_POST_STATUSES = Object.freeze([
   "PLANNED", "GENERATING", "GENERATING_COPY", "GENERATING_VISUAL", "NEEDS_REVIEW",
   "APPROVED", "SCHEDULED", "PUBLISHED", "REJECTED", "FAILED", "MANUAL_ACTION_REQUIRED",
@@ -95,6 +96,21 @@ const candidateSchema = new mongoose.Schema({
   confidence: { type: Number, required: true, min: 0, max: 1 },
   duplicateRisk: { type: String, required: true, enum: ["NONE", "LOW", "MEDIUM", "HIGH"], uppercase: true, trim: true },
   conciseRationale: { type: String, required: true, trim: true, maxlength: 800 },
+  growthCategory: {
+    type: String,
+    default: null,
+    enum: ["MONEY", "BODY_FITNESS", "WELLNESS_BEAUTY", "WOMEN_LIFE", "PINK_PAISA", null],
+    uppercase: true,
+    trim: true,
+  },
+  seriesKey: {
+    type: String,
+    default: null,
+    enum: ["PINK_PAISA_RULES", "WOULD_I_BUY_IT", "RICH_GIRL_MATH", "AFTER_40", "PINK_PAISA_FINDS", null],
+    uppercase: true,
+    trim: true,
+  },
+  hookFormula: { type: [{ type: String, trim: true, maxlength: 40 }], default: [] },
 }, { _id: false, strict: "throw" });
 
 const visualModeResolutionSchema = new mongoose.Schema({
@@ -115,6 +131,26 @@ const selectedPostSchema = new mongoose.Schema({
   status: { type: String, required: true, enum: SELECTED_POST_STATUSES, default: "PLANNED", uppercase: true, trim: true },
   generation_run_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialGenerationRun", default: null },
   draft_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPostDraft", default: null },
+  publication_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPublication", default: null },
+  bundleId: { type: String, default: null, trim: true, maxlength: 240 },
+  bundleRole: { type: String, default: null, enum: ["PARENT_FEED", null], uppercase: true, trim: true },
+}, { _id: false, strict: "throw" });
+
+const storyPlanItemSchema = new mongoose.Schema({
+  candidateId: { type: String, required: true, trim: true, maxlength: 100 },
+  sourceCandidateId: { type: String, default: null, trim: true, maxlength: 100 },
+  slotNumber: { type: Number, required: true, min: 1, max: 7 },
+  scheduledFor: { type: Date, required: true },
+  selectionReason: { type: String, required: true, trim: true, maxlength: 800 },
+  candidate: { type: candidateSchema, required: true },
+  parentCandidateId: { type: String, default: null, trim: true, maxlength: 100 },
+  bundleId: { type: String, required: true, trim: true, maxlength: 240 },
+  bundleRole: { type: String, required: true, enum: ["COMPANION_STORY", "STANDALONE_STORY"], uppercase: true, trim: true },
+  visual_mode_resolution: { type: visualModeResolutionSchema, required: true },
+  status: { type: String, required: true, enum: SELECTED_POST_STATUSES, default: "PLANNED", uppercase: true, trim: true },
+  generation_run_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialGenerationRun", default: null },
+  draft_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPostDraft", default: null },
+  parent_draft_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPostDraft", default: null },
   publication_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPublication", default: null },
 }, { _id: false, strict: "throw" });
 
@@ -141,10 +177,11 @@ const SocialWeeklyPlanSchema = new mongoose.Schema({
   week_end: { type: String, required: true, immutable: true, trim: true, match: DATE_KEY_PATTERN },
   timezone: { type: String, required: true, immutable: true, enum: ["Asia/Kolkata"], default: "Asia/Kolkata" },
   status: { type: String, required: true, enum: PLAN_STATUSES, default: "QUEUED", uppercase: true, trim: true, index: true },
-  maximum_feed_posts: { type: Number, required: true, default: 3, min: 1, max: 7 },
+  maximum_feed_posts: { type: Number, required: true, default: 5, min: 1, max: 7 },
   config_snapshot: { type: mongoose.Schema.Types.Mixed, default: null, validate: { validator: nullableAggregateOnly, message: "config_snapshot must not contain personal data" } },
   candidates: { type: [candidateSchema], default: [] },
   selected_posts: { type: [selectedPostSchema], default: [] },
+  story_plan: { type: [storyPlanItemSchema], default: [] },
   research_digest: { type: mongoose.Schema.Types.Mixed, default: null, validate: { validator: nullableAggregateOnly, message: "research_digest must contain aggregate, non-personal data only" } },
   audience_intelligence: { type: mongoose.Schema.Types.Mixed, default: null, validate: { validator: nullableAggregateOnly, message: "audience_intelligence must contain aggregate, non-personal data only" } },
   plan_rationale: { type: planRationaleSchema, default: null },
@@ -187,7 +224,7 @@ SocialWeeklyPlanSchema.pre("validate", function validateWeeklyPlan() {
   if (new Set(candidateIds).size !== candidateIds.length) this.invalidate("candidates", "candidateId values must be unique within a weekly plan");
 
   const selected = Array.isArray(this.selected_posts) ? this.selected_posts : [];
-  if (selected.length > Number(this.maximum_feed_posts || 3)) this.invalidate("selected_posts", "selected_posts cannot exceed maximum_feed_posts");
+  if (selected.length > Number(this.maximum_feed_posts || 5)) this.invalidate("selected_posts", "selected_posts cannot exceed maximum_feed_posts");
   const selectedCandidateIds = selected.map((item) => String(item.candidateId || "").trim());
   if (new Set(selectedCandidateIds).size !== selectedCandidateIds.length) this.invalidate("selected_posts", "A candidate can only be selected once per weekly plan");
   const slotNumbers = selected.map((item) => Number(item.slotNumber));
@@ -198,8 +235,44 @@ SocialWeeklyPlanSchema.pre("validate", function validateWeeklyPlan() {
     return !localDate || localDate < this.week_start || localDate > this.week_end;
   })) this.invalidate("selected_posts", "Every selected post must be scheduled inside the plan week in Asia/Kolkata");
 
+  const stories = Array.isArray(this.story_plan) ? this.story_plan : [];
+  if (stories.length > 7) this.invalidate("story_plan", "story_plan cannot contain more than seven Stories");
+  const storyCandidateIds = stories.map((item) => String(item.candidateId || "").trim());
+  if (new Set(storyCandidateIds).size !== storyCandidateIds.length) this.invalidate("story_plan", "Story candidateId values must be unique within a weekly plan");
+  const storySlots = stories.map((item) => Number(item.slotNumber));
+  if (new Set(storySlots).size !== storySlots.length) this.invalidate("story_plan", "Story slotNumber values must be unique within a weekly plan");
+  if (stories.some((item) => String(item.candidate?.format || "").toUpperCase() !== "STORY")) this.invalidate("story_plan", "Every story_plan candidate must use the STORY format");
+  if (stories.some((item) => item.bundleRole === "COMPANION_STORY"
+    && !selectedCandidateIds.includes(String(item.parentCandidateId || "")))) {
+    this.invalidate("story_plan", "Every companion Story must reference a selected feed candidate");
+  }
+  const standaloneSourceIds = stories
+    .filter((item) => item.bundleRole === "STANDALONE_STORY")
+    .map((item) => String(item.sourceCandidateId || "").trim())
+    .filter(Boolean);
+  if (new Set(standaloneSourceIds).size !== standaloneSourceIds.length) {
+    this.invalidate("story_plan", "Standalone Stories must use distinct retained source candidates");
+  }
+  if (standaloneSourceIds.some((candidateId) => selectedCandidateIds.includes(candidateId))) {
+    this.invalidate("story_plan", "Standalone Stories cannot reuse a selected feed candidate as their retained source");
+  }
+  if (this.week_start && this.week_end && stories.some((item) => {
+    const localDate = dateKeyInKolkata(item.scheduledFor);
+    return !localDate || localDate < this.week_start || localDate > this.week_end;
+  })) this.invalidate("story_plan", "Every Story must be scheduled inside the plan week in Asia/Kolkata");
+
   if (REVIEWABLE_STATUSES.has(this.status)) {
     if (candidates.length < 8) this.invalidate("candidates", "A reviewable weekly plan requires at least 8 candidates");
+    if (Number(this.maximum_feed_posts || 5) >= 5
+      && candidates.filter((item) => String(item.format || "").toUpperCase() !== "STORY").length < 7) {
+      this.invalidate("candidates", "A five-feed weekly plan requires at least seven feed-capable candidates; Story ideas do not satisfy this requirement");
+    }
+    if (Number(this.maximum_feed_posts || 5) === 5 && selected.length !== 5) {
+      this.invalidate("selected_posts", "A reviewable five-feed plan requires exactly five selected feed posts");
+    }
+    if (Number(this.maximum_feed_posts || 5) === 5 && stories.length !== 7) {
+      this.invalidate("story_plan", "A reviewable five-feed plan requires five companion Stories and two standalone Stories");
+    }
     if (selected.length < 1) this.invalidate("selected_posts", "A reviewable weekly plan requires at least one selected post");
     if (!this.research_digest) this.invalidate("research_digest", "A reviewable weekly plan requires a research digest");
     if (!this.audience_intelligence) this.invalidate("audience_intelligence", "A reviewable weekly plan requires audience intelligence");
@@ -222,10 +295,14 @@ SocialWeeklyPlanSchema.index({ "selected_posts.scheduledFor": 1, status: 1 });
 SocialWeeklyPlanSchema.index({ "selected_posts.generation_run_id": 1 });
 SocialWeeklyPlanSchema.index({ "selected_posts.draft_id": 1 });
 SocialWeeklyPlanSchema.index({ "selected_posts.publication_id": 1 });
+SocialWeeklyPlanSchema.index({ "story_plan.scheduledFor": 1, status: 1 });
+SocialWeeklyPlanSchema.index({ "story_plan.generation_run_id": 1 });
+SocialWeeklyPlanSchema.index({ "story_plan.draft_id": 1 });
 SocialWeeklyPlanSchema.index({ research_source_ids: 1 });
 
 SocialWeeklyPlanSchema.statics.PLAN_STATUSES = PLAN_STATUSES;
 SocialWeeklyPlanSchema.statics.SOCIAL_FORMATS = SOCIAL_FORMATS;
 SocialWeeklyPlanSchema.statics.SELECTED_POST_STATUSES = SELECTED_POST_STATUSES;
+SocialWeeklyPlanSchema.statics.BUNDLE_ROLES = BUNDLE_ROLES;
 
 module.exports = mongoose.model("SocialWeeklyPlan", SocialWeeklyPlanSchema);

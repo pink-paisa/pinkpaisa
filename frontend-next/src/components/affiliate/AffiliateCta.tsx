@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { AffiliateDisclosure } from "@/components/affiliate/AffiliateDisclosure";
 import { buildAffiliateOutboundQuery, getAffiliateCtaExperiment, trackAffiliateEvent, type AffiliateTrackableProduct } from "@/lib/affiliateTracking";
 import { API_URL } from "@/lib/api";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 type AffiliateCtaProps = {
   product: AffiliateTrackableProduct & {
@@ -15,6 +16,7 @@ type AffiliateCtaProps = {
   variant?: "default" | "secondary" | "outline" | "product";
   className?: string;
   showDisclosure?: boolean;
+  surface?: "card" | "detail";
 };
 
 export function AffiliateCta({
@@ -24,6 +26,7 @@ export function AffiliateCta({
   variant = "default",
   className,
   showDisclosure = true,
+  surface = "card",
 }: AffiliateCtaProps) {
   const [experimentVariant, setExperimentVariant] = useState("check_price_on_amazon");
   const [outboundQuery, setOutboundQuery] = useState("");
@@ -35,11 +38,19 @@ export function AffiliateCta({
   useEffect(() => {
     setExperimentVariant(getAffiliateCtaExperiment().experiment_variant);
     setOutboundQuery(buildAffiliateOutboundQuery());
-  }, []);
+    if (surface === "card" && !disabled) trackAffiliateEvent(product, "card_impression");
+  }, [disabled, product, surface]);
 
   const handleClick = () => {
     if (disabled) return;
     trackAffiliateEvent(product, "cta_click");
+    trackAnalyticsEvent("affiliate_outbound_click", {
+      item_id: product.id,
+      item_category: product.category || undefined,
+      experiment_name: "affiliate_cta_text_v1",
+      experiment_variant: experimentVariant,
+      measurement_semantics: "retailer_redirect_intent",
+    });
   };
 
   return (

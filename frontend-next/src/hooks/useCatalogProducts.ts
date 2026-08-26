@@ -4,6 +4,7 @@ import { apiFetch } from "@/lib/api";
 export type CatalogProduct = {
   id: string;
   title: string;
+  editorial_title?: string | null;
   slug: string;
   is_affiliate?: boolean;
   affiliate_url?: string | null;

@@ -12,6 +12,7 @@ type AnalyticsResponse = {
   order_revenue: number;
   booking_revenue: number;
   total_orders: number;
+  paid_orders: number;
   total_bookings: number;
   paid_bookings: number;
   total_workshops: number;
@@ -35,7 +36,8 @@ type AnalyticsResponse = {
   affiliate_bot_events: number;
   affiliate_ctr: number;
   affiliate_instagram_events: number;
-  affiliate_experiments: Array<{ experiment_name: string; experiment_variant: string; views: number; clicks: number; ctr: number }>;
+  affiliate_experiments: Array<{ experiment_name: string; experiment_variant: string; views: number; clicks: number; ctr: number; card_impressions?: number; detail_views?: number; cta_clicks?: number; retailer_handoffs?: number }>;
+  monetisation_funnel: { generated_at: string | null; stages: Array<{ key: string; label: string; value: number | null; source: string; status: "available" | "unavailable"; unit?: string; note: string }> };
   amazon_report_summary: { rows: number; ordered_items: number; shipped_items: number; returned_items: number; revenue: number; commission: number };
   top_amazon_report_products: Array<{ product_id: string | null; title: string; slug: string | null; asin: string | null; marketplace: string | null; ordered_items: number; shipped_items: number; revenue: number; commission: number }>;
   top_affiliate_products: Array<{ product_id: string | null; title: string; slug: string | null; asin: string | null; marketplace: string | null; views: number; clicks: number; ctr: number }>;
@@ -49,6 +51,7 @@ const INITIAL_STATS: AnalyticsResponse = {
   order_revenue: 0,
   booking_revenue: 0,
   total_orders: 0,
+  paid_orders: 0,
   total_bookings: 0,
   paid_bookings: 0,
   total_workshops: 0,
@@ -71,6 +74,7 @@ const INITIAL_STATS: AnalyticsResponse = {
   affiliate_ctr: 0,
   affiliate_instagram_events: 0,
   affiliate_experiments: [],
+  monetisation_funnel: { generated_at: null, stages: [] },
   amazon_report_summary: { rows: 0, ordered_items: 0, shipped_items: 0, returned_items: 0, revenue: 0, commission: 0 },
   top_amazon_report_products: [],
   top_affiliate_products: [],
@@ -196,6 +200,27 @@ export const AdminAnalytics = () => {
           <StatCard label="Workshop Revenue" value={formatPrice(stats.booking_revenue)} color="text-primary" />
           <StatCard label="Total Revenue" value={formatPrice(totalRevenue)} color="text-emerald-600" />
           <StatCard label="Total Orders" value={stats.total_orders + stats.total_bookings} />
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-3">
+          <h3 className="font-semibold">Immediate monetisation funnel</h3>
+          <p className="mt-1 text-xs text-muted-foreground">Each stage names its authoritative source. Missing GA4 data stays unavailable instead of being inferred.</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+          {stats.monetisation_funnel.stages.map((stage, index) => (
+            <div key={stage.key} className="relative rounded-xl border border-border bg-card p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">{index + 1}. {stage.label}</p>
+              <p className="mt-2 text-2xl font-semibold tabular-nums">
+                {stage.value == null ? "—" : stage.unit === "INR" ? formatPrice(stage.value) : stage.value.toLocaleString("en-IN")}
+              </p>
+              <p className={`mt-2 text-[11px] font-medium ${stage.status === "available" ? "text-emerald-600" : "text-amber-600"}`}>
+                {stage.status === "available" ? stage.source : "Not connected"}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">{stage.note}</p>
+            </div>
+          ))}
         </div>
       </div>
 

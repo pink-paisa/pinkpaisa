@@ -111,6 +111,8 @@ const ProductsSection = ({ initialProducts }: { initialProducts?: Product[] }) =
   const isInView = useInView(ref, { once: true, amount: 0.1 });
   const { data: products, isLoading } = useProducts(false, initialProducts);
 
+  if (!isLoading && !(products ?? []).length) return null;
+
   return (
     <section id="programs" className="bg-background py-20 md:py-28">
       <div className="container mx-auto">
@@ -132,8 +134,8 @@ const ProductsSection = ({ initialProducts }: { initialProducts?: Product[] }) =
               Everything you need to start your wealth journey
             </h2>
             <p className="text-lg text-muted-foreground">
-              From quick-start templates to deep-dive courses — pick what
-              matches where you are right now.
+              Available paid programs will appear here only after checkout and
+              secure delivery are ready.
             </p>
           </motion.div>
 

@@ -1,5 +1,8 @@
 const express = require("express");
 const router = express.Router();
+const crypto = require("crypto");
+const fs = require("fs/promises");
+const path = require("path");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const User = require("../models/User");
@@ -7,7 +10,12 @@ const Vendor = require("../models/Vendor");
 const { getJwtSecret } = require("../utils/authConfig");
 const { getCustomerSessionToken } = require("../utils/customerSession");
 const { extractVendorToken, getVendorJwtSecret } = require("../utils/vendorSession");
-const { saveImageBufferAsWebp } = require("../utils/imageUpload");
+const { protect, adminOnly } = require("../middleware/auth");
+const {
+  UPLOADS_ROOT,
+  buildPublicUploadUrl,
+  saveImageBufferAsWebp,
+} = require("../utils/imageUpload");
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -15,6 +23,15 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith("image/")) return cb(null, true);
     cb(new Error("Only image files are allowed"));
+  },
+});
+
+const certificateUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === "application/pdf" || file.mimetype.startsWith("image/")) return cb(null, true);
+    return cb(new Error("Certificates must be a PDF or image file"));
   },
 });
 
@@ -91,6 +108,40 @@ router.post("/image", requireImageUploadActor, upload.fields([{ name: "file", ma
       path: uploadedImage.relativePath,
       format: uploadedImage.format,
       size: uploadedImage.size,
+    });
+  } catch (error) {
+    return next(error);
+  }
+});
+
+// POST /api/uploads/certificate — admin-only, CSRF-protected by the global API middleware.
+router.post("/certificate", protect, adminOnly, certificateUpload.single("file"), async (req, res, next) => {
+  if (!req.file) return res.status(400).json({ message: "No certificate file uploaded" });
+  try {
+    if (req.file.mimetype.startsWith("image/")) {
+      const uploaded = await saveImageBufferAsWebp(req.file.buffer, {
+        subdir: "certificates",
+        prefix: "certificate",
+        maxWidth: 2400,
+        maxHeight: 2400,
+        quality: 88,
+      });
+      return res.json({ url: uploaded.publicUrl, path: uploaded.relativePath, format: uploaded.format, size: uploaded.size });
+    }
+
+    if (req.file.buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+      return res.status(400).json({ message: "Certificate PDF signature is invalid" });
+    }
+    const directory = path.join(UPLOADS_ROOT, "certificates");
+    await fs.mkdir(directory, { recursive: true });
+    const fileName = `certificate-${Date.now()}-${crypto.randomBytes(12).toString("hex")}.pdf`;
+    const relativePath = `certificates/${fileName}`;
+    await fs.writeFile(path.join(directory, fileName), req.file.buffer, { flag: "wx" });
+    return res.json({
+      url: buildPublicUploadUrl(relativePath),
+      path: relativePath,
+      format: "pdf",
+      size: req.file.buffer.length,
     });
   } catch (error) {
     return next(error);

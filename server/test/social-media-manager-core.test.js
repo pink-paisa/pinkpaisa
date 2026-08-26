@@ -35,6 +35,10 @@ const {
 const SocialPromptVersion = require("../models/SocialPromptVersion");
 const { buildPromptSeeds } = require("../scripts/migrate/social-media-manager-foundation");
 const { buildSocialCaptionContract } = require("../services/social/socialCaptionPolicy");
+const {
+  serialiseProduct,
+  _private: { digitalProductsArePromotable, productEligibleForSocialSignals },
+} = require("../services/social/socialInternalSignals");
 const { _private: { buildRenderItems, stableStringify } } = require("../services/socialCreativeService");
 
 function clone(value) {
@@ -842,6 +846,8 @@ test("affiliate candidates retain only the exact verified catalog product facts"
     short_description: "A guided journal for a reflective desk routine.",
     verified_affiliate_url: "https://www.amazon.in/dp/B0CALM1234?tag=pinkpaisa-21",
     is_affiliate: true,
+    affiliate_is_instagram_pick: true,
+    affiliate_link_check_status: "ok",
     compliance_status: "compliant",
     usage_rights_status: "admin_confirmed",
     landing_page: "/product/calm-wellness-journal",
@@ -867,6 +873,51 @@ test("affiliate candidates retain only the exact verified catalog product facts"
 
   const rejected = decisionPrivate.prepareVerifiedCandidate({ ...candidate, verifiedProductId: "invented" }, { products: [product] });
   assert.match(rejected.server_rejection_reason, /exact requested active Pink Paisa database product/i);
+
+  for (const unsafeProduct of [
+    { ...product, affiliate_is_instagram_pick: false },
+    { ...product, affiliate_link_check_status: "unchecked" },
+    { ...product, affiliate_link_check_status: null },
+  ]) {
+    const unsafe = decisionPrivate.prepareVerifiedCandidate(candidate, { products: [unsafeProduct] });
+    assert.match(unsafe.server_rejection_reason, /approved Instagram pick with link health exactly ok/i);
+  }
+});
+
+test("Social Manager internal signals expose only Instagram-approved affiliates with link health exactly ok", () => {
+  const approved = {
+    _id: { toString: () => "affiliate-approved" },
+    title: "Approved pick",
+    slug: "approved-pick",
+    is_affiliate: true,
+    affiliate_is_instagram_pick: true,
+    affiliate_link_check_status: "ok",
+    affiliate_url: "https://www.amazon.in/dp/APPROVED?tag=pinkpaisa07-21",
+  };
+  assert.equal(productEligibleForSocialSignals(approved), true);
+  assert.equal(productEligibleForSocialSignals({ ...approved, affiliate_is_instagram_pick: false }), false);
+  assert.equal(productEligibleForSocialSignals({ ...approved, affiliate_link_check_status: "unchecked" }), false);
+  assert.equal(productEligibleForSocialSignals({ ...approved, affiliate_link_check_status: null }), false);
+  assert.equal(productEligibleForSocialSignals({ ...approved, affiliate_link_check_status: "OK" }), false);
+  assert.equal(productEligibleForSocialSignals({ ...approved, is_affiliate: false }), true);
+  const serialized = serialiseProduct(approved);
+  assert.equal(serialized.affiliate_is_instagram_pick, true);
+  assert.equal(serialized.affiliate_link_check_status, "ok");
+});
+
+test("digital products stay out of social promotion until the launch gate is explicit", () => {
+  const previous = process.env.DIGITAL_PRODUCTS_ENABLED;
+  try {
+    delete process.env.DIGITAL_PRODUCTS_ENABLED;
+    assert.equal(digitalProductsArePromotable(), false);
+    process.env.DIGITAL_PRODUCTS_ENABLED = "false";
+    assert.equal(digitalProductsArePromotable(), false);
+    process.env.DIGITAL_PRODUCTS_ENABLED = "true";
+    assert.equal(digitalProductsArePromotable(), true);
+  } finally {
+    if (previous === undefined) delete process.env.DIGITAL_PRODUCTS_ENABLED;
+    else process.env.DIGITAL_PRODUCTS_ENABLED = previous;
+  }
 });
 
 test("financial education requires the configured disclaimer", () => {

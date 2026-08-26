@@ -192,11 +192,26 @@ const SocialPostDraftSchema = new mongoose.Schema(
       trim: true,
       maxlength: 300,
     },
+    bundle_id: {
+      type: String,
+      default: null,
+      immutable: true,
+      trim: true,
+      maxlength: 240,
+      index: true,
+    },
+    bundle_role: {
+      type: String,
+      default: null,
+      enum: ["PARENT_FEED", "COMPANION_STORY", "STANDALONE_STORY", null],
+      uppercase: true,
+      trim: true,
+      index: true,
+    },
     parent_draft_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "SocialPostDraft",
       default: null,
-      immutable: true,
       index: true,
     },
     result_json: packageField({ immutable: true }),
@@ -310,6 +325,10 @@ SocialPostDraftSchema.pre("validate", function projectCurrentPackage() {
       "Weekly drafts require candidate_id, weekly_slot_number, week_start, week_end, and primary_kpi"
     );
   }
+  const hasBundleMetadata = Boolean(this.bundle_id || this.bundle_role);
+  if (hasBundleMetadata && (!this.bundle_id || !this.bundle_role || !hasWeeklyLink)) {
+    this.invalidate("bundle_id", "Bundled drafts require bundle_id, bundle_role, and weekly_plan_id");
+  }
   if (this.week_start && this.week_end) {
     const start = Date.parse(`${this.week_start}T00:00:00.000Z`);
     const end = Date.parse(`${this.week_end}T00:00:00.000Z`);
@@ -320,6 +339,14 @@ SocialPostDraftSchema.pre("validate", function projectCurrentPackage() {
 
   const primary = current?.primaryRecommendation;
   if (!primary) return;
+
+  const format = String(primary.format || "").toUpperCase();
+  if (["COMPANION_STORY", "STANDALONE_STORY"].includes(this.bundle_role) && format !== "STORY") {
+    this.invalidate("bundle_role", `${this.bundle_role} requires STORY content`);
+  }
+  if (this.bundle_role === "PARENT_FEED" && format === "STORY") {
+    this.invalidate("bundle_role", "PARENT_FEED cannot use STORY content");
+  }
 
   this.primary_internal_title = primary.internalTitle || null;
   this.primary_topic = primary.topic || null;
@@ -341,6 +368,7 @@ SocialPostDraftSchema.pre("validate", function projectCurrentPackage() {
 SocialPostDraftSchema.index({ generation_run_id: 1, revision: -1 });
 SocialPostDraftSchema.index({ weekly_plan_id: 1, weekly_slot_number: 1 });
 SocialPostDraftSchema.index({ weekly_plan_id: 1, candidate_id: 1, revision: -1 });
+SocialPostDraftSchema.index({ weekly_plan_id: 1, bundle_id: 1, bundle_role: 1 });
 SocialPostDraftSchema.index({ generation_date: -1, status: 1 });
 SocialPostDraftSchema.index({ status: 1, scheduled_for: 1 });
 SocialPostDraftSchema.index({ published_at: -1, primary_content_pillar: 1 });

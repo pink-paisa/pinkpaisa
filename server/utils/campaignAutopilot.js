@@ -34,10 +34,10 @@ function normalizeAutopilotCarouselCount(value) {
     : DEFAULT_AUTOPILOT_CAROUSEL_COUNT;
 }
 
-function normalizeAutopilotPublishWorkflow(value, fallback = AUTOPILOT_DIRECT_PUBLISH) {
-  return [AUTOPILOT_APPROVAL_REQUIRED, AUTOPILOT_DIRECT_PUBLISH].includes(String(value || "").trim())
-    ? String(value).trim()
-    : fallback;
+function normalizeAutopilotPublishWorkflow() {
+  // Direct publishing remains a readable legacy enum, but every new or resumed
+  // autopilot run must stop for a human review.
+  return AUTOPILOT_APPROVAL_REQUIRED;
 }
 
 function buildAutopilotEligibleProductQuery() {
@@ -50,7 +50,8 @@ function buildAutopilotEligibleProductQuery() {
     affiliate_compliance_status: "compliant",
     affiliate_url: { $nin: [null, ""] },
     affiliate_tag: { $nin: [null, ""] },
-    affiliate_link_check_status: { $nin: ["failed", "paused"] },
+    affiliate_is_instagram_pick: true,
+    affiliate_link_check_status: "ok",
   };
 }
 

@@ -73,6 +73,8 @@ test("verified product record must still match the active production database re
     is_visible: true,
     archived_at: null,
     is_affiliate: true,
+    affiliate_is_instagram_pick: true,
+    affiliate_link_check_status: "ok",
     affiliate_compliance_status: "compliant",
     affiliate_campaign_usage_rights: "admin_confirmed",
     affiliate_campaign_asset_url: reference.url,
@@ -96,6 +98,17 @@ test("verified product record must still match the active production database re
     }),
     (error) => error.code === "social_product_reference_rights_invalid",
   );
+  for (const unsafeProduct of [
+    { ...product, affiliate_is_instagram_pick: false },
+    { ...product, affiliate_link_check_status: "unchecked" },
+    { ...product, affiliate_link_check_status: null },
+  ]) {
+    await assert.rejects(
+      resolveVerifiedProductRecord(reference, { getVerifiedProductRecord: async () => unsafeProduct }),
+      (error) => error.code === "social_product_reference_rights_invalid"
+        && /approved Instagram pick with link health exactly ok/i.test(error.message),
+    );
+  }
 });
 
 test("product downloads reject unallowlisted and private-address hosts before any request", async () => {

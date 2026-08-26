@@ -3,11 +3,37 @@ const { StandardCheckoutPayRequest } = require("@phonepe-pg/pg-sdk-node");
 const WorkshopBooking = require("../models/WorkshopBooking");
 const Workshop = require("../models/Workshop");
 const PendingPayment = require("../models/PendingPayment");
-const { getPhonepeClient } = require("../utils/phonepeClient");
+const { getPhonepeClient, isDirectPaymentsLive } = require("../utils/phonepeClient");
+const {
+  createGuestWorkshopReceiptToken,
+  verifyGuestWorkshopReceiptToken,
+} = require("../utils/workshopReceiptToken");
 const logger = require("../utils/logger");
 const { applyQueryParams } = require("./orderController");
+const { normalizeMarketingAttribution } = require("../utils/marketingAttribution");
+const { createPaymentVerificationSecret } = require("../utils/paymentVerificationSecret");
 
 const toFlat = (doc) => ({ ...doc, id: doc._id.toString() });
+
+function buildPublicWorkshopReceipt(booking) {
+  return {
+    id: String(booking._id || booking.id),
+    workshop_id: booking.workshop_id || null,
+    workshop_title: booking.workshop_title,
+    full_name: booking.full_name,
+    team_size: Number(booking.team_size || 1),
+    preferred_date: booking.preferred_date || null,
+    preferred_time: booking.preferred_time || null,
+    delivery_mode: booking.delivery_mode || "Online",
+    subtotal: Number(booking.subtotal || 0),
+    addons_total: Number(booking.addons_total || 0),
+    total: Number(booking.total || 0),
+    payment_status: booking.payment_status,
+    booking_status: booking.booking_status,
+    createdAt: booking.createdAt || null,
+    updatedAt: booking.updatedAt || null,
+  };
+}
 
 function getPendingPaymentExpiryDate() {
   return new Date(Date.now() + 30 * 60 * 1000);
@@ -75,9 +101,16 @@ const getBooking = async (req, res) => {
   try {
     const booking = await WorkshopBooking.findById(req.params.id).lean();
     if (!booking) return res.status(404).json({ message: "Booking not found" });
-    res.json(toFlat(booking));
+    const isAdmin = req.user?.role === "admin";
+    const ownsBooking = Boolean(req.user?._id) && String(booking.user_id || "") === String(req.user._id);
+    if (!isAdmin && !ownsBooking) {
+      const token = String(req.headers?.["x-workshop-receipt-token"] || req.query.t || "").trim();
+      if (!token) return res.status(401).json({ message: "Receipt token is required" });
+      verifyGuestWorkshopReceiptToken(token, req.params.id);
+    }
+    res.json(buildPublicWorkshopReceipt(booking));
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(Number(err.status) || 400).json({ message: err.message });
   }
 };
 
@@ -113,9 +146,17 @@ const createBooking = async (req, res) => {
       venue_address: normalizeString(req.body.venue_address),
       notes: normalizeString(req.body.notes),
       internal_notes: null,
+      attribution: normalizeMarketingAttribution(req.body.attribution),
     };
     if (!payload.full_name || !payload.email || !payload.phone) {
       return res.status(400).json({ message: "Workshop, name, email, and phone are required" });
+    }
+
+    if (!isDirectPaymentsLive()) {
+      return res.status(503).json({
+        code: "direct_payments_not_live",
+        message: "Direct workshop payments are not live yet. Please request a quote instead.",
+      });
     }
 
     const client = getPhonepeClient();
@@ -129,6 +170,7 @@ const createBooking = async (req, res) => {
     }
 
     const merchantOrderId = generateWorkshopMerchantOrderId(req.user?._id?.toString?.());
+    const paymentVerification = createPaymentVerificationSecret();
 
     const booking = await WorkshopBooking.create({
       ...payload,
@@ -143,17 +185,20 @@ const createBooking = async (req, res) => {
       booking_status: "draft",
       merchant_order_id: merchantOrderId,
     });
+    const receiptToken = createGuestWorkshopReceiptToken(booking);
 
     let pending = null;
     try {
       pending = await PendingPayment.create({
         merchant_order_id: merchantOrderId,
+        verification_secret_hash: paymentVerification.secret_hash,
         purpose: "workshop_booking",
         reference_id: booking._id.toString(),
         metadata: {
           workshop_id: workshop._id.toString(),
           workshop_title: workshop.title,
         },
+        attribution: payload.attribution,
         user_id: req.user?._id || null,
         guest_name: payload.full_name,
         guest_email: payload.email,
@@ -172,7 +217,9 @@ const createBooking = async (req, res) => {
         expires_at: getPendingPaymentExpiryDate(),
       });
 
-      const redirectUrl = `${getClientBaseUrl()}/workshop-booking-confirmation/${booking._id.toString()}?merchantOrderId=${encodeURIComponent(merchantOrderId)}`;
+      // The caller keeps receipt/payment capabilities in sessionStorage. Keeping them
+      // out of the provider return URL prevents referrer, analytics, and access-log leaks.
+      const redirectUrl = `${getClientBaseUrl()}/workshop-booking-confirmation/${booking._id.toString()}`;
       const payRequest = StandardCheckoutPayRequest.builder()
         .merchantOrderId(merchantOrderId)
         .amount(Math.round(pricing.total * 100))
@@ -189,6 +236,8 @@ const createBooking = async (req, res) => {
         ...toFlat(booking.toObject()),
         checkout_url: checkoutUrl,
         merchant_order_id: merchantOrderId,
+        verification_secret: paymentVerification.secret,
+        receipt_token: receiptToken,
       });
     } catch (error) {
       if (pending) {
@@ -213,7 +262,26 @@ const createBooking = async (req, res) => {
 
 const updateBooking = async (req, res) => {
   try {
-    const booking = await WorkshopBooking.findByIdAndUpdate(req.params.id, req.body, { new: true }).lean();
+    const allowedFields = [
+      "booking_status",
+      "payment_status",
+      "preferred_date",
+      "preferred_time",
+      "internal_notes",
+      "certificate_url",
+    ];
+    const updates = {};
+    for (const field of allowedFields) {
+      if (Object.hasOwn(req.body || {}, field)) updates[field] = req.body[field];
+    }
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ message: "No supported booking updates were provided" });
+    }
+    const booking = await WorkshopBooking.findByIdAndUpdate(
+      req.params.id,
+      { $set: updates },
+      { new: true, runValidators: true },
+    ).lean();
     if (!booking) return res.status(404).json({ message: "Booking not found" });
     res.json(toFlat(booking));
   } catch (err) {
@@ -221,4 +289,10 @@ const updateBooking = async (req, res) => {
   }
 };
 
-module.exports = { getBookings, getBooking, createBooking, updateBooking };
+module.exports = {
+  getBookings,
+  getBooking,
+  createBooking,
+  updateBooking,
+  _private: { buildPublicWorkshopReceipt },
+};

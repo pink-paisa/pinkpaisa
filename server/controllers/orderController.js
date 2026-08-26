@@ -15,6 +15,7 @@ const { createGuestOrderReceiptToken, verifyGuestOrderReceiptToken } = require("
 const { initiatePhonepeRefund } = require("../utils/phonepeClient");
 const { buildCommissionInvoiceHtml } = require("../utils/commissionInvoice");
 const { getVendorBankPayoutBlockReason } = require("../utils/vendorBankStatus");
+const { normalizeMarketingAttribution } = require("../utils/marketingAttribution");
 
 const ORDER_STATUS_FLOW = {
   pending: ["confirmed", "cancelled"],
@@ -1560,6 +1561,7 @@ const createOrder = async (req, res) => {
       status: "confirmed",
       payment_status: payment_method === "wallet" ? "paid" : "pending",
       vendor_payout_status: "not_ready",
+      attribution: normalizeMarketingAttribution(req.body.attribution),
     };
 
     const draftOrderItems = enriched.map((entry) => ({ ...entry.order_item }));

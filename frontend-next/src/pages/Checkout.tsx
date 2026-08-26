@@ -15,8 +15,11 @@ import { Label } from "@/components/ui/label";
 import { calculateShippingCost, FREE_SHIPPING_THRESHOLD } from "@/lib/commerceConfig";
 import AddressPicker from "@/components/checkout/AddressPicker";
 import type { UserAddress } from "@/hooks/useAccountAddresses";
+import { trackAnalyticsEvent } from "@/lib/analytics";
+import { getMarketingAttribution } from "@/lib/marketingAttribution";
 
 type PaymentMethod = "wallet" | "phonepe" | "cod";
+const DIRECT_PAYMENTS_ENABLED = process.env.NEXT_PUBLIC_DIRECT_PAYMENTS_ENABLED === "true";
 
 const formatPrice = (n: number) => `\u20B9${n.toLocaleString("en-IN")}`;
 const buildAddressLine = (address: UserAddress) =>
@@ -31,7 +34,7 @@ const Checkout = () => {
   const { user, loading } = useCustomerAuth();
   const [processing, setProcessing] = useState(false);
   const [walletBalance, setWalletBalance] = useState(0);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("phonepe");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cod");
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [form, setForm] = useState({
     name: "",
@@ -117,6 +120,7 @@ const Checkout = () => {
     subtotal,
     shipping_cost: shipping,
     total,
+    attribution: getMarketingAttribution(),
   });
 
   const handleWalletCheckout = async () => {
@@ -128,6 +132,9 @@ const Checkout = () => {
       }),
     });
     clearCart();
+    if (order?.payment_status === "paid") {
+      trackAnalyticsEvent("purchase", { transaction_id: order.order_number || order.id, value: Number(order.total || total), currency: "INR" });
+    }
     toast.success("Order placed using wallet balance");
     router.push(buildOrderConfirmationPath(order));
   };
@@ -146,15 +153,22 @@ const Checkout = () => {
   };
 
   const handlePhonepeCheckout = async () => {
+    if (!DIRECT_PAYMENTS_ENABLED) {
+      toast.error("PhonePe payments are not live yet.");
+      return;
+    }
     const createData = await customerFetch<any>("/phonepe/create-order", {
       method: "POST",
       body: JSON.stringify(buildCheckoutPayload()),
     });
 
-    if (createData.checkout_url) {
+    if (createData.checkout_url && createData.merchant_order_id && createData.verification_secret) {
       sessionStorage.setItem(
         "phonepe_pending_order",
-        JSON.stringify({ merchant_order_id: createData.merchant_order_id }),
+        JSON.stringify({
+          merchant_order_id: createData.merchant_order_id,
+          verification_secret: createData.verification_secret,
+        }),
       );
       window.location.href = createData.checkout_url;
       return;
@@ -171,6 +185,7 @@ const Checkout = () => {
     }
 
     setProcessing(true);
+    trackAnalyticsEvent("begin_checkout", { value: total, currency: "INR", item_count: items.length, payment_method: paymentMethod });
     try {
       if (paymentMethod === "wallet") {
         if (!user) {
@@ -240,7 +255,7 @@ const Checkout = () => {
 
         {!user ? (
           <div className="mb-8 rounded-2xl border border-primary/15 bg-primary/5 px-5 py-4 text-sm text-muted-foreground">
-            Continue as a guest with <span className="font-medium text-foreground">PhonePe or Cash on Delivery</span>, or{" "}
+            Continue as a guest with <span className="font-medium text-foreground">Cash on Delivery</span>{DIRECT_PAYMENTS_ENABLED ? " or PhonePe" : ""}, or{" "}
             <Link
               href="/account/auth?redirect=/checkout"
               className="font-medium text-primary underline-offset-4 hover:underline"
@@ -307,7 +322,7 @@ const Checkout = () => {
 
             <div className="space-y-4 rounded-2xl border border-border bg-card p-6">
               <h2 className="font-serif text-lg">Payment Method</h2>
-              <div className={`grid gap-3 ${user ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
+              <div className={`grid gap-3 ${user && DIRECT_PAYMENTS_ENABLED ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
                 {user ? (
                   <button
                     onClick={() => setPaymentMethod("wallet")}
@@ -324,19 +339,21 @@ const Checkout = () => {
                   </button>
                 ) : null}
 
-                <button
-                  onClick={() => setPaymentMethod("phonepe")}
-                  aria-pressed={paymentMethod === "phonepe"}
-                  className={`rounded-2xl border p-4 text-left ${paymentMethod === "phonepe" ? "border-primary bg-primary/5" : "border-border"}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <Shield className="h-5 w-5 text-primary" />
-                    <div>
-                      <p className="font-medium">PhonePe</p>
-                      <p className="text-sm text-muted-foreground">Pay securely using UPI, card, or net banking</p>
+                {DIRECT_PAYMENTS_ENABLED ? (
+                  <button
+                    onClick={() => setPaymentMethod("phonepe")}
+                    aria-pressed={paymentMethod === "phonepe"}
+                    className={`rounded-2xl border p-4 text-left ${paymentMethod === "phonepe" ? "border-primary bg-primary/5" : "border-border"}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <Shield className="h-5 w-5 text-primary" />
+                      <div>
+                        <p className="font-medium">PhonePe</p>
+                        <p className="text-sm text-muted-foreground">Pay securely using UPI, card, or net banking</p>
+                      </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+                ) : null}
 
                 <button
                   onClick={() => setPaymentMethod("cod")}
@@ -397,7 +414,7 @@ const Checkout = () => {
 
               {paymentMethod === "wallet" && walletBalance < total ? (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                  Wallet balance is lower than the order total. Switch to PhonePe or lower the order value for now.
+                  Wallet balance is lower than the order total. Switch to Cash on Delivery or lower the order value for now.
                 </div>
               ) : null}
 
@@ -419,7 +436,7 @@ const Checkout = () => {
               <p className="text-xs text-muted-foreground">
                 {user
                   ? "Your order will be linked to your Pink Paisa account automatically."
-                  : "Guest checkout is available for PhonePe and Cash on Delivery. Sign in anytime later for faster future checkout and wallet access."}
+                  : `Guest checkout is available for Cash on Delivery${DIRECT_PAYMENTS_ENABLED ? " and PhonePe" : ""}. Sign in anytime later for faster future checkout and wallet access.`}
               </p>
             </div>
           </motion.div>

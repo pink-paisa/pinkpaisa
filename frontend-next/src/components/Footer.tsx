@@ -1,6 +1,7 @@
 import pinkPaisaLogo from "@/assets/pink-paisa-logo.png";
 import Link from "next/link";
 import { DISCLOSURE_TEXT } from "@/components/affiliate/AffiliateDisclosure";
+import { PINK_PAISA_BRAND } from "@/lib/brand";
 
 const Footer = () => {
   return (
@@ -47,12 +48,12 @@ const Footer = () => {
               pinkpaisa.in
             </a>
             <a
-              href="https://instagram.com/pinkpaisa.in"
+              href={PINK_PAISA_BRAND.instagramUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex min-h-10 items-center transition-colors hover:text-foreground"
             >
-              Instagram
+              {PINK_PAISA_BRAND.instagramHandle}
             </a>
           </div>
         </div>

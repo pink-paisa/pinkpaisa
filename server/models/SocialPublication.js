@@ -22,6 +22,21 @@ const publicationErrorSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const trackedUrlDeliverySchema = new mongoose.Schema({
+  verified: { type: Boolean, required: true, default: false },
+  method: {
+    type: String,
+    required: true,
+    enum: ["STORY_LINK_STICKER", "DIRECT_MESSAGE", "PROVIDER_CONFIRMED_OTHER"],
+    uppercase: true,
+    trim: true,
+  },
+  target_url: { type: String, required: true, trim: true, maxlength: 2048 },
+  provider_reference_id: { type: String, required: true, trim: true, maxlength: 500 },
+  verified_at: { type: Date, required: true },
+  evidence: { type: mongoose.Schema.Types.Mixed, default: null },
+}, { _id: false, strict: "throw" });
+
 const SocialPublicationSchema = new mongoose.Schema(
   {
     draft_id: {
@@ -135,6 +150,7 @@ const SocialPublicationSchema = new mongoose.Schema(
     external_permalink: { type: String, default: null, trim: true },
     provider_checkpoint: { type: mongoose.Schema.Types.Mixed, default: null },
     provider_response_metadata: { type: mongoose.Schema.Types.Mixed, default: null },
+    tracked_url_delivery: { type: trackedUrlDeliverySchema, default: null },
     attempt_count: { type: Number, default: 0, min: 0 },
     max_attempts: { type: Number, default: 4, min: 1, max: 11 },
     retry_count: { type: Number, default: 0, min: 0 },

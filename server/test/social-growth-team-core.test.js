@@ -197,6 +197,25 @@ test("weekly schemas require at least eight materially distinct candidates and a
   );
 });
 
+test("the five-feed cadence cannot be satisfied by replacing required feed-capable ideas with Story candidates", () => {
+  const candidates = Array.from({ length: 8 }, (_, index) => candidate(index));
+  candidates[6].format = "STORY";
+  candidates[7].format = "STORY";
+  assert.throws(
+    () => growthPrivate.validateCandidateInternalTruth(
+      { candidates, generationSummary: "Eight ideas, but only six are feed-capable." },
+      { products: [], blogs: [], workshops: [], virtual_products: [], polls: [], pink_pages: [], static_resources: [] },
+      { sources: [] },
+      {
+        brand_profile: { website_base_url: "https://pinkpaisa.in" },
+        weekly_planning: { maximum_feed_posts: 5 },
+      },
+    ),
+    (error) => error.code === "structured_output_invalid"
+      && error.validation_errors.includes("$.candidates must include at least seven candidates whose format is not STORY"),
+  );
+});
+
 test("weekly plan requests are idempotently reused without a request-count throttle", async () => {
   let storedPlan = null;
   let createCalls = 0;
@@ -381,6 +400,60 @@ test("creative production stays behind human plan approval and carries exact wee
   assert.equal(selected.status, "GENERATING_COPY");
 });
 
+test("talking-head concepts create a real-footage script and shot-list action without fabricating an endorsement", async () => {
+  const selectedCandidate = candidate(2, {
+    format: "REEL",
+    title: "Founder talking-head: the one money habit to start",
+    whyThisFormat: "A real Pink Paisa spokesperson should speak directly to camera.",
+  });
+  const selected = {
+    candidateId: selectedCandidate.candidateId,
+    candidate: selectedCandidate,
+    scheduledFor: new Date("2026-08-26T05:30:00.000Z"),
+    generation_run_id: null,
+  };
+  const plan = {
+    _id: "weekly-plan-talking-head",
+    status: "NEEDS_REVIEW",
+    version: 4,
+    candidates: [selectedCandidate],
+    selected_posts: [selected],
+    story_plan: [],
+    async save() { return this; },
+  };
+  let manualActionRecord = null;
+  const result = await approveWeeklyPlan(plan._id, {
+    actor: { _id: "admin-1" },
+    dependencies: {
+      SocialWeeklyPlan: { findById: async () => plan },
+      SocialGenerationRun: { findById: async () => null },
+      SocialAuditLog: auditModel(),
+      SocialManualAction: {
+        findOneAndUpdate: async (_query, update) => {
+          manualActionRecord = { _id: "manual-action-talking-head", ...update.$setOnInsert };
+          return manualActionRecord;
+        },
+      },
+      getSocialManagerSettings: async () => settings(),
+      requestGeneration: async (input) => ({
+        run: {
+          _id: "run-talking-head",
+          status: "PENDING",
+          weekly_plan_id: plan._id,
+          weekly_candidate_id: input.weeklyContext.candidateId,
+        },
+        reused: false,
+      }),
+    },
+  });
+
+  assert.equal(manualActionRecord.action_type, "CONTENT_ESCALATION");
+  assert.match(manualActionRecord.title, /authentic talking-head footage/i);
+  assert.match(manualActionRecord.instructions.join(" "), /script and shot list|HOOK.*TENSION.*VALUE.*IDENTITY.*CTA/i);
+  assert.match(manualActionRecord.instructions.join(" "), /Do not replace missing footage with an AI-generated founder/i);
+  assert.equal(result.production.generation_runs[0].manual_action_id, "manual-action-talking-head");
+});
+
 test("a failed weekly creative run queues a fresh linked retry instead of reusing the failure", async () => {
   const selectedCandidate = candidate(1, { format: "SINGLE_IMAGE" });
   const selected = {
@@ -504,6 +577,123 @@ test("weekly approval queues every selected creative once and reuses all queues 
   assert.equal(audits.length, 4);
 });
 
+test("five-feed approval atomically queues all five feeds and seven human-reviewed Stories", async () => {
+  const candidates = Array.from({ length: 8 }, (_, index) => candidate(index));
+  const feedSchedules = [
+    "2026-08-24T05:30:00.000Z",
+    "2026-08-25T12:30:00.000Z",
+    "2026-08-26T05:30:00.000Z",
+    "2026-08-27T12:30:00.000Z",
+    "2026-08-28T05:30:00.000Z",
+  ];
+  const plan = {
+    _id: "weekly-plan-five-feeds-seven-stories",
+    status: "NEEDS_REVIEW",
+    version: 4,
+    maximum_feed_posts: 5,
+    week_start: "2026-08-24",
+    week_end: "2026-08-30",
+    candidates,
+    selected_posts: candidates.slice(0, 5).map((item, index) => ({
+      candidateId: item.candidateId,
+      candidate: item,
+      slotNumber: index + 1,
+      scheduledFor: new Date(feedSchedules[index]),
+      status: "PLANNED",
+      generation_run_id: null,
+    })),
+    story_plan: [],
+    async save() { return this; },
+  };
+  plan.story_plan = growthPrivate.buildWeeklyStoryPlan({
+    plan,
+    selectedPosts: plan.selected_posts,
+    candidates,
+  });
+  assert.deepEqual(plan.story_plan.map((item) => new Date(item.scheduledFor).toISOString()), [
+    ...feedSchedules,
+    "2026-08-29T05:30:00.000Z",
+    "2026-08-30T05:30:00.000Z",
+  ]);
+  assert.ok(plan.story_plan.slice(0, 5).every((story, index) => (
+    story.bundleRole === "COMPANION_STORY"
+    && story.parentCandidateId === plan.selected_posts[index].candidateId
+    && story.bundleId === plan.selected_posts[index].bundleId
+  )));
+  assert.deepEqual(plan.story_plan.slice(5).map((story) => story.bundleRole), ["STANDALONE_STORY", "STANDALONE_STORY"]);
+  const runs = new Map();
+  const audits = [];
+  const session = {
+    async withTransaction(work) { await work(); },
+    async endSession() {},
+  };
+  const dependencies = {
+    startSession: async () => session,
+    SocialWeeklyPlan: { findById: async () => plan },
+    SocialGenerationRun: { findById: async (id) => runs.get(String(id)) || null },
+    SocialAuditLog: {
+      async create(records) {
+        const record = Array.isArray(records) ? records[0] : records;
+        audits.push(record);
+        return Array.isArray(records) ? [record] : record;
+      },
+    },
+    getSocialManagerSettings: async () => settings({
+      generation: { default_visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY" },
+      weekly_planning: {
+        candidate_count: 8,
+        maximum_feed_posts: 5,
+        posting_slots: [
+          { weekday: "MONDAY", hour_ist: 11, minute_ist: 0 },
+          { weekday: "TUESDAY", hour_ist: 18, minute_ist: 0 },
+          { weekday: "WEDNESDAY", hour_ist: 11, minute_ist: 0 },
+          { weekday: "THURSDAY", hour_ist: 18, minute_ist: 0 },
+          { weekday: "FRIDAY", hour_ist: 11, minute_ist: 0 },
+        ],
+      },
+    }),
+    socialVisualPolicy: {
+      resolveSocialVisualMode: ({ requestedVisualMode }) => ({
+        requested: requestedVisualMode,
+        effective: "AI_VISUAL_WITH_EXACT_OVERLAY",
+        eligible: true,
+        reasons: [],
+      }),
+    },
+    requestGeneration: async (input) => {
+      assert.equal(input.dependencies.mongoSession, session);
+      const candidateId = input.weeklyContext.candidateId;
+      const run = {
+        _id: `run-${candidateId}`,
+        status: "PENDING",
+        weekly_plan_id: plan._id,
+        weekly_candidate_id: candidateId,
+      };
+      runs.set(String(run._id), run);
+      return { run, reused: false };
+    },
+  };
+
+  const result = await approveWeeklyPlan(plan._id, {
+    actor: { _id: "admin-1" },
+    now: new Date("2026-08-23T12:30:00.000Z"),
+    dependencies,
+  });
+
+  assert.deepEqual(
+    { requested: result.production.requested, queued: result.production.queued, reused: result.production.reused },
+    { requested: 12, queued: 12, reused: 0 },
+  );
+  assert.equal(result.production.generation_runs.filter((item) => item.kind === "FEED").length, 5);
+  assert.equal(result.production.generation_runs.filter((item) => item.kind === "STORY").length, 7);
+  assert.equal(result.production.generation_runs.filter((item) => item.bundle_role === "COMPANION_STORY").length, 5);
+  assert.equal(result.production.generation_runs.filter((item) => item.bundle_role === "STANDALONE_STORY").length, 2);
+  assert.equal(new Set(result.production.generation_runs.map((item) => item.generation_run_id)).size, 12);
+  assert.ok([...plan.selected_posts, ...plan.story_plan].every((item) => item.status === "GENERATING_COPY" && item.generation_run_id));
+  assert.equal(audits.filter((entry) => entry.action === "WEEKLY_POST_PRODUCTION_QUEUED").length, 12);
+  assert.equal(audits.filter((entry) => entry.action === "WEEKLY_PLAN_APPROVED").length, 1);
+});
+
 test("an administrator can replace an unlocked review slot with an unused retained candidate", async () => {
   const candidates = Array.from({ length: 8 }, (_, index) => candidate(index));
   candidates[5] = candidate(5, {
@@ -582,6 +772,141 @@ test("an administrator can replace an unlocked review slot with an unused retain
   assert.equal(audits[0].metadata.scheduled_for, originalSchedule);
 });
 
+test("five-feed slot replacement retargets its companion and rebuilds distinct retained weekend Stories", async () => {
+  const candidates = Array.from({ length: 8 }, (_, index) => candidate(index, { format: "SINGLE_IMAGE" }));
+  const plan = {
+    _id: "weekly-plan-replace-bundle",
+    status: "NEEDS_REVIEW",
+    version: 4,
+    maximum_feed_posts: 5,
+    week_start: "2026-08-24",
+    candidates,
+    selected_posts: candidates.slice(0, 5).map((item, index) => ({
+      candidateId: item.candidateId,
+      candidate: item,
+      slotNumber: index + 1,
+      scheduledFor: new Date(`2026-08-${24 + index}T05:30:00.000Z`),
+      selectionReason: `Selected ${index + 1}`,
+      roleInWeeklyMix: "SAVEABLE_EDUCATION",
+      status: "PLANNED",
+    })),
+    story_plan: [],
+    async save() { return this; },
+  };
+  plan.story_plan = growthPrivate.buildWeeklyStoryPlan({ plan, selectedPosts: plan.selected_posts, candidates });
+  const originalCompanionId = plan.story_plan[0].candidateId;
+  assert.equal(plan.story_plan[5].sourceCandidateId, candidates[5].candidateId);
+
+  await replaceWeeklyPlanSlot(plan._id, 1, candidates[5].candidateId, {
+    actor: { id: "admin-1" },
+    dependencies: {
+      SocialWeeklyPlan: { findById: async () => plan },
+      SocialGenerationRun: { exists: async () => null },
+      SocialPostDraft: { exists: async () => null },
+      SocialAuditLog: auditModel(),
+      getSocialManagerSettings: async () => settings({ generation: { default_visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY" } }),
+    },
+  });
+
+  const companion = plan.story_plan.find((item) => item.slotNumber === 1);
+  const selectedIds = new Set(plan.selected_posts.map((item) => item.candidateId));
+  const weekendSources = plan.story_plan.slice(5).map((item) => item.sourceCandidateId);
+  assert.equal(companion.parentCandidateId, candidates[5].candidateId);
+  assert.equal(companion.sourceCandidateId, candidates[5].candidateId);
+  assert.equal(companion.bundleId, plan.selected_posts[0].bundleId);
+  assert.notEqual(companion.candidateId, originalCompanionId);
+  assert.deepEqual(weekendSources, [candidates[0].candidateId, candidates[6].candidateId]);
+  assert.equal(new Set(weekendSources).size, 2);
+  assert.ok(weekendSources.every((candidateId) => !selectedIds.has(candidateId)));
+});
+
+test("rolling four-week content mix accounts for three approved plan histories plus the current selection", () => {
+  const categorySequence = [
+    ...Array(8).fill("MONEY"),
+    ...Array(4).fill("BODY_FITNESS"),
+    ...Array(3).fill("WELLNESS_BEAUTY"),
+    ...Array(3).fill("WOMEN_LIFE"),
+    ...Array(2).fill("PINK_PAISA"),
+  ];
+  const selectedFor = (categories) => categories.map((growthCategory, index) => ({
+    candidate: { candidateId: `${growthCategory}-${index}`, format: "SINGLE_IMAGE", growthCategory },
+  }));
+  const historyPlans = [0, 1, 2].map((index) => ({
+    week_start: `2026-08-${3 + index * 7}`,
+    selected_posts: selectedFor(categorySequence.slice(index * 5, index * 5 + 5)),
+  }));
+  const snapshot = growthPrivate.buildRollingContentMixSnapshot({
+    historyPlans,
+    currentSelected: selectedFor(categorySequence.slice(15)),
+  });
+
+  assert.equal(snapshot.total_posts, 20);
+  assert.equal(snapshot.history_weeks_found, 3);
+  assert.deepEqual(snapshot.counts, {
+    MONEY: 8,
+    BODY_FITNESS: 4,
+    WELLNESS_BEAUTY: 3,
+    WOMEN_LIFE: 3,
+    PINK_PAISA: 2,
+  });
+  assert.deepEqual(snapshot.actual_percentages, snapshot.target_percentages);
+  assert.equal(snapshot.enforcement, "ACCOUNTED_AI_GUIDANCE");
+  assert.equal(snapshot.hard_quota_enforced, false);
+});
+
+test("growth series keys are assigned from the idea meaning rather than candidate array position", () => {
+  const review = {
+    objective: "PRODUCT_PROMOTION",
+    verifiedInternalEntityId: "product-1",
+    topic: "Would I buy this yoga mat? An evidence-led review",
+  };
+  const find = {
+    objective: "PRODUCT_PROMOTION",
+    verifiedInternalEntityId: "product-2",
+    topic: "Pink Paisa find: a stretching strap for a simple home routine",
+  };
+  const first = growthPrivate.seriesKeyForCandidate(review, 0);
+  const later = growthPrivate.seriesKeyForCandidate(review, 7);
+  assert.equal(first, "WOULD_I_BUY_IT");
+  assert.equal(later, first);
+  assert.equal(growthPrivate.seriesKeyForCandidate(find, 1), "PINK_PAISA_FINDS");
+  assert.equal(growthPrivate.seriesKeyForCandidate({ growthCategory: "WOMEN_LIFE", topic: "Money after 40" }, 4), "AFTER_40");
+  assert.equal(growthPrivate.seriesKeyForCandidate({ growthCategory: "MONEY", topic: "The budget math behind saving" }, 5), "RICH_GIRL_MATH");
+});
+
+test("approval rejects a partial five-feed or daily-Story cadence before any generation is queued", async () => {
+  const candidates = Array.from({ length: 8 }, (_, index) => candidate(index, { format: "SINGLE_IMAGE" }));
+  const plan = {
+    _id: "weekly-plan-corrupt-cadence",
+    status: "NEEDS_REVIEW",
+    maximum_feed_posts: 5,
+    candidates,
+    selected_posts: candidates.slice(0, 5).map((item, index) => ({
+      candidateId: item.candidateId,
+      candidate: item,
+      slotNumber: index + 1,
+      scheduledFor: new Date(`2026-08-${24 + index}T05:30:00.000Z`),
+      status: "PLANNED",
+    })),
+    story_plan: [],
+    async save() { return this; },
+  };
+  let generationCalls = 0;
+  await assert.rejects(
+    () => approveWeeklyPlan(plan._id, {
+      actor: { id: "admin-1" },
+      dependencies: {
+        SocialWeeklyPlan: { findById: async () => plan },
+        getSocialManagerSettings: async () => settings(),
+        requestGeneration: async () => { generationCalls += 1; },
+      },
+    }),
+    (error) => error.code === "social_weekly_cadence_incomplete" && error.statusCode === 409,
+  );
+  assert.equal(plan.status, "NEEDS_REVIEW");
+  assert.equal(generationCalls, 0);
+});
+
 test("weekly slot replacement rejects approved plans, selected candidates, and slots with production history", async () => {
   const candidates = Array.from({ length: 8 }, (_, index) => candidate(index));
   const selected = candidates.slice(0, 3).map((item, index) => ({
@@ -625,25 +950,37 @@ test("weekly slot replacement rejects approved plans, selected candidates, and s
   );
 });
 
-test("weekly approval transaction rolls back the plan, run queues, and audits when any selected creative cannot queue", async () => {
-  const selectedCandidates = [0, 1, 2].map((index) => candidate(index, { format: "SINGLE_IMAGE" }));
+test("weekly approval transaction rolls back all twelve feed and Story queues when any creative cannot queue", async () => {
+  const allCandidates = Array.from({ length: 8 }, (_, index) => candidate(index, { format: "SINGLE_IMAGE" }));
+  const selectedCandidates = allCandidates.slice(0, 5);
+  const feedSchedules = [
+    "2026-08-24T05:30:00.000Z",
+    "2026-08-25T12:30:00.000Z",
+    "2026-08-26T05:30:00.000Z",
+    "2026-08-27T12:30:00.000Z",
+    "2026-08-28T05:30:00.000Z",
+  ];
   const plan = {
     _id: "weekly-plan-rollback",
     status: "NEEDS_REVIEW",
     version: 5,
     approved_at: null,
     approved_by_admin_id: null,
-    candidates: selectedCandidates,
+    week_start: "2026-08-24",
+    week_end: "2026-08-30",
+    candidates: allCandidates,
     selected_posts: selectedCandidates.map((item, index) => ({
       candidateId: item.candidateId,
       candidate: item,
       slotNumber: index + 1,
-      scheduledFor: new Date(`2026-08-${25 + index * 2}T05:30:00.000Z`),
+      scheduledFor: new Date(feedSchedules[index]),
       status: "PLANNED",
       generation_run_id: null,
     })),
+    story_plan: [],
     async save() { return this; },
   };
+  plan.story_plan = growthPrivate.buildWeeklyStoryPlan({ plan, selectedPosts: plan.selected_posts, candidates: allCandidates });
   const initialPlan = JSON.parse(JSON.stringify(plan));
   const queuedRuns = [];
   const audits = [];
@@ -656,6 +993,7 @@ test("weekly approval transaction rolls back the plan, run queues, and audits wh
         plan.approved_at = initialPlan.approved_at;
         plan.approved_by_admin_id = initialPlan.approved_by_admin_id;
         plan.selected_posts = initialPlan.selected_posts;
+        plan.story_plan = initialPlan.story_plan;
         queuedRuns.splice(0);
         audits.splice(0);
         throw error;
@@ -679,7 +1017,7 @@ test("weekly approval transaction rolls back the plan, run queues, and audits wh
     requestGeneration: async (input) => {
       queueAttempt += 1;
       assert.ok(input.dependencies.mongoSession);
-      if (queueAttempt === 2) throw new Error("simulated second queue failure");
+      if (queueAttempt === 7) throw new Error("simulated Story queue failure after all five feeds and one Story");
       const run = {
         _id: `run-${input.weeklyContext.candidateId}`,
         status: "PENDING",
@@ -693,12 +1031,13 @@ test("weekly approval transaction rolls back the plan, run queues, and audits wh
 
   await assert.rejects(
     () => approveWeeklyPlan(plan._id, { actor: { _id: "admin-1" }, dependencies }),
-    /simulated second queue failure/,
+    /simulated Story queue failure/,
   );
   assert.equal(plan.status, "NEEDS_REVIEW");
   assert.equal(plan.approved_at, null);
   assert.equal(plan.approved_by_admin_id, null);
   assert.ok(plan.selected_posts.every((selected) => selected.status === "PLANNED" && !selected.generation_run_id));
+  assert.ok(plan.story_plan.every((story) => story.status === "PLANNED" && !story.generation_run_id));
   assert.equal(queuedRuns.length, 0);
   assert.equal(audits.length, 0);
 });
@@ -917,7 +1256,7 @@ test("aggregate analytics snapshots preserve unavailable metrics as missing rath
   assert.equal(result.connections.find((row) => row.provider === "SEARCH_CONSOLE").status, "NOT_CONFIGURED");
 });
 
-test("GA4 refresh filters exact Instagram UTMs and persists aggregate draft attribution joins", async () => {
+test("GA4 refresh persists a per-post join only for provider-confirmed tracked-URL delivery", async () => {
   const persisted = [];
   const ga4Calls = [];
   const SnapshotModel = {
@@ -936,10 +1275,36 @@ test("GA4 refresh filters exact Instagram UTMs and persists aggregate draft attr
       },
     },
   };
+  const unverifiedFeedDraft = {
+    _id: "draft-unverified-feed",
+    publication_id: "publication-unverified-feed",
+    current_package: draft.current_package,
+  };
   const dependencies = {
     SocialGrowthSnapshot: SnapshotModel,
     SocialPostDraft: {
-      find: () => ({ select: () => ({ limit: () => ({ lean: async () => [draft] }) }) }),
+      find: () => ({ select: () => ({ limit: () => ({ lean: async () => [draft, unverifiedFeedDraft] }) }) }),
+    },
+    SocialPublication: {
+      find: () => ({ select: () => ({ lean: async () => [{
+        _id: draft.publication_id,
+        draft_id: draft._id,
+        status: "PUBLISHED",
+        content_type: "STORY",
+        tracked_url_delivery: {
+          verified: true,
+          method: "STORY_LINK_STICKER",
+          target_url: "https://pinkpaisa.in/quiz?utm_campaign=money-basics&utm_content=primary-buffer",
+          provider_reference_id: "meta-story-link-123",
+          verified_at: new Date("2026-08-22T09:00:00.000Z"),
+        },
+      }, {
+        _id: unverifiedFeedDraft.publication_id,
+        draft_id: unverifiedFeedDraft._id,
+        status: "PUBLISHED",
+        content_type: "CAROUSEL",
+        tracked_url_delivery: null,
+      }] }) }),
     },
     SocialWeeklyPlan: { findOne: () => ({ sort: async () => null }) },
     getSocialManagerSettings: async () => settings(),
@@ -1004,10 +1369,14 @@ test("GA4 refresh filters exact Instagram UTMs and persists aggregate draft attr
   assert.equal(ga4Calls[0].dimensionFilter.andGroup.expressions[0].filter.stringFilter.value, "instagram");
   assert.equal(ga4Calls[0].dimensionFilter.andGroup.expressions[1].filter.stringFilter.value, "organic_social");
   const ga4 = persisted.find((row) => row.provider === "GA4");
-  const joined = persisted.find((row) => row.provider === "ATTRIBUTION_JOIN");
+  const joins = persisted.filter((row) => row.provider === "ATTRIBUTION_JOIN");
+  const joined = joins[0];
   assert.equal(ga4.metrics.website_sessions, 12);
   assert.equal(ga4.metrics.quiz_starts, 3);
   assert.equal(joined.draft_id, draft._id);
+  assert.equal(joins.length, 1);
+  assert.equal(persisted.some((row) => row.draft_id === unverifiedFeedDraft._id), false);
+  assert.equal(joined.dimensions.tracked_url_delivery.method, "STORY_LINK_STICKER");
   assert.deepEqual(joined.metrics, {
     website_sessions: 12,
     engaged_sessions: 9,
@@ -1136,7 +1505,19 @@ test("analytics summary joins GA4 UTMs and compares posts with format, pillar, a
     },
   };
   const publications = [
-    { draft_id: "draft-current", status: "PUBLISHED", published_at: new Date("2026-08-22T08:00:00.000Z"), content_type: "CAROUSEL" },
+    {
+      draft_id: "draft-current",
+      status: "PUBLISHED",
+      published_at: new Date("2026-08-22T08:00:00.000Z"),
+      content_type: "CAROUSEL",
+      tracked_url_delivery: {
+        verified: true,
+        method: "STORY_LINK_STICKER",
+        target_url: "https://pinkpaisa.in/quiz?utm_campaign=campaign-current&utm_content=content-current",
+        provider_reference_id: "meta-story-verified-1",
+        verified_at: new Date("2026-08-22T08:00:00.000Z"),
+      },
+    },
     { draft_id: "draft-mid", status: "PUBLISHED", published_at: new Date("2026-08-03T08:00:00.000Z"), content_type: "CAROUSEL" },
     { draft_id: "draft-old", status: "PUBLISHED", published_at: new Date("2026-07-04T08:00:00.000Z"), content_type: "CAROUSEL" },
   ];
@@ -1187,6 +1568,58 @@ test("analytics summary joins GA4 UTMs and compares posts with format, pillar, a
   assert.equal(current.objective_assessment.assessment, "ABOVE_BASELINE");
   assert.equal(current.objective_assessment.primary_kpi, "SAVES");
   assert.equal(summary.campaign_objective_assessments[0].assessment, "ABOVE_BASELINE");
+});
+
+test("per-post GA4 attribution requires verified tracked-URL delivery and keeps marketing leads separate from workshop enquiries", () => {
+  const rows = [{
+    campaign: "campaign-one",
+    content: "creative-one",
+    landing_page: "/quiz",
+    metrics: { website_sessions: 9 },
+  }];
+  const conversionRows = [{
+    campaign: "campaign-one",
+    content: "creative-one",
+    landing_page: "/quiz",
+    event_name: "generate_lead",
+    metrics: { event_count: 3 },
+  }, {
+    campaign: "campaign-one",
+    content: "creative-one",
+    landing_page: "/workshops",
+    event_name: "workshop_enquiry",
+    metrics: { event_count: 1 },
+  }];
+  const utm = { campaign: "campaign-one", content: "creative-one" };
+  const unverifiedFeed = growthPrivate.attributionForPublishedDelivery({
+    publication: { content_type: "CAROUSEL", tracked_url_delivery: null },
+    utm,
+    attributionRows: rows,
+    conversionRows,
+  });
+  assert.equal(unverifiedFeed.eligible, false);
+  assert.deepEqual(unverifiedFeed.metrics, {});
+  assert.match(unverifiedFeed.limitation, /link-in-bio traffic remains aggregate/i);
+
+  const verifiedStoryDelivery = growthPrivate.attributionForPublishedDelivery({
+    publication: {
+      content_type: "STORY",
+      tracked_url_delivery: {
+        verified: true,
+        method: "STORY_LINK_STICKER",
+        target_url: "https://pinkpaisa.in/quiz?utm_campaign=campaign-one&utm_content=creative-one",
+        provider_reference_id: "meta-story-123",
+        verified_at: new Date("2026-08-23T09:00:00.000Z"),
+      },
+    },
+    utm,
+    attributionRows: rows,
+    conversionRows,
+  });
+  assert.equal(verifiedStoryDelivery.eligible, true);
+  assert.equal(verifiedStoryDelivery.metrics.website_sessions, 9);
+  assert.equal(verifiedStoryDelivery.metrics.marketing_leads, 3);
+  assert.equal(verifiedStoryDelivery.metrics.workshop_enquiries, 1);
 });
 
 test("internal planning memory includes aggregate Pink Predictions and human rejection reasons without voter identity", () => {

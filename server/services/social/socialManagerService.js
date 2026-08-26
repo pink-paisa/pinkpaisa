@@ -522,6 +522,9 @@ function publicDraft(draft, { assets = [], sources = [], audits = [], metrics = 
     generation_run_id: String(value.generation_run_id || ""),
     weekly_plan_id: value.weekly_plan_id ? String(value.weekly_plan_id) : null,
     candidate_id: value.candidate_id || null,
+    bundle_id: value.bundle_id || null,
+    bundle_role: value.bundle_role || null,
+    parent_draft_id: value.parent_draft_id ? String(value.parent_draft_id) : null,
     weekly_slot_number: value.weekly_slot_number ?? null,
     week_start: value.week_start || null,
     week_end: value.week_end || null,
@@ -2636,9 +2639,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     let weeklyDraftMetadata = {};
     if (run.weekly_plan_id && run.weekly_candidate_id) {
       const weeklyPlan = await models.SocialWeeklyPlan.findById(run.weekly_plan_id);
-      const selectedPost = (weeklyPlan?.selected_posts || []).find(
-        (item) => String(item.candidateId || item.candidate_id || "") === String(run.weekly_candidate_id),
-      );
+      const selectedPost = weeklyPlanItemByCandidate(weeklyPlan, run.weekly_candidate_id);
       const weeklyCandidate = selectedPost?.candidate
         || (weeklyPlan?.candidates || []).find(
           (item) => String(item.candidateId || item.candidate_id || "") === String(run.weekly_candidate_id),
@@ -2659,8 +2660,21 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         secondary_kpi: weeklyCandidate.secondaryKpi || weeklyCandidate.secondary_kpi || null,
         audience_segment: weeklyCandidate.audienceSegment || weeklyCandidate.audience_segment || null,
         scheduled_for: selectedPost.scheduledFor || selectedPost.scheduled_for || null,
+        bundle_id: selectedPost.bundleId || selectedPost.bundle_id || null,
+        bundle_role: selectedPost.bundleRole || selectedPost.bundle_role || null,
       };
     }
+    let linkedBundleParent = null;
+    if (weeklyDraftMetadata.bundle_id && weeklyDraftMetadata.bundle_role === "COMPANION_STORY") {
+      linkedBundleParent = await models.SocialPostDraft.findOne({
+        weekly_plan_id: weeklyDraftMetadata.weekly_plan_id,
+        bundle_id: weeklyDraftMetadata.bundle_id,
+        bundle_role: "PARENT_FEED",
+      }).sort({ revision: -1, created_at: -1 });
+    }
+    const draftParentId = weeklyDraftMetadata.bundle_role
+      ? linkedBundleParent?._id || null
+      : priorDraft?._id || null;
     draft = await models.SocialPostDraft.create({
       generation_run_id: run._id,
       ...weeklyDraftMetadata,
@@ -2668,7 +2682,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       timezone: "Asia/Kolkata",
       revision,
       idempotency_key: `social-draft:${run._id}:${revision}`,
-      parent_draft_id: priorDraft?._id || null,
+      parent_draft_id: draftParentId,
       generation_mode: "FULL_AI",
       visual_mode: visualMode,
       visual_mode_resolution: clone(run.generation_request?.visual_mode_resolution || {
@@ -2689,6 +2703,19 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       approval_json: { required: true, status: "NEEDS_REVIEW", approved_revision: null },
       content_fingerprint: contentFingerprint,
     });
+    if (weeklyDraftMetadata.bundle_role === "PARENT_FEED"
+      && weeklyDraftMetadata.bundle_id
+      && typeof models.SocialPostDraft.updateMany === "function") {
+      await models.SocialPostDraft.updateMany(
+        {
+          weekly_plan_id: weeklyDraftMetadata.weekly_plan_id,
+          bundle_id: weeklyDraftMetadata.bundle_id,
+          bundle_role: "COMPANION_STORY",
+          parent_draft_id: null,
+        },
+        { $set: { parent_draft_id: draft._id } },
+      );
+    }
     const originalAssets = await persistOriginalAiVisualAssets({
       draft,
       run,
@@ -2839,6 +2866,17 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
           },
         },
       );
+      await models.SocialWeeklyPlan.updateOne(
+        { _id: run.weekly_plan_id, "story_plan.candidateId": run.weekly_candidate_id },
+        {
+          $set: {
+            "story_plan.$.draft_id": draft._id,
+            "story_plan.$.parent_draft_id": draft.parent_draft_id || null,
+            "story_plan.$.generation_run_id": run._id,
+            "story_plan.$.status": "NEEDS_REVIEW",
+          },
+        },
+      );
     }
     await appendAudit({
       entityType: "DRAFT",
@@ -2898,6 +2936,10 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       await models.SocialWeeklyPlan.updateOne(
         { _id: run.weekly_plan_id, "selected_posts.candidateId": run.weekly_candidate_id },
         { $set: { "selected_posts.$.status": "FAILED" } },
+      ).catch(() => null);
+      await models.SocialWeeklyPlan.updateOne(
+        { _id: run.weekly_plan_id, "story_plan.candidateId": run.weekly_candidate_id },
+        { $set: { "story_plan.$.status": "FAILED" } },
       ).catch(() => null);
     }
     const retriable = generationErrorIsRetriable(error) && Number(run.attempt_count || 0) < Number(run.max_attempts || 1);
@@ -5415,7 +5457,7 @@ async function scheduleDraft(draftId, scheduledFor, {
         actor,
         requestId,
         ip,
-        fieldChanges: [{ field_path: "weekly_plan.selected_posts.scheduledFor", before: scheduleOverride.old_scheduled_for, after: date, is_redacted: false }],
+        fieldChanges: [{ field_path: draft.bundle_role?.includes("STORY") ? "weekly_plan.story_plan.scheduledFor" : "weekly_plan.selected_posts.scheduledFor", before: scheduleOverride.old_scheduled_for, after: date, is_redacted: false }],
         metadata: {
           ...scheduleOverride,
           admin_id: actorId(actor),
@@ -5432,10 +5474,14 @@ async function scheduleDraft(draftId, scheduledFor, {
   return (dependencies.getDraftDetail || getDraftDetail)(result.draftId, { dependencies });
 }
 
-function weeklySelectedPost(plan, draft) {
-  return (plan?.selected_posts || []).find((item) => (
-    String(item.candidateId || item.candidate_id || "") === String(draft.candidate_id)
+function weeklyPlanItemByCandidate(plan, candidateId) {
+  return [...(plan?.selected_posts || []), ...(plan?.story_plan || [])].find((item) => (
+    String(item.candidateId || item.candidate_id || "") === String(candidateId)
   ));
+}
+
+function weeklySelectedPost(plan, draft) {
+  return weeklyPlanItemByCandidate(plan, draft.candidate_id);
 }
 
 async function resolveDraftSchedule(draft, suppliedSchedule, {
@@ -5518,16 +5564,29 @@ async function resolveDraftSchedule(draft, suppliedSchedule, {
   };
 }
 
-async function draftQueueNavigation(draft, { PlanModel, DraftModel = SocialPostDraft, session = null } = {}) {
+async function draftQueueNavigation(draft, {
+  PlanModel,
+  DraftModel = SocialPostDraft,
+  ManualActionModel = null,
+  GenerationRunModel = null,
+  session = null,
+} = {}) {
   const empty = {
     next_review_draft_id: null,
     remaining_review_count: 0,
     waiting_generation_count: 0,
+    unresolved_failure_count: 0,
+    open_manual_blocker_count: 0,
+    first_failure_draft_id: null,
   };
   if (!draft?.weekly_plan_id) return empty;
   const plan = await applyMongoSession(PlanModel.findById(draft.weekly_plan_id), session);
   if (!plan) return empty;
-  const selected = [...(plan.selected_posts || [])].sort((left, right) => (
+  const allSelected = [
+    ...(plan.selected_posts || []),
+    ...(plan.story_plan || []),
+  ];
+  const selected = allSelected.filter((item) => String(item.bundleRole || item.bundle_role || "") !== "COMPANION_STORY").sort((left, right) => (
     Number(left.slotNumber || left.slot_number || 0) - Number(right.slotNumber || right.slot_number || 0)
       || new Date(left.scheduledFor || left.scheduled_for || 0).getTime()
         - new Date(right.scheduledFor || right.scheduled_for || 0).getTime()
@@ -5540,10 +5599,13 @@ async function draftQueueNavigation(draft, { PlanModel, DraftModel = SocialPostD
     && (!currentDraftId || String(item.draft_id || item.draftId || "") !== currentDraftId)
     && Boolean(item.draft_id || item.draftId)
   ));
-  const reviewCandidateIds = reviewCandidates.map((item) => item.draft_id || item.draftId);
+  const linkedDraftIds = [...new Set(allSelected
+    .map((item) => item.draft_id || item.draftId)
+    .filter(Boolean)
+    .map(String))];
   let linkedDrafts = [];
-  if (reviewCandidateIds.length && typeof DraftModel?.find === "function") {
-    let linkedDraftQuery = DraftModel.find({ _id: { $in: reviewCandidateIds } });
+  if (linkedDraftIds.length && typeof DraftModel?.find === "function") {
+    let linkedDraftQuery = DraftModel.find({ _id: { $in: linkedDraftIds } });
     linkedDraftQuery = applyMongoSession(linkedDraftQuery, session);
     if (typeof linkedDraftQuery?.select === "function") {
       linkedDraftQuery = linkedDraftQuery.select("_id status creative_readiness.status");
@@ -5561,11 +5623,85 @@ async function draftQueueNavigation(draft, { PlanModel, DraftModel = SocialPostD
     return String(linkedDraft?.status || "").toUpperCase() === "DRAFT";
   }).length;
   const waitingStatuses = new Set(["PLANNED", "GENERATING", "GENERATING_COPY", "GENERATING_VISUAL"]);
+  const failureStatuses = new Set(["FAILED", "FAILED_GENERATION", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"]);
+  const failureDraftIds = new Set();
+  allSelected.forEach((item) => {
+    if (failureStatuses.has(String(item.status || "").toUpperCase()) && (item.draft_id || item.draftId)) {
+      failureDraftIds.add(String(item.draft_id || item.draftId));
+    }
+  });
+  linkedDrafts.forEach((linkedDraft) => {
+    if (failureStatuses.has(String(linkedDraft.status || "").toUpperCase())) {
+      failureDraftIds.add(String(linkedDraft._id || linkedDraft.id));
+    }
+  });
+  const itemFailuresWithoutDraft = allSelected.filter((item) => (
+    failureStatuses.has(String(item.status || "").toUpperCase()) && !(item.draft_id || item.draftId)
+  )).length;
+  let openManualBlockerCount = 0;
+  if (typeof ManualActionModel?.countDocuments === "function") {
+    openManualBlockerCount = Number(await applyMongoSession(ManualActionModel.countDocuments({
+      weekly_plan_id: plan._id,
+      status: { $in: ["OPEN", "IN_PROGRESS"] },
+    }), session)) || 0;
+  }
+  let failedRunWithoutDraftCount = 0;
+  if (typeof GenerationRunModel?.countDocuments === "function") {
+    failedRunWithoutDraftCount = Number(await applyMongoSession(GenerationRunModel.countDocuments({
+      weekly_plan_id: plan._id,
+      status: { $in: ["FAILED", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"] },
+      failed_draft_id: null,
+      selected_draft_id: null,
+    }), session)) || 0;
+  }
   const next = reviewable.find((item) => item.draft_id || item.draftId) || null;
   return {
     next_review_draft_id: next ? String(next.draft_id || next.draftId) : null,
     remaining_review_count: reviewable.length,
     waiting_generation_count: selected.filter((item) => waitingStatuses.has(String(item.status || "").toUpperCase())).length + draftWaitingCount,
+    unresolved_failure_count: failureDraftIds.size + Math.max(itemFailuresWithoutDraft, failedRunWithoutDraftCount),
+    open_manual_blocker_count: openManualBlockerCount,
+    first_failure_draft_id: [...failureDraftIds][0] || null,
+  };
+}
+
+async function preflightApprovalAndSchedule(draft, {
+  AssetModel,
+  settings,
+  session,
+  dependencies,
+} = {}) {
+  const assetsQuery = AssetModel.find({ draft_id: draft._id, is_active: true, deleted_at: null });
+  const assets = await applyMongoSession(assetsQuery, session);
+  const recommendation = draft.current_package?.primaryRecommendation || {};
+  const compliance = scanRecommendationCompliance(recommendation, { requireSourcesForCurrentClaims: true });
+  const assetReadiness = reviewAssetReadiness(assets, { draft });
+  const captionContract = assertCaptionContract(recommendation, settings);
+  const visualModeResolution = assertDraftVisualModeResolution(draft);
+  assertStoryFrameCaptionPolicy(recommendation, assetReadiness.finalAssets);
+  if (!compliance.passed || !assetReadiness.passed) {
+    const error = new Error("Compliance, creative validation, and AI visual provenance must pass before approval and scheduling");
+    error.code = "draft_not_approvable";
+    error.statusCode = 409;
+    error.issues = [...(compliance.passed ? [] : compliance.risk_flags || []), ...assetReadiness.issues];
+    throw error;
+  }
+  const validateLive = process.env.SOCIAL_VALIDATE_LANDING_PAGES_LIVE !== undefined
+    ? String(process.env.SOCIAL_VALIDATE_LANDING_PAGES_LIVE).toLowerCase() === "true"
+    : process.env.NODE_ENV === "production";
+  if (validateLive && recommendation.recommendedLandingPage) {
+    await (dependencies.validatePinkPaisaLandingPage || validatePinkPaisaLandingPage)(
+      recommendation.recommendedLandingPage,
+      { settings, fetchImpl: dependencies.fetchImpl || fetch },
+    );
+  }
+  return {
+    assets,
+    recommendation,
+    compliance,
+    assetReadiness,
+    captionContract,
+    visualModeResolution,
   };
 }
 
@@ -5575,6 +5711,7 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
   requestId = null,
   requestKey = null,
   scheduleOverrideReason = null,
+  includeCompanionStory = false,
   ip = null,
   dependencies = {},
 } = {}) {
@@ -5616,6 +5753,7 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
       revision: draft.revision,
       scheduled_for: date.toISOString(),
       schedule_override_reason: scheduleOverride?.reason || repeatedOverrideReason || null,
+      include_companion_story: includeCompanionStory === true,
     });
     const workflowIdempotencyKey = requestToken
       ? `social-approve-schedule:${draft._id}:${sha256(requestToken).slice(0, 32)}`
@@ -5629,7 +5767,27 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
         error.statusCode = 409;
         throw error;
       }
-      return { draftId: draft._id, weeklyPlanId: draft.weekly_plan_id || null, reused: true };
+      const repeatedCompanion = includeCompanionStory === true && draft.bundle_id
+        ? await applyMongoSession(DraftModel.findOne({
+          weekly_plan_id: draft.weekly_plan_id,
+          bundle_id: draft.bundle_id,
+          bundle_role: "COMPANION_STORY",
+          parent_draft_id: draft._id,
+          status: "SCHEDULED",
+        }), session)
+        : null;
+      if (includeCompanionStory === true && !repeatedCompanion) {
+        const error = new Error("The bundled companion Story is not scheduled with this repeated request");
+        error.code = "social_companion_story_idempotency_mismatch";
+        error.statusCode = 409;
+        throw error;
+      }
+      return {
+        draftId: draft._id,
+        weeklyPlanId: draft.weekly_plan_id || null,
+        companionStoryDraftId: repeatedCompanion?._id || null,
+        reused: true,
+      };
     }
     if (draft.status !== "NEEDS_REVIEW") {
       const error = new Error("Only a draft in review can be approved and scheduled");
@@ -5642,29 +5800,66 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
       throw error;
     }
 
-    const assetsQuery = AssetModel.find({ draft_id: draft._id, is_active: true, deleted_at: null });
-    const assets = await applyMongoSession(assetsQuery, session);
-    const recommendation = draft.current_package?.primaryRecommendation || {};
-    const compliance = scanRecommendationCompliance(recommendation, { requireSourcesForCurrentClaims: true });
-    const assetReadiness = reviewAssetReadiness(assets, { draft });
-    const captionContract = assertCaptionContract(recommendation, settings);
-    const visualModeResolution = assertDraftVisualModeResolution(draft);
-    assertStoryFrameCaptionPolicy(recommendation, assetReadiness.finalAssets);
-    if (!compliance.passed || !assetReadiness.passed) {
-      const error = new Error("Compliance, creative validation, and AI visual provenance must pass before approval and scheduling");
-      error.code = "draft_not_approvable";
-      error.statusCode = 409;
-      error.issues = [...(compliance.passed ? [] : compliance.risk_flags || []), ...assetReadiness.issues];
-      throw error;
-    }
-    const validateLive = process.env.SOCIAL_VALIDATE_LANDING_PAGES_LIVE !== undefined
-      ? String(process.env.SOCIAL_VALIDATE_LANDING_PAGES_LIVE).toLowerCase() === "true"
-      : process.env.NODE_ENV === "production";
-    if (validateLive && recommendation.recommendedLandingPage) {
-      await (dependencies.validatePinkPaisaLandingPage || validatePinkPaisaLandingPage)(
-        recommendation.recommendedLandingPage,
-        { settings, fetchImpl: dependencies.fetchImpl || fetch },
+    const parentApproval = await preflightApprovalAndSchedule(draft, {
+      AssetModel,
+      settings,
+      session,
+      dependencies: transactionDependencies,
+    });
+    const {
+      recommendation,
+      assetReadiness,
+      captionContract,
+      visualModeResolution,
+    } = parentApproval;
+    let companionStory = null;
+    let companionApproval = null;
+    let companionSchedule = null;
+    if (includeCompanionStory === true) {
+      if (draft.bundle_role !== "PARENT_FEED" || !draft.bundle_id || !draft.weekly_plan_id) {
+        const error = new Error("Only a weekly parent feed creative can include a companion Story");
+        error.code = "social_companion_story_parent_required";
+        error.statusCode = 409;
+        throw error;
+      }
+      companionStory = await applyMongoSession(DraftModel.findOne({
+        weekly_plan_id: draft.weekly_plan_id,
+        bundle_id: draft.bundle_id,
+        bundle_role: "COMPANION_STORY",
+      }), session);
+      if (!companionStory) {
+        const error = new Error("The bundled companion Story has not finished generating");
+        error.code = "social_companion_story_not_ready";
+        error.statusCode = 409;
+        throw error;
+      }
+      if (companionStory.status !== "NEEDS_REVIEW" || companionStory.publication_id) {
+        const error = new Error("The bundled companion Story must be awaiting final review with no publication attempt");
+        error.code = "social_companion_story_not_approvable";
+        error.statusCode = 409;
+        throw error;
+      }
+      companionSchedule = await resolveDraftSchedule(
+        companionStory,
+        scheduleOverride ? date.toISOString() : undefined,
+        {
+        PlanModel,
+        session,
+        scheduleOverrideReason: scheduleOverride?.reason || null,
+        },
       );
+      if (!Number.isFinite(companionSchedule.date.getTime()) || companionSchedule.date.getTime() <= now.getTime()) {
+        const error = new Error("The companion Story no longer has a valid future weekly slot");
+        error.code = "social_companion_story_schedule_invalid";
+        error.statusCode = 409;
+        throw error;
+      }
+      companionApproval = await preflightApprovalAndSchedule(companionStory, {
+        AssetModel,
+        settings,
+        session,
+        dependencies: transactionDependencies,
+      });
     }
     if (recommendation.format !== "STORY") {
       await (dependencies.assertWeeklyPublicationCapacity || assertWeeklyPublicationCapacity)({
@@ -5722,16 +5917,86 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
       manual_review_required: false,
       manual_reviewed_at: reviewTime,
     };
+    if (companionStory && companionApproval && companionSchedule) {
+      const companionReviewedAssetIds = companionApproval.assetReadiness.finalAssets
+        .filter((asset) => asset.manual_review_required)
+        .map((asset) => asset._id);
+      if (companionReviewedAssetIds.length) {
+        await AssetModel.updateMany(
+          { _id: { $in: companionReviewedAssetIds } },
+          { $set: { manual_review_status: "approved", manual_reviewed_at: reviewTime, manual_reviewed_by: adminId } },
+          session ? { session } : undefined,
+        );
+      }
+      companionStory.parent_draft_id = draft._id;
+      companionStory.status = "SCHEDULED";
+      companionStory.approved_at = reviewTime;
+      companionStory.approved_by_admin_id = adminId;
+      companionStory.approved_revision = companionStory.revision;
+      companionStory.scheduled_for = companionSchedule.date;
+      companionStory.scheduled_by_admin_id = adminId;
+      companionStory.visual_mode_resolution = companionApproval.visualModeResolution;
+      companionStory.approval_json = {
+        required: true,
+        status: "APPROVED",
+        approved_at: reviewTime,
+        approved_revision: companionStory.revision,
+        approved_by_admin_id: adminId,
+        caption_checksum_sha256: companionApproval.captionContract.checksum_sha256,
+        caption_policy: companionApproval.captionContract.policy,
+        workflow_idempotency_key: workflowIdempotencyKey,
+        request_fingerprint: payloadFingerprint,
+        bundled_parent_draft_id: String(draft._id),
+        schedule_override_reason: companionSchedule.scheduleOverride?.reason || null,
+      };
+      companionStory.schedule_json = {
+        scheduled_for: companionSchedule.date,
+        timezone: "Asia/Kolkata",
+        scheduled_by_admin_id: adminId,
+        status: "SCHEDULED",
+        caption_checksum_sha256: companionApproval.captionContract.checksum_sha256,
+        workflow_idempotency_key: workflowIdempotencyKey,
+        request_fingerprint: payloadFingerprint,
+        bundled_parent_draft_id: String(draft._id),
+        schedule_override_reason: companionSchedule.scheduleOverride?.reason || null,
+      };
+      companionStory.creative_readiness = {
+        ...(companionStory.creative_readiness || {}),
+        status: "READY",
+        manual_review_required: false,
+        manual_reviewed_at: reviewTime,
+      };
+    }
     if (scheduleOverride) {
       selected.scheduledFor = date;
       if (Object.hasOwn(selected, "scheduled_for")) selected.scheduled_for = date;
+    }
+    if (companionSchedule?.scheduleOverride) {
+      const companionPlanItem = weeklyPlanItemByCandidate(plan, companionStory.candidate_id);
+      if (!companionPlanItem) {
+        const error = new Error("The companion Story disappeared from the weekly plan during scheduling");
+        error.code = "social_companion_story_plan_link_missing";
+        error.statusCode = 409;
+        throw error;
+      }
+      companionPlanItem.scheduledFor = companionSchedule.date;
+      if (Object.hasOwn(companionPlanItem, "scheduled_for")) companionPlanItem.scheduled_for = companionSchedule.date;
+    }
+    if (scheduleOverride || companionSchedule?.scheduleOverride) {
       await plan.save(session ? { session } : undefined);
     }
     await draft.save(session ? { session } : undefined);
+    if (companionStory) await companionStory.save(session ? { session } : undefined);
     await (dependencies.syncWeeklyPlanFromDraft || syncWeeklyPlanFromDraft)(draft, {
       status: "SCHEDULED",
       dependencies: transactionDependencies,
     });
+    if (companionStory) {
+      await (dependencies.syncWeeklyPlanFromDraft || syncWeeklyPlanFromDraft)(companionStory, {
+        status: "SCHEDULED",
+        dependencies: transactionDependencies,
+      });
+    }
     const auditMetadata = {
       approved_revision: draft.revision,
       asset_count: assetReadiness.finalAssets.length,
@@ -5773,7 +6038,7 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
         idempotencyKey: `${workflowIdempotencyKey}:schedule-overridden`,
         ip,
         fieldChanges: [{
-          field_path: "weekly_plan.selected_posts.scheduledFor",
+          field_path: draft.bundle_role?.includes("STORY") ? "weekly_plan.story_plan.scheduledFor" : "weekly_plan.selected_posts.scheduledFor",
           before: scheduleOverride.old_scheduled_for,
           after: date,
           is_redacted: false,
@@ -5795,10 +6060,82 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
       metadata: { ...auditMetadata, scheduled_for: date, timezone: "Asia/Kolkata" },
       dependencies: transactionDependencies,
     });
-    return { draftId: draft._id, weeklyPlanId: draft.weekly_plan_id || null, reused: false };
+    if (companionStory && companionApproval && companionSchedule) {
+      const companionAuditMetadata = {
+        approved_revision: companionStory.revision,
+        asset_count: companionApproval.assetReadiness.finalAssets.length,
+        caption_checksum_sha256: companionApproval.captionContract.checksum_sha256,
+        caption_policy: companionApproval.captionContract.policy,
+        visual_mode_resolution: companionApproval.visualModeResolution,
+        workflow_idempotency_key: workflowIdempotencyKey,
+        bundled_parent_draft_id: String(draft._id),
+        bundle_id: draft.bundle_id,
+      };
+      await appendAudit({
+        entityType: "DRAFT",
+        entityId: companionStory._id,
+        draft: companionStory,
+        action: "APPROVED",
+        summary: "An administrator approved the companion Story with its parent feed creative.",
+        actor,
+        requestId,
+        idempotencyKey: `${workflowIdempotencyKey}:companion-approved`,
+        ip,
+        metadata: companionAuditMetadata,
+        dependencies: transactionDependencies,
+      });
+      if (companionSchedule.scheduleOverride) {
+        await appendAudit({
+          entityType: "DRAFT",
+          entityId: companionStory._id,
+          draft: companionStory,
+          action: "SCHEDULE_OVERRIDDEN",
+          summary: `The companion Story followed its parent feed override to ${companionSchedule.date.toISOString()}.`,
+          actor,
+          requestId,
+          idempotencyKey: `${workflowIdempotencyKey}:companion-schedule-overridden`,
+          ip,
+          fieldChanges: [{
+            field_path: "weekly_plan.story_plan.scheduledFor",
+            before: companionSchedule.scheduleOverride.old_scheduled_for,
+            after: companionSchedule.date,
+            is_redacted: false,
+          }],
+          metadata: {
+            ...companionSchedule.scheduleOverride,
+            ...companionAuditMetadata,
+            weekly_plan_id: String(companionStory.weekly_plan_id),
+            candidate_id: String(companionStory.candidate_id),
+          },
+          dependencies: transactionDependencies,
+        });
+      }
+      await appendAudit({
+        entityType: "DRAFT",
+        entityId: companionStory._id,
+        draft: companionStory,
+        action: "SCHEDULED",
+        summary: `The approved companion Story was scheduled for ${companionSchedule.date.toISOString()}.`,
+        actor,
+        requestId,
+        idempotencyKey: `${workflowIdempotencyKey}:companion-scheduled`,
+        ip,
+        metadata: { ...companionAuditMetadata, scheduled_for: companionSchedule.date, timezone: "Asia/Kolkata" },
+        dependencies: transactionDependencies,
+      });
+    }
+    return {
+      draftId: draft._id,
+      weeklyPlanId: draft.weekly_plan_id || null,
+      companionStoryDraftId: companionStory?._id || null,
+      reused: false,
+    };
   });
 
   const detail = await (dependencies.getDraftDetail || getDraftDetail)(result.draftId, { dependencies });
+  const companionStoryDetail = result.companionStoryDraftId
+    ? await (dependencies.getDraftDetail || getDraftDetail)(result.companionStoryDraftId, { dependencies })
+    : null;
   let queueNavigation;
   try {
     queueNavigation = await draftQueueNavigation(
@@ -5806,7 +6143,12 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
         _id: result.draftId,
         weekly_plan_id: result.weeklyPlanId || detail?.weekly_plan_id || null,
       },
-      { PlanModel, DraftModel },
+      {
+        PlanModel,
+        DraftModel,
+        ManualActionModel: dependencies.SocialManualAction || (PlanModel === SocialWeeklyPlan ? SocialManualAction : null),
+        GenerationRunModel: dependencies.SocialGenerationRun || (PlanModel === SocialWeeklyPlan ? SocialGenerationRun : null),
+      },
     );
   } catch (error) {
     logger.warn("Unable to calculate Social Manager queue navigation after scheduling", {
@@ -5817,9 +6159,17 @@ async function approveAndScheduleDraft(draftId, scheduledFor, {
       next_review_draft_id: null,
       remaining_review_count: 0,
       waiting_generation_count: 0,
+      unresolved_failure_count: 0,
+      open_manual_blocker_count: 0,
+      first_failure_draft_id: null,
     };
   }
-  return { draft: detail, reused: result.reused, queue_navigation: queueNavigation };
+  return {
+    draft: detail,
+    companion_story: companionStoryDetail,
+    reused: result.reused,
+    queue_navigation: queueNavigation,
+  };
 }
 
 async function publishDraftNow(draftId, { actor, requestId = null, ip = null, dependencies = {} } = {}) {
@@ -6209,6 +6559,7 @@ module.exports = {
   _private: {
     assembleReelCreative,
     candidateSummaries,
+    draftQueueNavigation,
     currentVideoAssemblyPassed,
     creativeAssetIds,
     creativeCopyFingerprint,

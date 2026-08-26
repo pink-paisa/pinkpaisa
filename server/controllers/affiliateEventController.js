@@ -3,14 +3,24 @@ const AffiliateEvent = require("../models/AffiliateEvent");
 const Product = require("../models/Product");
 const { getClientIp } = require("../middleware/requestGuards");
 const { validateAmazonAffiliateUrl } = require("../services/amazonAffiliateCompliance");
+const { getJwtSecret } = require("../utils/authConfig");
 
-const EVENT_TYPES = new Set(["product_view", "cta_click", "outbound_click"]);
+const EVENT_TYPES = new Set(["card_impression", "detail_view", "product_view", "cta_click", "outbound_click"]);
 const DEDUPE_WINDOW_MS = 30 * 1000;
 const BOT_RE = /(bot|crawl|spider|preview|facebookexternalhit|whatsapp|telegrambot|slurp|bingpreview|headless|lighthouse)/i;
 
 function hashValue(value) {
   if (!value) return null;
-  return crypto.createHash("sha256").update(String(value)).digest("hex");
+  let salt = String(process.env.AFFILIATE_EVENT_HASH_SALT || "").trim();
+  if (!salt) {
+    try {
+      salt = getJwtSecret();
+    } catch (error) {
+      if (process.env.NODE_ENV === "production") throw error;
+      salt = "pinkpaisa-affiliate-event-development-salt";
+    }
+  }
+  return crypto.createHmac("sha256", salt).update(String(value)).digest("hex");
 }
 
 function normalizeString(value, max = 240) {
@@ -45,6 +55,8 @@ function readAttributionFromRequest(req) {
     utm_medium: direct.utm_medium || referrer.utm_medium,
     utm_campaign: direct.utm_campaign || referrer.utm_campaign,
     utm_content: direct.utm_content || referrer.utm_content,
+    experiment_name: direct.experiment_name || referrer.experiment_name,
+    experiment_variant: direct.experiment_variant || referrer.experiment_variant,
   };
 }
 

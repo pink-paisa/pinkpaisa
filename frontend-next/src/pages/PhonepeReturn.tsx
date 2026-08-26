@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 import { useCart } from "@/contexts/CartContext";
 import { customerFetch } from "@/contexts/CustomerAuthContext";
@@ -9,6 +9,7 @@ import Footer from "@/components/Footer";
 import { Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 type VerifyStatus = "loading" | "success" | "failed" | "error";
 
@@ -18,6 +19,7 @@ const POLL_INTERVAL_MS = 3000;
 const PhonepeReturn = () => {
   const router = useRouter();
   const { clearCart } = useCart();
+  const returnConsumedRef = useRef(false);
   const [status, setStatus] = useState<VerifyStatus>("loading");
   const [orderId, setOrderId] = useState<string | null>(null);
   const [receiptToken, setReceiptToken] = useState<string | null>(null);
@@ -33,6 +35,8 @@ const PhonepeReturn = () => {
 
   useEffect(() => {
     if (!router.isReady) return;
+    if (returnConsumedRef.current) return;
+    returnConsumedRef.current = true;
 
     let cancelled = false;
     let pollIntervalId: number | null = null;
@@ -51,6 +55,15 @@ const PhonepeReturn = () => {
       setStatus("success");
       clearCart();
       sessionStorage.removeItem("phonepe_pending_order");
+      const analyticsKey = `pinkpaisa_purchase_tracked:${result.order_id}`;
+      if (!localStorage.getItem(analyticsKey)) {
+        const tracked = trackAnalyticsEvent("purchase", {
+          transaction_id: result.order_summary?.order_number || result.order_id,
+          value: Number(result.order_summary?.total || 0),
+          currency: "INR",
+        });
+        if (tracked) localStorage.setItem(analyticsKey, "true");
+      }
       toast.success("Payment successful!");
     };
 
@@ -65,13 +78,19 @@ const PhonepeReturn = () => {
       try {
         let merchantOrderId =
           typeof router.query.merchantOrderId === "string" ? router.query.merchantOrderId : null;
+        let verificationSecret: string | null = null;
 
-        if (!merchantOrderId) {
-          const stored = sessionStorage.getItem("phonepe_pending_order");
-          if (stored) {
-            const parsed = JSON.parse(stored);
-            merchantOrderId = parsed.merchant_order_id;
-          }
+        const stored = sessionStorage.getItem("phonepe_pending_order");
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          merchantOrderId = merchantOrderId || parsed.merchant_order_id;
+          verificationSecret = String(parsed.verification_secret || "").trim() || null;
+        }
+
+        // Compatibility for old PhonePe return URLs: consume the ID into memory,
+        // then immediately remove it from the visible URL before any polling.
+        if (typeof router.query.merchantOrderId === "string") {
+          await router.replace("/phonepe-return", undefined, { shallow: true });
         }
 
         if (!merchantOrderId) {
@@ -81,6 +100,9 @@ const PhonepeReturn = () => {
 
         const result = await customerFetch<any>("/phonepe/verify-payment", {
           method: "POST",
+          headers: verificationSecret
+            ? { "X-Payment-Verification-Secret": verificationSecret }
+            : {},
           body: JSON.stringify({ merchant_order_id: merchantOrderId }),
         });
 
@@ -94,7 +116,7 @@ const PhonepeReturn = () => {
           return;
         }
 
-        if (result.status === "MISSING" || result.status === "EXPIRED") {
+        if (["MISSING", "EXPIRED", "UNAVAILABLE"].includes(result.status)) {
           handleFailure("error", "This payment session has expired. Please start checkout again to create a new payment request.");
           return;
         }
@@ -110,6 +132,9 @@ const PhonepeReturn = () => {
           try {
             const pollResult = await customerFetch<any>("/phonepe/verify-payment", {
               method: "POST",
+              headers: verificationSecret
+                ? { "X-Payment-Verification-Secret": verificationSecret }
+                : {},
               body: JSON.stringify({ merchant_order_id: merchantOrderId }),
             });
 
@@ -126,7 +151,7 @@ const PhonepeReturn = () => {
               return;
             }
 
-            if (pollResult.status === "MISSING" || pollResult.status === "EXPIRED") {
+            if (["MISSING", "EXPIRED", "UNAVAILABLE"].includes(pollResult.status)) {
               stopPolling();
               handleFailure("error", "This payment session has expired. Please start checkout again to create a new payment request.");
               return;
@@ -164,7 +189,7 @@ const PhonepeReturn = () => {
       cancelled = true;
       stopPolling();
     };
-  }, [clearCart, router.isReady, router.query.merchantOrderId]);
+  }, [clearCart, router]);
 
   return (
     <div className="min-h-screen bg-background">

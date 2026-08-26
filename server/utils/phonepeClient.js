@@ -3,6 +3,11 @@ const logger = require("./logger");
 
 let phonepeClient = null;
 
+function isDirectPaymentsLive() {
+  return String(process.env.PHONEPE_ENV || "SANDBOX").trim().toUpperCase() === "PRODUCTION"
+    && String(process.env.DIRECT_PAYMENTS_ENABLED || "false").trim().toLowerCase() === "true";
+}
+
 function getPhonepeClient() {
   if (phonepeClient) return phonepeClient;
 
@@ -57,4 +62,5 @@ async function initiatePhonepeRefund({ order, merchantRefundId, amount }) {
 module.exports = {
   getPhonepeClient,
   initiatePhonepeRefund,
+  isDirectPaymentsLive,
 };

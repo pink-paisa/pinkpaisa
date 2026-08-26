@@ -389,14 +389,9 @@ function normaliseCampaignSettings(settings = {}) {
   const campaignAutopilotMode = campaignMode === "automatic" && ["single_post", "carousel"].includes(requestedAutopilotMode)
     ? requestedAutopilotMode
     : DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_mode;
-  const hasPersistedPublishWorkflow = Object.prototype.hasOwnProperty.call(settings, "campaign_autopilot_publish_workflow");
-  const campaignAutopilotPublishWorkflow = ["require_approval", "direct_publish"].includes(settings.campaign_autopilot_publish_workflow)
-    ? settings.campaign_autopilot_publish_workflow
-    : hasPersistedPublishWorkflow
-      ? DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_publish_workflow
-      : settings?._id
-        ? "direct_publish"
-        : DEFAULT_CAMPAIGN_SETTINGS.campaign_autopilot_publish_workflow;
+  // Keep legacy direct-publish values readable in Mongo, but never expose or
+  // persist them as an active launch policy.
+  const campaignAutopilotPublishWorkflow = "require_approval";
 
   return {
     campaign_mode: campaignMode,

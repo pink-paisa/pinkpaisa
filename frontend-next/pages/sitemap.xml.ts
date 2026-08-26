@@ -10,12 +10,10 @@ const STATIC_PATHS = [
   "",
   "/products",
   "/wellness",
-  "/instagram",
+  "/start-here",
   "/instagram/picks",
-  "/instagram/trending",
   "/affiliate-disclosure",
   "/privacy",
-  "/blogs",
   "/workshops",
   "/pink-pages",
   "/quiz",
@@ -69,6 +67,7 @@ export const getServerSideProps: GetServerSideProps = async ({ res }) => {
 
   const items: SitemapItem[] = [
     ...STATIC_PATHS.map((path) => ({ loc: `${siteUrl}${path}` })),
+    ...(blogs.length ? [{ loc: `${siteUrl}/blogs` }] : []),
     ...wellnessCollections.map((collection) => ({ loc: `${siteUrl}${collection.path}` })),
     ...calculatorPaths.map((path) => ({ loc: `${siteUrl}${path}` })),
     ...((products?.items ?? []).map((product) => ({

@@ -6,10 +6,12 @@ import { useCart } from "@/contexts/CartContext";
 import type { CatalogProduct, CatalogProductsResponse } from "@/hooks/useCatalogProducts";
 import { formatAffiliateDataRefreshTime, hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
 import { toast } from "sonner";
+import { getAffiliateProductDisplayTitle } from "@/lib/affiliateProductDisplay";
 
 const formatPrice = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
 const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
+  const displayTitle = getAffiliateProductDisplayTitle(product);
   const { addItem, items } = useCart();
   const isAffiliate = Boolean(product.is_affiliate && product.affiliate_url);
   const showAffiliateApiPrice = hasVisibleAffiliatePrice(product);
@@ -41,7 +43,7 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
     <div className="group flex flex-col overflow-hidden rounded-3xl border border-border bg-card shadow-sm transition-shadow hover:shadow-xl hover:shadow-primary/10">
       <Link href={`/product/${product.slug}`} className="relative aspect-square overflow-hidden bg-accent/20">
         {product.featured_image ? (
-          <img src={product.featured_image} alt={product.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+          <img src={product.featured_image} alt={displayTitle} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
         ) : (
           <div className="flex h-full w-full items-center justify-center">
             <Sparkles className="h-12 w-12 text-muted-foreground/30" />
@@ -66,7 +68,7 @@ const FeaturedCatalogCard = ({ product }: { product: CatalogProduct }) => {
           {product.subcategory ? ` · ${product.subcategory}` : ""}
         </p>
         <Link href={`/product/${product.slug}`} className="mb-2 font-serif text-lg leading-tight transition-colors hover:text-primary">
-          {product.title}
+          {displayTitle}
         </Link>
         {product.short_description ? <p className="mb-4 line-clamp-2 text-sm text-muted-foreground">{product.short_description}</p> : null}
 
@@ -122,18 +124,18 @@ const FeaturedCatalogSection = ({ initialCatalogResponse }: { initialCatalogResp
       <div className="container mx-auto">
         <div className="mb-14 flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
           <div className="max-w-2xl">
-            <p className="mb-3 text-sm font-semibold uppercase tracking-widest text-primary">Featured Products</p>
-            <h2 className="mb-4 font-serif text-3xl leading-tight md:text-4xl">Shop the wellness products buyers can actually purchase right now</h2>
+            <p className="mb-3 text-sm font-semibold uppercase tracking-widest text-primary">Pink Paisa Picks</p>
+            <h2 className="mb-4 font-serif text-3xl leading-tight md:text-4xl">Curated finds with healthy retailer links</h2>
             <p className="text-lg text-muted-foreground">
-              Approved admin and vendor-backed products now surface here, so shoppers can discover the live catalog straight from the homepage.
+              Only products selected by Pink Paisa and passing the latest link-health check appear here. Confirm current price and availability on Amazon.
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row">
             <Button asChild size="lg" variant="secondary" className="rounded-2xl">
-              <Link href="/wellness">Wellness guides</Link>
+              <Link href="/start-here">Start Here</Link>
             </Button>
             <Button asChild size="lg" className="rounded-2xl">
-              <Link href="/products">View all products</Link>
+              <Link href="/instagram/picks">View curated picks</Link>
             </Button>
           </div>
         </div>

@@ -85,7 +85,7 @@ const ProductDetail = ({
 
   useEffect(() => {
     if (!product || !isAffiliate || product.affiliate_compliance_status !== "compliant") return;
-    trackAffiliateEvent(product, "product_view");
+    trackAffiliateEvent(product, "detail_view");
   }, [isAffiliate, product]);
 
   useEffect(() => {
@@ -371,7 +371,7 @@ const ProductDetail = ({
                   availability, shipping, ratings, and reviews before buying.
                 </p>
                 <div className="mt-4">
-                  <AffiliateCta product={product} size="lg" className="rounded-xl" />
+                  <AffiliateCta product={product} size="lg" className="rounded-xl" surface="detail" />
                 </div>
               </div>
             ) : (
@@ -569,7 +569,7 @@ const ProductDetail = ({
         <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 px-4 py-3 pb-safe shadow-2xl backdrop-blur md:hidden">
           <div className="mx-auto max-w-xl space-y-2">
             <p className="truncate text-sm font-medium">{product.title}</p>
-            <AffiliateCta product={product} size="lg" className="w-full rounded-xl" />
+            <AffiliateCta product={product} size="lg" className="w-full rounded-xl" surface="detail" />
           </div>
         </div>
       ) : null}

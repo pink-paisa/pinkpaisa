@@ -9,6 +9,9 @@ const mongoose = require("mongoose");
 const PendingPaymentSchema = new mongoose.Schema(
   {
     merchant_order_id: { type: String, required: true, unique: true, index: true },
+    // Store only a hash of the high-entropy guest verification capability.
+    // Authenticated owners/admins can still verify legacy records where this is null.
+    verification_secret_hash: { type: String, default: null, select: false },
     purpose: {
       type: String,
       enum: ["order", "wallet_topup", "workshop_booking"],
@@ -17,6 +20,7 @@ const PendingPaymentSchema = new mongoose.Schema(
     },
     reference_id: { type: String, default: null },
     metadata: { type: mongoose.Schema.Types.Mixed, default: null },
+    attribution: { type: mongoose.Schema.Types.Mixed, default: null },
     user_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     guest_name: { type: String, required: true },
     guest_email: { type: String, required: true },

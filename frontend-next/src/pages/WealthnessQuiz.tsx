@@ -1,10 +1,14 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, type FormEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, ArrowRight, Check, RotateCcw, ShoppingBag, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
+import TurnstileWidget, { TURNSTILE_SITE_KEY } from "@/components/security/TurnstileWidget";
+import { apiFetch } from "@/lib/api";
+import { getMarketingAttribution } from "@/lib/marketingAttribution";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 import {
   quizQuestions,
   wealthnessResults,
@@ -29,6 +33,13 @@ const WealthnessQuiz = () => {
   const [answers, setAnswers] = useState<number[]>([]);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
   const [resultType, setResultType] = useState<WealthnessType | null>(null);
+  const [leadForm, setLeadForm] = useState({ first_name: "", email: "", phone: "" });
+  const [emailConsent, setEmailConsent] = useState(false);
+  const [whatsappConsent, setWhatsappConsent] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [leadState, setLeadState] = useState<"idle" | "submitting" | "sent" | "error">("idle");
+  const [leadMessage, setLeadMessage] = useState("");
+  const leadIdempotencyKey = useRef(`wealthness-roadmap:${Date.now()}:${Math.random().toString(36).slice(2)}`);
 
   const totalQuestions = quizQuestions.length;
   const progress = (currentQ / totalQuestions) * 100;
@@ -46,7 +57,9 @@ const WealthnessQuiz = () => {
     if (currentQ < totalQuestions - 1) {
       setCurrentQ((prev) => prev + 1);
     } else {
-      setResultType(calculateResult(newAnswers));
+      const nextResult = calculateResult(newAnswers);
+      setResultType(nextResult);
+      trackAnalyticsEvent("quiz_complete", { result_type: nextResult, question_count: totalQuestions });
     }
   }, [answers, currentQ, selectedOption, totalQuestions]);
 
@@ -63,7 +76,61 @@ const WealthnessQuiz = () => {
     setAnswers([]);
     setSelectedOption(null);
     setResultType(null);
+    setLeadForm({ first_name: "", email: "", phone: "" });
+    setEmailConsent(false);
+    setWhatsappConsent(false);
+    setCaptchaToken(null);
+    setLeadState("idle");
+    setLeadMessage("");
+    leadIdempotencyKey.current = `wealthness-roadmap:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   }, []);
+
+  const handleCaptchaTokenChange = useCallback((token: string | null) => setCaptchaToken(token), []);
+
+  const handleLeadSubmit = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!resultType || leadState === "submitting") return;
+    if (!emailConsent) {
+      setLeadState("error");
+      setLeadMessage("Please confirm that we may email your roadmap.");
+      return;
+    }
+    if (whatsappConsent && !leadForm.phone.trim()) {
+      setLeadState("error");
+      setLeadMessage("Add your phone number if you want WhatsApp updates.");
+      return;
+    }
+    if (TURNSTILE_SITE_KEY && !captchaToken) {
+      setLeadState("error");
+      setLeadMessage("Please complete the security check.");
+      return;
+    }
+    setLeadState("submitting");
+    setLeadMessage("");
+    try {
+      await apiFetch("/marketing/leads", {
+        method: "POST",
+        headers: { "Idempotency-Key": leadIdempotencyKey.current },
+        body: JSON.stringify({
+          result_type: resultType,
+          first_name: leadForm.first_name.trim() || undefined,
+          email: leadForm.email.trim(),
+          phone: leadForm.phone.trim() || undefined,
+          email_consent: true,
+          whatsapp_consent: whatsappConsent,
+          consent_version: "wealthness-roadmap-2026-08-26",
+          attribution: getMarketingAttribution(),
+          captcha_token: captchaToken || undefined,
+        }),
+      });
+      setLeadState("sent");
+      setLeadMessage("Your roadmap is queued for email delivery.");
+      trackAnalyticsEvent("generate_lead", { lead_source: "wealthness_quiz", result_type: resultType });
+    } catch (error) {
+      setLeadState("error");
+      setLeadMessage(error instanceof Error ? error.message : "We could not queue your roadmap. Please try again.");
+    }
+  }, [captchaToken, emailConsent, leadForm, leadState, resultType, whatsappConsent]);
 
   if (!started) {
     return (
@@ -109,7 +176,7 @@ const WealthnessQuiz = () => {
                 transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
                 className="flex flex-col items-center gap-3"
               >
-                <Button variant="hero" size="xl" onClick={() => setStarted(true)}>
+                <Button variant="hero" size="xl" onClick={() => { setStarted(true); trackAnalyticsEvent("quiz_start", { quiz_name: "wealthness" }); }}>
                   Start the Quiz - It&apos;s Free
                 </Button>
                 <p className="text-xs text-muted-foreground">Takes about 3 minutes · No sign-up required</p>
@@ -210,12 +277,79 @@ const WealthnessQuiz = () => {
               <motion.div
                 variants={fadeUp}
                 transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+                className="mb-6 rounded-2xl border border-primary/20 bg-card p-6 shadow-sm md:p-8"
+              >
+                <p className="text-xs font-semibold uppercase tracking-widest text-primary">Optional next step</p>
+                <h3 className="mt-2 font-serif text-2xl">Email my personal roadmap</h3>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                  Your result is already above. If you want a copy of the action plan, opt in below. WhatsApp updates are separate and optional.
+                </p>
+                {leadState === "sent" ? (
+                  <div role="status" className="mt-5 rounded-xl bg-sage/10 p-4 text-sm font-medium text-sage">{leadMessage}</div>
+                ) : (
+                  <form className="mt-5 space-y-4" onSubmit={handleLeadSubmit}>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1 text-sm">
+                        <span className="font-medium">First name</span>
+                        <input
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 outline-none focus:ring-2 focus:ring-primary/30"
+                          value={leadForm.first_name}
+                          onChange={(event) => setLeadForm((current) => ({ ...current, first_name: event.target.value }))}
+                          autoComplete="given-name"
+                        />
+                      </label>
+                      <label className="space-y-1 text-sm">
+                        <span className="font-medium">Email *</span>
+                        <input
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 outline-none focus:ring-2 focus:ring-primary/30"
+                          type="email"
+                          required
+                          value={leadForm.email}
+                          onChange={(event) => setLeadForm((current) => ({ ...current, email: event.target.value }))}
+                          autoComplete="email"
+                        />
+                      </label>
+                    </div>
+                    <label className="flex items-start gap-3 text-sm leading-5">
+                      <input type="checkbox" className="mt-1" checked={emailConsent} onChange={(event) => setEmailConsent(event.target.checked)} />
+                      <span>Email me this roadmap and related Pink Paisa educational updates. I can unsubscribe at any time.</span>
+                    </label>
+                    <label className="flex items-start gap-3 text-sm leading-5">
+                      <input type="checkbox" className="mt-1" checked={whatsappConsent} onChange={(event) => setWhatsappConsent(event.target.checked)} />
+                      <span>Also send occasional WhatsApp education updates (optional).</span>
+                    </label>
+                    {whatsappConsent ? (
+                      <label className="block space-y-1 text-sm">
+                        <span className="font-medium">WhatsApp number *</span>
+                        <input
+                          className="w-full rounded-lg border border-border bg-background px-3 py-2 outline-none focus:ring-2 focus:ring-primary/30"
+                          type="tel"
+                          required
+                          value={leadForm.phone}
+                          onChange={(event) => setLeadForm((current) => ({ ...current, phone: event.target.value }))}
+                          autoComplete="tel"
+                        />
+                      </label>
+                    ) : null}
+                    <TurnstileWidget action="wealthness_lead" onTokenChange={handleCaptchaTokenChange} />
+                    {leadMessage ? <p role="alert" className="text-sm text-destructive">{leadMessage}</p> : null}
+                    <Button type="submit" variant="hero" disabled={leadState === "submitting" || (Boolean(TURNSTILE_SITE_KEY) && !captchaToken)}>
+                      {leadState === "submitting" ? "Queuing roadmap…" : "Email my roadmap"}
+                    </Button>
+                    <p className="text-xs leading-5 text-muted-foreground">We store your result type and contact/consent details, not your 20 quiz answers.</p>
+                  </form>
+                )}
+              </motion.div>
+
+              <motion.div
+                variants={fadeUp}
+                transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
                 className="rounded-2xl bg-primary p-6 text-primary-foreground shadow-lg shadow-primary/20 md:p-8"
               >
-                <p className="mb-1 text-xs font-semibold uppercase tracking-widest opacity-70">Recommended for you</p>
-                <h3 className="mb-2 font-serif text-xl md:text-2xl">{result.recommendedProduct}</h3>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-widest opacity-70">Explore next</p>
+                <h3 className="mb-2 font-serif text-xl md:text-2xl">Curated Pink Paisa picks</h3>
                 <p className="mb-5 text-sm leading-relaxed opacity-90">
-                  Based on your Wealthness Type, this is the best product to help you take the next step in your money journey.
+                  Browse the current, link-checked recommendations selected by Pink Paisa. Product links may be affiliate links.
                 </p>
                 <div className="flex flex-wrap gap-3">
                   <Button
@@ -224,8 +358,8 @@ const WealthnessQuiz = () => {
                     className="border-primary-foreground text-primary-foreground hover:bg-primary-foreground hover:text-primary"
                     asChild
                   >
-                    <Link href="/#products">
-                      <ShoppingBag className="mr-2 h-4 w-4" /> Get It Now
+                    <Link href="/instagram/picks">
+                      <ShoppingBag className="mr-2 h-4 w-4" /> Browse curated picks
                     </Link>
                   </Button>
                   <Button

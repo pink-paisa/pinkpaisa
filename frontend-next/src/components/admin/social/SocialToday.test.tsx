@@ -170,6 +170,101 @@ describe("SocialToday generation controls", () => {
     expect(screen.queryByText("Artwork & text · AI-native — No overlay")).not.toBeInTheDocument();
   });
 
+  it("bundles a ready companion Story into the parent feed approval by default", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const draft = fullAiDraft({
+      full_ai_graphic_contract_version: 2,
+      overlay: { method: "none", image_ai_used_for_text: true },
+    });
+    draft.primary.hooks = ["Pause", "Verify", "Decide"];
+    draft.compliance = { passed: true, decision: "PASS" };
+    draft.weeklyPlanId = "weekly-cadence-1";
+    draft.candidateId = "feed-candidate-1";
+    draft.weeklySlotNumber = 1;
+    draft.scheduledFor = "2099-09-01T05:30:00.000Z";
+    draft.bundleId = "weekly:weekly-cadence-1:feed:feed-candidate-1";
+    draft.bundleRole = "PARENT_FEED";
+
+    render(<SocialToday
+      draft={draft}
+      previousDraft={null}
+      generationRun={null}
+      readiness={EMPTY_READINESS}
+      loading={false}
+      generating={false}
+      busyAction=""
+      dirty={false}
+      loadError=""
+      onGenerate={vi.fn()}
+      onReload={vi.fn()}
+      onRecommendationChange={vi.fn()}
+      onScheduleChange={vi.fn()}
+      onSave={vi.fn()}
+      onAction={onAction}
+      onAdoptAlternative={vi.fn()}
+      onExport={vi.fn()}
+      reviewMode
+      weeklyLinked
+      companionStoryReady
+    />);
+
+    expect(screen.getByText("Companion Story included")).toBeVisible();
+    expect(screen.queryByRole("checkbox", { name: "Include companion Story" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Approve & schedule" }));
+    expect(onAction).toHaveBeenCalledWith("approve-and-schedule", { include_companion_story: true });
+  });
+
+  it("waits for an unfinished companion while standalone Stories keep a separate approval", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const parent = fullAiDraft({
+      full_ai_graphic_contract_version: 2,
+      overlay: { method: "none", image_ai_used_for_text: true },
+    });
+    parent.primary.hooks = ["Pause", "Verify", "Decide"];
+    parent.compliance = { passed: true, decision: "PASS" };
+    parent.weeklyPlanId = "weekly-cadence-2";
+    parent.candidateId = "feed-candidate-2";
+    parent.weeklySlotNumber = 1;
+    parent.scheduledFor = "2099-09-01T05:30:00.000Z";
+    parent.bundleId = "weekly:weekly-cadence-2:feed:feed-candidate-2";
+    parent.bundleRole = "PARENT_FEED";
+
+    const props = {
+      previousDraft: null,
+      generationRun: null,
+      readiness: EMPTY_READINESS,
+      loading: false,
+      generating: false,
+      busyAction: "",
+      dirty: false,
+      loadError: "",
+      onGenerate: vi.fn(),
+      onReload: vi.fn(),
+      onRecommendationChange: vi.fn(),
+      onScheduleChange: vi.fn(),
+      onSave: vi.fn(),
+      onAction,
+      onAdoptAlternative: vi.fn(),
+      onExport: vi.fn(),
+      reviewMode: true,
+      weeklyLinked: true,
+    };
+    const view = render(<SocialToday {...props} draft={parent} companionStoryReady={false} />);
+    expect(screen.queryByRole("checkbox", { name: "Include companion Story" })).not.toBeInTheDocument();
+    expect(screen.getByText(/companion Story is still generating/i)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve & schedule" })).toBeDisabled();
+
+    const standalone = { ...parent, id: "standalone-story-1", bundleRole: "STANDALONE_STORY", bundleId: "weekly:weekly-cadence-2:story:saturday" };
+    view.rerender(<SocialToday {...props} draft={standalone} companionStoryReady={false} />);
+    expect(screen.queryByText("Companion Story included")).not.toBeInTheDocument();
+    const approve = screen.getByRole("button", { name: "Approve & schedule" });
+    expect(approve).toBeEnabled();
+    await user.click(approve);
+    expect(onAction).toHaveBeenCalledWith("approve-and-schedule", {});
+  });
+
   it("allows pending human visual review to approve-and-schedule, then keeps publish-now inside Advanced", async () => {
     const user = userEvent.setup();
     const onAction = vi.fn();

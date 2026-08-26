@@ -1,4 +1,5 @@
 import { API_URL } from "@/lib/api";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 export type AffiliateTrackableProduct = {
   id: string;
@@ -8,7 +9,7 @@ export type AffiliateTrackableProduct = {
   campaign_label?: string | null;
 };
 
-type AffiliateEventType = "product_view" | "cta_click" | "outbound_click";
+type AffiliateEventType = "card_impression" | "detail_view" | "product_view" | "cta_click" | "outbound_click";
 const CTA_EXPERIMENT_NAME = "affiliate_cta_text_v1";
 const CTA_EXPERIMENT_STORAGE_KEY = "pinkpaisa_affiliate_cta_variant";
 const FIRST_TOUCH_STORAGE_KEY = "pinkpaisa_affiliate_first_touch";
@@ -90,6 +91,9 @@ export function buildAffiliateOutboundQuery() {
   Object.entries(getUtmParams()).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
+  const experiment = getAffiliateCtaExperiment();
+  params.set("experiment_name", experiment.experiment_name);
+  params.set("experiment_variant", experiment.experiment_variant);
   return params.toString();
 }
 
@@ -129,6 +133,21 @@ export function trackAffiliateEvent(product: AffiliateTrackableProduct, eventTyp
   };
   const url = `${API_URL.replace(/\/$/, "")}/affiliate-events`;
   const body = JSON.stringify(payload);
+  const analyticsEvent = eventType === "detail_view" || eventType === "product_view"
+    ? "view_item"
+    : eventType === "cta_click"
+      ? "affiliate_cta_click"
+      : eventType === "outbound_click"
+        ? "affiliate_outbound_click"
+        : null;
+  if (analyticsEvent) {
+    trackAnalyticsEvent(analyticsEvent, {
+      item_id: product.id,
+      item_category: product.category || undefined,
+      experiment_name: payload.experiment_name,
+      experiment_variant: payload.experiment_variant,
+    });
+  }
 
   try {
     if (navigator.sendBeacon) {

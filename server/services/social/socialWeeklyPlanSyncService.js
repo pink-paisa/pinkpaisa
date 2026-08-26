@@ -7,7 +7,8 @@ function applyMongoSession(query, session) {
 }
 
 function derivePlanStatus(plan) {
-  const statuses = (plan.selected_posts || []).map((selected) => String(selected.status || "PLANNED").toUpperCase());
+  const statuses = [...(plan.selected_posts || []), ...(plan.story_plan || [])]
+    .map((selected) => String(selected.status || "PLANNED").toUpperCase());
   if (statuses.length && statuses.every((status) => status === "PUBLISHED")) return "COMPLETED";
   if (statuses.some((status) => status === "PUBLISHED")) return "ACTIVE";
   if (statuses.length && statuses.every((status) => ["SCHEDULED", "PUBLISHED"].includes(status))) return "SCHEDULED";
@@ -39,7 +40,7 @@ async function syncWeeklyPlanFromDraft(draft, { status, publicationId = null, de
     error.code = "social_weekly_plan_link_missing";
     throw error;
   }
-  const selected = (plan.selected_posts || []).find((item) => (
+  const selected = [...(plan.selected_posts || []), ...(plan.story_plan || [])].find((item) => (
     String(item.candidateId || item.candidate_id || "") === String(draft.candidate_id)
   ));
   if (!selected) {

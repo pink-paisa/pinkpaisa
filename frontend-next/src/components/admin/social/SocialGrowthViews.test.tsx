@@ -71,6 +71,57 @@ describe("SocialWeeklyStrategyView", () => {
     await user.click(screen.getByRole("button", { name: "Use for Post 1" }));
     expect(onReplaceSlot).toHaveBeenCalledWith(expect.objectContaining({ order: 1, scheduledFor: "2026-08-25T12:30:00.000Z" }), "candidate-2");
   });
+
+  it("blocks approval for a partial five-feed/daily-Story plan and shows the exact missing cadence", () => {
+    const plan = normalizeWeeklyPlanResponse({ plan: {
+      id: "partial-five-feed-plan",
+      status: "NEEDS_REVIEW",
+      maximum_feed_posts: 5,
+      selected_posts: [1, 2, 3, 4, 5].map((slot) => ({
+        candidate_id: `feed-${slot}`,
+        slot_number: slot,
+        candidate: { title: `Feed ${slot}`, topic: "Money", format: "SINGLE_IMAGE", objective: "EDUCATION" },
+      })),
+      story_plan: [{
+        candidate_id: "story-1",
+        parent_candidate_id: "feed-1",
+        bundle_role: "COMPANION_STORY",
+        candidate: { title: "Story 1", topic: "Money", format: "STORY", objective: "EDUCATION" },
+      }],
+    } });
+    if (!plan) throw new Error("Partial cadence fixture must normalize");
+    render(<SocialWeeklyStrategyView {...props} plan={plan} />);
+
+    expect(screen.getByRole("button", { name: "Approve plan & start generation" })).toBeDisabled();
+    expect(screen.getByText("Weekly cadence is incomplete")).toBeVisible();
+    expect(screen.getByText(/5 feed post\(s\), 1 companion Story package\(s\) and 0 standalone Story package\(s\)/)).toBeVisible();
+  });
+
+  it("shows the accounted rolling four-week mix and its visible limitation", () => {
+    const plan = normalizeWeeklyPlanResponse({ plan: {
+      id: "mix-accounted-plan",
+      status: "APPROVED",
+      maximum_feed_posts: 3,
+      selected_posts: [],
+      config_snapshot: {
+        content_mix_snapshot: {
+          window_weeks: 4,
+          history_weeks_found: 2,
+          total_posts: 15,
+          counts: { MONEY: 7, BODY_FITNESS: 3, WELLNESS_BEAUTY: 2, WOMEN_LIFE: 2, PINK_PAISA: 1 },
+          target_percentages: { MONEY: 40, BODY_FITNESS: 20, WELLNESS_BEAUTY: 15, WOMEN_LIFE: 15, PINK_PAISA: 10 },
+          actual_percentages: { MONEY: 46.7, BODY_FITNESS: 20, WELLNESS_BEAUTY: 13.3, WOMEN_LIFE: 13.3, PINK_PAISA: 6.7 },
+          limitation: "Only 2 prior approved weeks were available; the rolling mix remains visibly accounted.",
+        },
+      },
+    } });
+    if (!plan) throw new Error("Mix fixture must normalize");
+    render(<SocialWeeklyStrategyView {...props} plan={plan} />);
+
+    expect(screen.getByText("Rolling four-week content mix")).toBeVisible();
+    expect(screen.getByText((_text, element) => element?.tagName === "P" && element.textContent === "46.7% actual · 40% target")).toBeVisible();
+    expect(screen.getByText(/Only 2 prior approved weeks were available/)).toBeVisible();
+  });
 });
 
 describe("SocialCommunityInboxView", () => {

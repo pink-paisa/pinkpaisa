@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect } from "react";
-import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,6 +10,7 @@ import { toast } from "sonner";
 import { useWorkshops, type Workshop } from "@/hooks/useWorkshops";
 import { useQueryClient } from "@tanstack/react-query";
 import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
+import { apiFetch } from "@/lib/api";
 import { StatCard, StatusBadge, LoadingSpinner, EmptyState, Field, FormCard, IconBtn, CheckboxField, formatPrice, WORKSHOP_STATUSES, BOOKING_STATUSES, PAYMENT_STATUSES, SESSION_STATUSES, QUOTE_STATUSES, ICON_OPTIONS } from "./AdminShared";
 
 type WorkshopForm = { title: string; slug: string; workshop_type: string; short_description: string; full_description: string; duration: string; min_people: string; price: string; original_price: string; discount_text: string; icon: string; popular: boolean; featured: boolean; category: string; certificate_included: boolean; recording_addon_available: boolean; recording_addon_price: string; certification_addon_available: boolean; certification_addon_price: string; status: string; custom_quote_enabled: boolean; sort_order: string; benefits: string; };
@@ -60,9 +60,24 @@ export const AdminWorkshops = () => {
   const [quoteStatusFilter, setQuoteStatusFilter] = useState("all");
   const [expandedQuote, setExpandedQuote] = useState<string | null>(null);
 
-  const fetchBookings = async () => { setBookingsLoading(true); const { data } = await (supabase as any).from("workshop_bookings").select("*").order("created_at", { ascending: false }); setBookings(data ?? []); setBookingsLoading(false); };
-  const fetchSessions = async () => { setSessionsLoading(true); const { data } = await (supabase as any).from("workshop_sessions").select("*").order("session_date", { ascending: true }); setSessions(data ?? []); setSessionsLoading(false); };
-  const fetchQuotes = async () => { setQuotesLoading(true); const { data } = await (supabase as any).from("workshop_quote_requests").select("*").order("created_at", { ascending: false }); setQuotes(data ?? []); setQuotesLoading(false); };
+  const fetchBookings = async () => {
+    setBookingsLoading(true);
+    try { setBookings(await apiFetch<BookingRow[]>("/workshop-bookings?_sort=createdAt&_order=desc")); }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Could not load bookings"); }
+    finally { setBookingsLoading(false); }
+  };
+  const fetchSessions = async () => {
+    setSessionsLoading(true);
+    try { setSessions(await apiFetch<SessionRow[]>("/quote-requests/sessions?_sort=session_date&_order=asc")); }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Could not load sessions"); }
+    finally { setSessionsLoading(false); }
+  };
+  const fetchQuotes = async () => {
+    setQuotesLoading(true);
+    try { setQuotes(await apiFetch<QuoteRow[]>("/quote-requests?_sort=createdAt&_order=desc")); }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Could not load quote requests"); }
+    finally { setQuotesLoading(false); }
+  };
 
   useEffect(() => {
     if (subTab === "bookings") { fetchBookings(); fetchSessions(); }
@@ -75,16 +90,30 @@ export const AdminWorkshops = () => {
     if (!workshopForm.title || !workshopForm.slug || !workshopForm.price) { toast.error("Title, slug, price required"); return; }
     setSavingWorkshop(true);
     const payload = { title: workshopForm.title, slug: workshopForm.slug, workshop_type: workshopForm.workshop_type, short_description: workshopForm.short_description || null, full_description: workshopForm.full_description || null, duration: workshopForm.duration || null, min_people: Number(workshopForm.min_people) || 25, price: Number(workshopForm.price), original_price: workshopForm.original_price ? Number(workshopForm.original_price) : null, discount_text: workshopForm.discount_text || null, icon: workshopForm.icon, popular: workshopForm.popular, featured: workshopForm.featured, category: workshopForm.category, certificate_included: workshopForm.certificate_included, recording_addon_available: workshopForm.recording_addon_available, recording_addon_price: Number(workshopForm.recording_addon_price) || 2999, certification_addon_available: workshopForm.certification_addon_available, certification_addon_price: Number(workshopForm.certification_addon_price) || 999, status: workshopForm.status, custom_quote_enabled: workshopForm.custom_quote_enabled, sort_order: Number(workshopForm.sort_order) || 0, benefits: workshopForm.benefits ? workshopForm.benefits.split("\n").filter(Boolean) : [] };
-    const { error } = editingWorkshopId ? await (supabase as any).from("workshops").update(payload).eq("id", editingWorkshopId) : await (supabase as any).from("workshops").insert(payload);
-    if (error) { toast.error("Failed"); console.error(error); } else { toast.success(editingWorkshopId ? "Updated" : "Added"); setShowWorkshopForm(false); queryClient.invalidateQueries({ queryKey: ["workshops"] }); }
+    try {
+      await apiFetch(editingWorkshopId ? `/workshops/${encodeURIComponent(editingWorkshopId)}` : "/workshops", {
+        method: editingWorkshopId ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+      });
+      toast.success(editingWorkshopId ? "Updated" : "Added");
+      setShowWorkshopForm(false);
+      queryClient.invalidateQueries({ queryKey: ["workshops"] });
+    } catch (error) {
+      toast.error("Failed");
+      console.error(error);
+    }
     setSavingWorkshop(false);
   };
   const deleteWorkshop = async () => {
     if (!workshopToDelete) return;
-    await (supabase as any).from("workshops").delete().eq("id", workshopToDelete.id);
-    toast.success("Deleted");
-    setWorkshopToDelete(null);
-    queryClient.invalidateQueries({ queryKey: ["workshops"] });
+    try {
+      await apiFetch(`/workshops/${encodeURIComponent(workshopToDelete.id)}`, { method: "DELETE" });
+      toast.success("Deleted");
+      setWorkshopToDelete(null);
+      queryClient.invalidateQueries({ queryKey: ["workshops"] });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete workshop");
+    }
   };
   const openEditWorkshop = (w: Workshop) => { setEditingWorkshopId(w.id); setWorkshopForm({ title: w.title, slug: w.slug, workshop_type: w.workshop_type, short_description: w.short_description ?? "", full_description: w.full_description ?? "", duration: w.duration ?? "", min_people: String(w.min_people), price: String(w.price), original_price: w.original_price ? String(w.original_price) : "", discount_text: w.discount_text ?? "", icon: w.icon, popular: w.popular, featured: w.featured, category: w.category, certificate_included: w.certificate_included, recording_addon_available: w.recording_addon_available, recording_addon_price: String(w.recording_addon_price), certification_addon_available: w.certification_addon_available, certification_addon_price: String(w.certification_addon_price), status: w.status, custom_quote_enabled: w.custom_quote_enabled, sort_order: String(w.sort_order), benefits: Array.isArray(w.benefits) ? w.benefits.join("\n") : "" }); setShowWorkshopForm(true); };
   const filteredWorkshops = (allWorkshops ?? []).filter((w) => !workshopSearch || w.title.toLowerCase().includes(workshopSearch.toLowerCase()));
@@ -94,20 +123,29 @@ export const AdminWorkshops = () => {
 
   const uploadCertificate = async (bookingId: string, file: File) => {
     setUploadingCert(bookingId);
-    const ext = file.name.split(".").pop();
-    const path = `certificates/${bookingId}-${Date.now()}.${ext}`;
-    const { error: uploadErr } = await supabase.storage.from("product-images").upload(path, file, { cacheControl: "3600", upsert: false });
-    if (uploadErr) { toast.error("Upload failed: " + uploadErr.message); setUploadingCert(null); return; }
-    const { data: urlData } = supabase.storage.from("product-images").getPublicUrl(path);
-    const certUrl = urlData.publicUrl;
-    const { error } = await (supabase as any).from("workshop_bookings").update({ certificate_url: certUrl }).eq("id", bookingId);
-    if (error) { toast.error("Failed to save"); } else { setBookings((p) => p.map((b) => b.id === bookingId ? { ...b, certificate_url: certUrl } : b)); toast.success("Certificate uploaded"); }
-    setUploadingCert(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const upload = await apiFetch<{ url: string }>("/uploads/certificate", { method: "POST", body: formData });
+      await apiFetch(`/workshop-bookings/${encodeURIComponent(bookingId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ certificate_url: upload.url }),
+      });
+      setBookings((current) => current.map((booking) => booking.id === bookingId ? { ...booking, certificate_url: upload.url } : booking));
+      toast.success("Certificate uploaded");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Certificate upload failed");
+    } finally {
+      setUploadingCert(null);
+    }
   };
 
   const removeCertificate = async (bookingId: string) => {
-    const { error } = await (supabase as any).from("workshop_bookings").update({ certificate_url: null }).eq("id", bookingId);
-    if (error) toast.error("Failed"); else { setBookings((p) => p.map((b) => b.id === bookingId ? { ...b, certificate_url: null } : b)); toast.success("Certificate removed"); }
+    try {
+      await apiFetch(`/workshop-bookings/${encodeURIComponent(bookingId)}`, { method: "PUT", body: JSON.stringify({ certificate_url: null }) });
+      setBookings((current) => current.map((booking) => booking.id === bookingId ? { ...booking, certificate_url: null } : booking));
+      toast.success("Certificate removed");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Failed to remove certificate"); }
   };
 
   // Find linked sessions for a booking
@@ -115,8 +153,18 @@ export const AdminWorkshops = () => {
 
   // Booking helpers
   const updateBookingStatus = async (id: string, field: "booking_status" | "payment_status", val: string) => {
-    const { error } = await (supabase as any).from("workshop_bookings").update({ [field]: val }).eq("id", id);
-    if (error) toast.error("Failed"); else { setBookings((p) => p.map((b) => b.id === id ? { ...b, [field]: val } : b)); toast.success(`Updated`); }
+    try {
+      await apiFetch(`/workshop-bookings/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ [field]: val }) });
+      setBookings((current) => current.map((booking) => booking.id === id ? { ...booking, [field]: val } : booking));
+      toast.success("Updated");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Update failed"); }
+  };
+  const updateBookingField = async (id: string, field: "preferred_date" | "preferred_time", value: string | null) => {
+    try {
+      await apiFetch(`/workshop-bookings/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ [field]: value }) });
+      setBookings((current) => current.map((booking) => booking.id === id ? { ...booking, [field]: value } : booking));
+      toast.success(field === "preferred_date" ? "Date updated" : "Time updated");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Update failed"); }
   };
   const filteredBookings = bookings.filter((b) => { const s = !bookingSearch || b.full_name.toLowerCase().includes(bookingSearch.toLowerCase()) || b.email.toLowerCase().includes(bookingSearch.toLowerCase()) || b.workshop_title.toLowerCase().includes(bookingSearch.toLowerCase()); return s && (bookingStatusFilter === "all" || b.booking_status === bookingStatusFilter); });
 
@@ -125,22 +173,34 @@ export const AdminWorkshops = () => {
     if (!sessionForm.title) { toast.error("Title required"); return; }
     setSavingSession(true);
     const payload = { title: sessionForm.title, workshop_id: sessionForm.workshop_id || null, session_date: sessionForm.session_date || null, session_time: sessionForm.session_time || null, duration: sessionForm.duration || null, trainer: sessionForm.trainer || null, delivery_mode: sessionForm.delivery_mode, venue_or_link: sessionForm.venue_or_link || null, max_participants: Number(sessionForm.max_participants) || 50, status: sessionForm.status, internal_notes: sessionForm.internal_notes || null };
-    const { error } = editingSessionId ? await (supabase as any).from("workshop_sessions").update(payload).eq("id", editingSessionId) : await (supabase as any).from("workshop_sessions").insert(payload);
-    if (error) { toast.error("Failed"); console.error(error); } else { toast.success(editingSessionId ? "Updated" : "Created"); setShowSessionForm(false); fetchSessions(); }
-    setSavingSession(false);
+    try {
+      await apiFetch(editingSessionId ? `/quote-requests/sessions/${encodeURIComponent(editingSessionId)}` : "/quote-requests/sessions", {
+        method: editingSessionId ? "PUT" : "POST",
+        body: JSON.stringify(payload),
+      });
+      toast.success(editingSessionId ? "Updated" : "Created");
+      setShowSessionForm(false);
+      await fetchSessions();
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Failed to save session"); }
+    finally { setSavingSession(false); }
   };
   const deleteSession = async () => {
     if (!sessionToDelete) return;
-    await (supabase as any).from("workshop_sessions").delete().eq("id", sessionToDelete.id);
-    toast.success("Deleted");
-    setSessionToDelete(null);
-    fetchSessions();
+    try {
+      await apiFetch(`/quote-requests/sessions/${encodeURIComponent(sessionToDelete.id)}`, { method: "DELETE" });
+      toast.success("Deleted");
+      setSessionToDelete(null);
+      await fetchSessions();
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Failed to delete session"); }
   };
 
   // Quote helpers
   const updateQuoteStatus = async (id: string, status: string) => {
-    const { error } = await (supabase as any).from("workshop_quote_requests").update({ status }).eq("id", id);
-    if (error) toast.error("Failed"); else { setQuotes((p) => p.map((q) => q.id === id ? { ...q, status } : q)); toast.success(`Quote → ${status}`); }
+    try {
+      await apiFetch(`/quote-requests/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ status }) });
+      setQuotes((current) => current.map((quote) => quote.id === id ? { ...quote, status } : quote));
+      toast.success(`Quote → ${status}`);
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Quote update failed"); }
   };
   const filteredQuotes = quotes.filter((q) => quoteStatusFilter === "all" || q.status === quoteStatusFilter);
 
@@ -295,8 +355,8 @@ export const AdminWorkshops = () => {
                       <div className="rounded-lg border border-border bg-accent/20 p-3 space-y-2">
                         <p className="text-sm font-semibold flex items-center gap-1.5"><CalendarDays className="h-4 w-4 text-primary" /> Schedule Workshop</p>
                         <div className="grid grid-cols-2 gap-2">
-                          <Field label="Date"><Input type="date" value={b.preferred_date ?? ""} onChange={async (e) => { const val = e.target.value || null; const { error } = await (supabase as any).from("workshop_bookings").update({ preferred_date: val }).eq("id", b.id); if (error) toast.error("Failed"); else { setBookings((p) => p.map((x) => x.id === b.id ? { ...x, preferred_date: val } : x)); toast.success("Date updated"); } }} /></Field>
-                          <Field label="Time"><Input value={b.preferred_time ?? ""} placeholder="e.g. 10:00 AM" onChange={async (e) => { const val = e.target.value || null; const { error } = await (supabase as any).from("workshop_bookings").update({ preferred_time: val }).eq("id", b.id); if (error) toast.error("Failed"); else { setBookings((p) => p.map((x) => x.id === b.id ? { ...x, preferred_time: val } : x)); toast.success("Time updated"); } }} /></Field>
+                          <Field label="Date"><Input type="date" value={b.preferred_date ?? ""} onChange={(event) => void updateBookingField(b.id, "preferred_date", event.target.value || null)} /></Field>
+                          <Field label="Time"><Input value={b.preferred_time ?? ""} placeholder="e.g. 10:00 AM" onChange={(event) => void updateBookingField(b.id, "preferred_time", event.target.value || null)} /></Field>
                         </div>
                       </div>
 

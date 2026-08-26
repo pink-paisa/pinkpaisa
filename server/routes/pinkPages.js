@@ -6,6 +6,7 @@ const { applyQueryParams } = require("../controllers/orderController");
 const { protect, optionalProtect, adminOnly } = require("../middleware/auth");
 const { createRateLimiter } = require("../middleware/requestGuards");
 const { requireCaptcha } = require("../middleware/captcha");
+const { isPublicPinkPagesListing } = require("../utils/pinkPagesPublicPolicy");
 
 const toFlat = (doc) => ({ ...doc, id: doc._id.toString() });
 const publicSubmissionLimiter = createRateLimiter({
@@ -122,8 +123,12 @@ router.get("/listings", optionalProtect, async (req, res) => {
       : [];
     const catMap = Object.fromEntries(cats.map((c) => [c._id.toString(), c.name]));
 
+    const visibleListings = isAdminRequest(req)
+      ? listings
+      : listings.filter(isPublicPinkPagesListing);
+
     res.json(
-      listings.map((l) => ({
+      visibleListings.map((l) => ({
         ...toFlat(l),
         category_name: catMap[l.category_id] ?? null,
       }))
@@ -141,7 +146,7 @@ router.get("/listings/:id", optionalProtect, async (req, res) => {
     }
     if (!listing) listing = await PinkPagesListing.findOne({ slug: req.params.id }).lean();
     if (!listing) return res.status(404).json({ message: "Listing not found" });
-    if (!isAdminRequest(req) && (listing.status !== "active" || listing.verified !== true)) {
+    if (!isAdminRequest(req) && !isPublicPinkPagesListing(listing)) {
       return res.status(404).json({ message: "Listing not found" });
     }
     res.json(toFlat(listing));
@@ -150,7 +155,7 @@ router.get("/listings/:id", optionalProtect, async (req, res) => {
   }
 });
 
-router.post("/listings/submit", optionalProtect, publicSubmissionLimiter, requireCaptcha(), async (req, res) => {
+router.post("/listings/submit", optionalProtect, publicSubmissionLimiter, requireCaptcha({ action: "pink_pages_submit" }), async (req, res) => {
   try {
     const businessName = String(req.body.business_name || "").trim();
     const categoryId = String(req.body.category_id || "").trim() || null;

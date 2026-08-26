@@ -50,6 +50,7 @@ import AdminVendorOutstanding from "@/components/admin/AdminVendorOutstanding";
 import AdminAffiliateProducts from "@/components/admin/AdminAffiliateProducts";
 import { AdminWarehouse } from "@/components/admin/AdminWarehouse";
 import AdminSettlements from "@/components/admin/AdminSettlements";
+import AdminMarketingLeads from "@/components/admin/AdminMarketingLeads";
 import { SocialMediaManager } from "@/components/admin/social";
 import { API_URL, apiFetch } from "@/lib/api";
 import ErrorBoundary from "@/components/ui/error-boundary";
@@ -62,6 +63,7 @@ type Section =
   | "vendors"
   | "campaigns"
   | "social_media_manager"
+  | "marketing_leads"
   | "vendor_outstanding"
   | "settlements"
   | "customers"
@@ -92,6 +94,7 @@ const sectionItems: { key: Section; label: string; sublabel: string; icon: any }
   { key: "vendors", label: "Vendors", sublabel: "Verify Sellers", icon: UserRoundSearch },
   { key: "campaigns", label: "Campaigns", sublabel: "Instagram Pipeline", icon: TrendingUp },
   { key: "social_media_manager", label: "Social Media Manager", sublabel: "AI Content Operations", icon: Megaphone },
+  { key: "marketing_leads", label: "Marketing Leads", sublabel: "Quiz follow-up queue", icon: UserRoundSearch },
   { key: "vendor_outstanding", label: "Vendor Outstanding", sublabel: "Release Payouts", icon: Landmark },
   { key: "settlements", label: "Settlements", sublabel: "Payout Audit", icon: ReceiptIndianRupee },
   { key: "customers", label: "Customers", sublabel: "Buyer Accounts", icon: Users },
@@ -113,7 +116,7 @@ const navGroups: { key: NavGroupKey; label: string; sublabel: string; icon: any;
   { key: "operations", label: "Operations", sublabel: "Delivery & warehouse", icon: Truck, sections: ["delivery", "warehouse"] },
   { key: "workshops", label: "Workshops", sublabel: "Events & bookings", icon: CalendarDays, sections: ["workshops"] },
   { key: "content_community", label: "Content & Community", sublabel: "Directory, blogs, polls", icon: BookOpenCheck, sections: ["pinkpages", "content", "engagement"] },
-  { key: "growth_reporting", label: "Growth & Reporting", sublabel: "Social, campaigns & analytics", icon: BarChart3, sections: ["social_media_manager", "campaigns", "analytics"] },
+  { key: "growth_reporting", label: "Growth & Reporting", sublabel: "Social, campaigns & analytics", icon: BarChart3, sections: ["social_media_manager", "marketing_leads", "campaigns", "analytics"] },
 ];
 
 const sectionMeta = Object.fromEntries(sectionItems.map((item) => [item.key, item])) as Record<
@@ -626,6 +629,7 @@ const Admin = () => {
             {activeSection === "vendors" && <AdminVendors />}
             {activeSection === "campaigns" && <AdminCampaigns />}
             {activeSection === "social_media_manager" && <SocialMediaManager />}
+            {activeSection === "marketing_leads" && <AdminMarketingLeads />}
             {activeSection === "vendor_outstanding" && <AdminVendorOutstanding />}
             {activeSection === "settlements" && <AdminSettlements />}
             {activeSection === "customers" && <AdminCustomers />}

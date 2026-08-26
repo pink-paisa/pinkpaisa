@@ -48,6 +48,7 @@ const OrderSchema = new mongoose.Schema(
     vendor_payout_amount: { type: Number, default: 0 },
     pinkpaisa_commission_amount: { type: Number, default: 0 },
     refunded_amount: { type: Number, default: 0 },
+    attribution: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

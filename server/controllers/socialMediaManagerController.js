@@ -201,11 +201,13 @@ async function approveAndSchedule(req, res) {
       ...context(req),
       requestKey: req.headers["idempotency-key"] || req.headers["x-idempotency-key"] || null,
       scheduleOverrideReason: req.body?.schedule_override_reason || null,
+      includeCompanionStory: req.body?.include_companion_story === true,
     });
     res.json({
       message: result.reused ? "This draft was already approved and scheduled" : "Draft approved and scheduled",
       reused: result.reused,
       draft: result.draft,
+      companion_story: result.companion_story,
       queue_navigation: result.queue_navigation,
     });
   } catch (error) {

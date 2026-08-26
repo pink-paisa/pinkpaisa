@@ -112,6 +112,7 @@ const SAMPLE_ROWS = [
 type AffiliateForm = {
   id?: string;
   title: string;
+  editorial_title: string;
   slug: string;
   affiliate_url: string;
   image_url: string;
@@ -267,6 +268,7 @@ type AffiliateRefreshResponse = {
 
 const blankForm: AffiliateForm = {
   title: "",
+  editorial_title: "",
   slug: "",
   affiliate_url: "",
   image_url: "",
@@ -557,6 +559,7 @@ export default function AdminAffiliateProducts() {
     setForm({
       id: product.id,
       title: product.title || "",
+      editorial_title: product.editorial_title || "",
       slug: product.slug || "",
       affiliate_url: product.affiliate_url || "",
       image_url: product.affiliate_data_source === "creators_api" || product.affiliate_data_source === "pa_api" ? "" : product.featured_image || "",
@@ -1081,6 +1084,12 @@ export default function AdminAffiliateProducts() {
             <Field label="Title *">
               <Input value={form.title} onChange={(event) => updateForm({ title: event.target.value })} />
             </Field>
+            <Field
+              label="Editorial title"
+              hint="Optional concise Pink Paisa title used on curated cards. The authentic retailer title remains unchanged."
+            >
+              <Input value={form.editorial_title} maxLength={120} onChange={(event) => updateForm({ editorial_title: event.target.value })} />
+            </Field>
             <Field label="Slug">
               <Input value={form.slug} onChange={(event) => updateForm({ slug: event.target.value })} placeholder="Auto-generated if blank" />
             </Field>
@@ -1194,7 +1203,7 @@ export default function AdminAffiliateProducts() {
                 </div>
                 <div className="space-y-2 p-4">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">{form.category_id ? formCategory?.name || "Category" : "Category"}</p>
-                  <p className="font-serif text-lg leading-tight">{form.title || "Affiliate product title"}</p>
+                  <p className="font-serif text-lg leading-tight">{form.editorial_title.trim() || form.title || "Affiliate product title"}</p>
                   <p className="line-clamp-2 text-sm text-muted-foreground">{form.short_description || "Short benefit-focused description will appear here."}</p>
                   <p className="text-xs text-muted-foreground">Confirm price and availability on Amazon.</p>
                 </div>

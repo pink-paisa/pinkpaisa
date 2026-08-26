@@ -2,6 +2,7 @@ const axios = require("axios");
 const { validateAmazonAffiliateUrl } = require("./amazonAffiliateCompliance");
 
 const AUTO_PAUSE_FAILURE_THRESHOLD = 3;
+const INDETERMINATE_HTTP_STATUSES = new Set([429, 503]);
 
 function isReachableStatus(status) {
   return status >= 200 && status < 400;
@@ -59,6 +60,16 @@ async function checkAffiliateProductLink(product) {
   }
 
   if (!isReachableStatus(response.status)) {
+    if (INDETERMINATE_HTTP_STATUSES.has(response.status)) {
+      return {
+        ok: false,
+        status: "indeterminate",
+        retry: true,
+        http_status: response.status,
+        failure_reason: `Amazon temporarily returned HTTP ${response.status}; retry is required`,
+        validation,
+      };
+    }
     return {
       ok: false,
       status: "failed",
@@ -80,11 +91,15 @@ async function checkAffiliateProductLink(product) {
 async function persistAffiliateLinkCheck(product, result) {
   const now = new Date();
   product.affiliate_link_last_checked_at = now;
-  product.affiliate_link_check_status = result.ok ? "ok" : "failed";
+  product.affiliate_link_check_status = result.status || (result.ok ? "ok" : "failed");
   product.affiliate_link_failure_reason = result.failure_reason || null;
 
   if (result.ok) {
     product.affiliate_link_failure_count = 0;
+  } else if (result.status === "indeterminate") {
+    // Amazon throttling or temporary unavailability is not evidence that a
+    // product link is permanently broken. Keep its failure count unchanged so
+    // a transient response can never auto-pause a sellable product.
   } else {
     product.affiliate_link_failure_count = Number(product.affiliate_link_failure_count || 0) + 1;
     if (product.affiliate_link_failure_count >= AUTO_PAUSE_FAILURE_THRESHOLD) {
@@ -105,6 +120,7 @@ async function persistAffiliateLinkCheck(product, result) {
 
 module.exports = {
   AUTO_PAUSE_FAILURE_THRESHOLD,
+  INDETERMINATE_HTTP_STATUSES,
   checkAffiliateProductLink,
   persistAffiliateLinkCheck,
 };

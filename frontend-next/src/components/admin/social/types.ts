@@ -431,6 +431,13 @@ export type SocialWeeklyPlanItem = {
   draftId: string;
   sources: SocialSource[];
   visualModeResolution: SocialVisualModeResolution | null;
+  bundleId: string;
+  bundleRole: string;
+  parentCandidateId: string;
+};
+
+export type SocialWeeklyStoryItem = SocialWeeklyPlanItem & {
+  parentDraftId: string;
 };
 
 export type SocialWeeklyGenerationError = {
@@ -440,6 +447,21 @@ export type SocialWeeklyGenerationError = {
   isRetriable: boolean;
   occurredAt: string | null;
   validationErrors: string[];
+};
+
+export type SocialContentMixSnapshot = {
+  windowWeeks: number;
+  historyWeeksFound: number;
+  historicalPosts: number;
+  currentWeekPosts: number;
+  totalPosts: number;
+  counts: Record<string, number>;
+  targetPercentages: Record<string, number>;
+  actualPercentages: Record<string, number>;
+  deltaPercentages: Record<string, number>;
+  hardQuotaEnforced: boolean;
+  enforcement: string;
+  limitation: string;
 };
 
 export type SocialWeeklyPlan = {
@@ -452,6 +474,8 @@ export type SocialWeeklyPlan = {
   rationale: string;
   version: number;
   items: SocialWeeklyPlanItem[];
+  storyPlan: SocialWeeklyStoryItem[];
+  contentMixSnapshot: SocialContentMixSnapshot | null;
   candidates: SocialCandidateSummary[];
   sources: SocialSource[];
   generationError: SocialWeeklyGenerationError | null;
@@ -625,6 +649,9 @@ export type SocialDraft = {
   weeklyPlanId: string;
   weeklyPlanItemId: string;
   candidateId: string;
+  bundleId: string;
+  bundleRole: string;
+  parentDraftId: string;
   weeklySlotNumber: number | null;
   weekStart: string;
   weekEnd: string;
@@ -836,9 +863,9 @@ export const DEFAULT_SOCIAL_SETTINGS: SocialSettings = {
   utmMedium: "organic_social",
   utmCampaignPrefix: "pink_paisa",
   notificationRecipients: [],
-  weeklyPublicationMaximum: 3,
-  companionStoriesEnabled: false,
-  postingDays: ["Tuesday", "Thursday", "Saturday"],
+  weeklyPublicationMaximum: 5,
+  companionStoriesEnabled: true,
+  postingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
   weeklyPlanningTime: "18:00",
   prePublicationLeadHours: 24,
   candidateCount: 8,

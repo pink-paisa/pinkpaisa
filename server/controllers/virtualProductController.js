@@ -3,8 +3,17 @@ const { applyQueryParams } = require("./orderController");
 
 const toFlat = (doc) => ({ ...doc, id: doc._id.toString() });
 
+function digitalProductsArePublic() {
+  return String(process.env.DIGITAL_PRODUCTS_ENABLED || "false").trim().toLowerCase() === "true";
+}
+
+function canReadDigitalProducts(req) {
+  return digitalProductsArePublic() || req.user?.role === "admin";
+}
+
 const getProducts = async (req, res) => {
   try {
+    if (!canReadDigitalProducts(req)) return res.json([]);
     let q = VirtualProduct.find();
     // Support is_active and status filters
     if (req.query.is_active !== undefined) q = q.where("is_active").equals(req.query.is_active === "true");
@@ -20,6 +29,7 @@ const getProducts = async (req, res) => {
 
 const getProduct = async (req, res) => {
   try {
+    if (!canReadDigitalProducts(req)) return res.status(404).json({ message: "Product not found" });
     const p = await VirtualProduct.findById(req.params.id).lean();
     if (!p) return res.status(404).json({ message: "Product not found" });
     res.json(toFlat(p));
@@ -61,4 +71,11 @@ const deleteProduct = async (req, res) => {
   }
 };
 
-module.exports = { getProducts, getProduct, createProduct, updateProduct, deleteProduct };
+module.exports = {
+  getProducts,
+  getProduct,
+  createProduct,
+  updateProduct,
+  deleteProduct,
+  _private: { canReadDigitalProducts, digitalProductsArePublic },
+};

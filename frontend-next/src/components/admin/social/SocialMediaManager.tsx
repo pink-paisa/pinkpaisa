@@ -123,8 +123,20 @@ const responseQueueNavigation = (response: unknown) => {
     nextReviewDraftId: String(value.next_review_draft_id || value.nextReviewDraftId || ""),
     remainingReviewCount: Number(value.remaining_review_count || value.remainingReviewCount || 0),
     waitingGenerationCount: Number(value.waiting_generation_count || value.waitingGenerationCount || 0),
+    unresolvedFailureCount: Number(value.unresolved_failure_count || value.unresolvedFailureCount || 0),
+    openManualBlockerCount: Number(value.open_manual_blocker_count || value.openManualBlockerCount || 0),
+    firstFailureDraftId: String(value.first_failure_draft_id || value.firstFailureDraftId || ""),
   };
 };
+
+const emptyReviewQueueNavigation = () => ({
+  remainingReviewCount: 0,
+  waitingGenerationCount: 0,
+  unresolvedFailureCount: 0,
+  openManualBlockerCount: 0,
+  firstFailureDraftId: "",
+  complete: false,
+});
 
 const mergeDraft = (items: SocialDraft[], draft: SocialDraft) => {
   const next = items.filter((item) => item.id !== draft.id);
@@ -156,6 +168,10 @@ const SocialMediaManager = () => {
   const [contentView, setContentView] = useState<ContentView>("list");
   const [reviewDrawerOpen, setReviewDrawerOpen] = useState(false);
   const [draft, setDraft] = useState<SocialDraft | null>(null);
+  const [companionDraft, setCompanionDraft] = useState<SocialDraft | null>(null);
+  const [companionDraftLoading, setCompanionDraftLoading] = useState(false);
+  const [companionDraftError, setCompanionDraftError] = useState("");
+  const companionDraftRequestRef = useRef(0);
   const [previousDraft, setPreviousDraft] = useState<SocialDraft | null>(null);
   const [generationRun, setGenerationRun] = useState<SocialGenerationRun | null>(null);
   const [readiness, setReadiness] = useState<SocialReadiness>(EMPTY_READINESS);
@@ -216,7 +232,7 @@ const SocialMediaManager = () => {
   const [communityError, setCommunityError] = useState("");
   const [communityActionId, setCommunityActionId] = useState("");
   const [workSummary, setWorkSummary] = useState<SocialWorkSummary | null>(null);
-  const [reviewQueueNavigation, setReviewQueueNavigation] = useState({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+  const [reviewQueueNavigation, setReviewQueueNavigation] = useState(emptyReviewQueueNavigation);
   const [reviewSessionPlanId, setReviewSessionPlanId] = useState("");
   const [pendingReviewDraftId, setPendingReviewDraftId] = useState("");
   const reviewSessionActiveRef = useRef(false);
@@ -638,7 +654,7 @@ const SocialMediaManager = () => {
     if (action === "schedule" || action === "approve-and-schedule") {
       const weeklyNormalApproval = action === "approve-and-schedule" && Boolean(weeklyQueuePlanId) && typeof payload.scheduled_for !== "string";
       if (weeklyNormalApproval) {
-        body = {};
+        body = payload.include_companion_story === true ? { include_companion_story: true } : {};
       } else {
         const requestedSchedule = typeof payload.scheduled_for === "string" ? payload.scheduled_for : draft.scheduledFor;
         if (!requestedSchedule) {
@@ -658,6 +674,7 @@ const SocialMediaManager = () => {
         body = {
           scheduled_for: scheduledFor,
           ...(payload.schedule_override_reason ? { schedule_override_reason: String(payload.schedule_override_reason).trim() } : {}),
+          ...(payload.include_companion_story === true ? { include_companion_story: true } : {}),
         };
       }
     }
@@ -678,7 +695,7 @@ const SocialMediaManager = () => {
       const response = await apiFetch(`${API_BASE}/drafts/${encodeURIComponent(draft.id)}/${route}`, {
         method: "POST",
         ...(action === "approve-and-schedule" ? {
-          headers: { "Idempotency-Key": `${draft.id}:${draft.updatedAt || draft.createdAt}:${String(body.scheduled_for || "weekly-slot")}` },
+          headers: { "Idempotency-Key": `${draft.id}:${draft.updatedAt || draft.createdAt}:${String(body.scheduled_for || "weekly-slot")}:${body.include_companion_story === true ? "with-companion" : "single"}` },
         } : {}),
         body: JSON.stringify(body),
       });
@@ -698,7 +715,14 @@ const SocialMediaManager = () => {
         setReviewQueueNavigation({
           remainingReviewCount: navigation.remainingReviewCount,
           waitingGenerationCount: navigation.waitingGenerationCount,
-          complete: !navigation.nextReviewDraftId && navigation.remainingReviewCount === 0 && navigation.waitingGenerationCount === 0,
+          unresolvedFailureCount: navigation.unresolvedFailureCount,
+          openManualBlockerCount: navigation.openManualBlockerCount,
+          firstFailureDraftId: navigation.firstFailureDraftId,
+          complete: !navigation.nextReviewDraftId
+            && navigation.remainingReviewCount === 0
+            && navigation.waitingGenerationCount === 0
+            && navigation.unresolvedFailureCount === 0
+            && navigation.openManualBlockerCount === 0,
         });
         setCalendarLoaded(false);
         setManualActionsLoaded(false);
@@ -719,7 +743,7 @@ const SocialMediaManager = () => {
       } else if (action === "approve-and-schedule") {
         setReviewSessionPlanId("");
         setPendingReviewDraftId("");
-        setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+        setReviewQueueNavigation(emptyReviewQueueNavigation());
       }
       toast.success((response as Record<string, unknown>)?.message as string || `${action.replace(/-/g, " ")} complete`);
     } catch (error) {
@@ -781,7 +805,7 @@ const SocialMediaManager = () => {
         if (!preserveQueue) {
           setReviewSessionPlanId("");
           setPendingReviewDraftId("");
-          setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+          setReviewQueueNavigation(emptyReviewQueueNavigation());
         }
       }
     } catch (error) {
@@ -794,7 +818,7 @@ const SocialMediaManager = () => {
         if (!preserveQueue) {
           setReviewSessionPlanId("");
           setPendingReviewDraftId("");
-          setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+          setReviewQueueNavigation(emptyReviewQueueNavigation());
         }
       }
       toast.error(`${errorMessage(error, "Could not load full draft details")}. Showing the agenda summary instead.`);
@@ -873,7 +897,7 @@ const SocialMediaManager = () => {
     setWorkSummary(null);
     setPendingReviewDraftId("");
     setReviewSessionPlanId("");
-    setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+    setReviewQueueNavigation(emptyReviewQueueNavigation());
     setDirty(false);
     setApprovalFilter("NEEDS_ACTION");
     setCalendarFilter("ALL");
@@ -1038,7 +1062,7 @@ const SocialMediaManager = () => {
       if (!preserveQueue) {
         setReviewSessionPlanId("");
         setPendingReviewDraftId("");
-        setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+        setReviewQueueNavigation(emptyReviewQueueNavigation());
       }
       return true;
     } catch (error) {
@@ -1050,7 +1074,12 @@ const SocialMediaManager = () => {
   };
 
   useEffect(() => {
-    if (!reviewDrawerOpen || !reviewSessionActiveRef.current || !reviewSessionPlanId || (reviewQueueNavigation.waitingGenerationCount <= 0 && !pendingReviewDraftId)) return;
+    if (!reviewDrawerOpen || !reviewSessionActiveRef.current || !reviewSessionPlanId || (
+      reviewQueueNavigation.waitingGenerationCount <= 0
+      && reviewQueueNavigation.unresolvedFailureCount <= 0
+      && reviewQueueNavigation.openManualBlockerCount <= 0
+      && !pendingReviewDraftId
+    )) return;
     let cancelled = false;
     const poll = async () => {
       const summary = await loadWorkSummary(reviewSessionPlanId);
@@ -1060,9 +1089,12 @@ const SocialMediaManager = () => {
         : {};
       const needsReview = Number(content.needs_review || content.needsReview || 0);
       const waiting = Number(content.generating_waiting || content.generatingWaiting || 0);
-      if (!summary.nextReviewDraftId && needsReview === 0 && waiting === 0) {
+      const unresolvedFailures = Number(content.terminal_failure || content.terminalFailure || 0);
+      const openManualBlockers = Number(content.open_manual_action || content.openManualAction || 0);
+      const firstFailureDraftId = summary.terminalFailures.content.find((item) => item.draftId)?.draftId || "";
+      if (!summary.nextReviewDraftId && needsReview === 0 && waiting === 0 && unresolvedFailures === 0 && openManualBlockers === 0) {
         setPendingReviewDraftId("");
-        setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: true });
+        setReviewQueueNavigation({ ...emptyReviewQueueNavigation(), complete: true });
         return;
       }
       const nextReviewDraftId = summary.nextReviewDraftId || pendingReviewDraftId;
@@ -1076,7 +1108,14 @@ const SocialMediaManager = () => {
       setReviewQueueNavigation({
         remainingReviewCount: Math.max(0, needsReview - (displayingNext ? 1 : 0)),
         waitingGenerationCount: waiting,
-        complete: !nextReviewDraftId && needsReview === 0 && waiting === 0,
+        unresolvedFailureCount: unresolvedFailures,
+        openManualBlockerCount: openManualBlockers,
+        firstFailureDraftId,
+        complete: !nextReviewDraftId
+          && needsReview === 0
+          && waiting === 0
+          && unresolvedFailures === 0
+          && openManualBlockers === 0,
       });
     };
     void poll();
@@ -1085,7 +1124,7 @@ const SocialMediaManager = () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [draft?.id, loadWorkSummary, pendingReviewDraftId, reviewDrawerOpen, reviewQueueNavigation.waitingGenerationCount, reviewSessionPlanId]);
+  }, [draft?.id, loadWorkSummary, pendingReviewDraftId, reviewDrawerOpen, reviewQueueNavigation.openManualBlockerCount, reviewQueueNavigation.unresolvedFailureCount, reviewQueueNavigation.waitingGenerationCount, reviewSessionPlanId]);
 
   const updateManualAction = async (
     action: SocialManualAction,
@@ -1260,6 +1299,65 @@ const SocialMediaManager = () => {
   const approvalDraftCount = actionableDraftCount(calendarDrafts);
   const activeManualActionCount = manualActions.filter((item) => ["OPEN", "IN_PROGRESS"].includes(item.status)).length;
   const weeklyLinked = Boolean(draft?.weeklyPlanId || weeklyPlan?.items.some((item) => item.draftId === draft?.id));
+  const companionStoryForDraft = draft?.bundleRole === "PARENT_FEED"
+    ? weeklyPlan?.storyPlan.find((story) => story.bundleRole === "COMPANION_STORY" && (
+      (draft.bundleId && story.bundleId === draft.bundleId)
+      || (draft.candidateId && story.parentCandidateId === draft.candidateId)
+    ))
+    : null;
+  useEffect(() => {
+    const requestNumber = companionDraftRequestRef.current + 1;
+    companionDraftRequestRef.current = requestNumber;
+    setCompanionDraft(null);
+    setCompanionDraftError("");
+    if (!reviewDrawerOpen || draft?.bundleRole !== "PARENT_FEED") {
+      setCompanionDraftLoading(false);
+      return;
+    }
+    if (!companionStoryForDraft?.draftId) {
+      setCompanionDraftLoading(false);
+      return;
+    }
+    setCompanionDraftLoading(true);
+    void apiFetch(`${API_BASE}/drafts/${encodeURIComponent(companionStoryForDraft.draftId)}`)
+      .then((response) => {
+        if (companionDraftRequestRef.current !== requestNumber) return;
+        const loaded = responseDraft(response);
+        if (!loaded || loaded.id !== companionStoryForDraft.draftId) throw new Error("The companion Story detail response was incomplete");
+        if (loaded.bundleRole !== "COMPANION_STORY" || (draft.bundleId && loaded.bundleId !== draft.bundleId)) {
+          throw new Error("The loaded Story does not belong to this feed bundle");
+        }
+        setCompanionDraft(loaded);
+      })
+      .catch((error) => {
+        if (companionDraftRequestRef.current !== requestNumber) return;
+        setCompanionDraftError(errorMessage(error, "Could not load the companion Story for final review"));
+      })
+      .finally(() => {
+        if (companionDraftRequestRef.current === requestNumber) setCompanionDraftLoading(false);
+      });
+  }, [companionStoryForDraft?.draftId, draft?.bundleId, draft?.bundleRole, draft?.id, reviewDrawerOpen]);
+  const companionCompliancePassed = companionDraft?.compliance?.passed === true
+    || String(companionDraft?.compliance?.decision || companionDraft?.compliance?.status || "").toUpperCase() === "PASS";
+  const companionHasFinalMedia = Boolean(companionDraft?.assets.some((asset) => (
+    !asset.role.toUpperCase().includes("ORIGINAL")
+    && Boolean(asset.finalUrl || asset.url)
+    && asset.status.toLowerCase() !== "invalid"
+    && asset.manualReviewStatus.toLowerCase() !== "rejected"
+  )));
+  const companionStoryReady = draft?.bundleRole !== "PARENT_FEED" || Boolean(
+    companionStoryForDraft?.draftId
+    && String(companionStoryForDraft.status).toUpperCase() === "NEEDS_REVIEW"
+    && companionDraft
+    && companionDraft.bundleRole === "COMPANION_STORY"
+    && String(companionDraft.status).toUpperCase() === "NEEDS_REVIEW"
+    && String(companionDraft.primary.format).toUpperCase() === "STORY"
+    && companionDraft.primary.storyFrames.length > 0
+    && companionCompliancePassed
+    && companionHasFinalMedia
+    && !companionDraftLoading
+    && !companionDraftError,
+  );
   const fallbackCommunityCount = communityItems.filter((item) => ["OPEN", "RECOMMENDED", "RECOMMENDATION_QUEUED", "RECOMMENDATION_PROCESSING", "SEND_UNCERTAIN", "ESCALATION_REQUIRED"].includes(String(item.status).toUpperCase())).length;
   const contentBreakdown = workSummary?.breakdown.content && typeof workSummary.breakdown.content === "object" ? workSummary.breakdown.content as Record<string, unknown> : {};
   const generatingWaitingCount = Number(contentBreakdown.generating_waiting || contentBreakdown.generatingWaiting || 0);
@@ -1299,6 +1397,10 @@ const SocialMediaManager = () => {
     onAdoptAlternative: adoptAlternative,
     onExport: exportPackage,
     weeklyLinked,
+    companionStoryReady,
+    companionDraft,
+    companionLoading: companionDraftLoading,
+    companionError: companionDraftError,
     reviewSupplementContent: draft && ["REEL", "VIDEO_FEED"].includes(String(draft.primary.format).toUpperCase()) ? <SocialAudioLibrary draft={draft} busy={busyAction === "audio-track"} onApplyToReel={(trackId) => void lifecycleAction("audio-track", { audio_track_id: trackId || null })} /> : null,
     defaultVisualMode: settings.defaultVisualMode,
   };
@@ -1309,7 +1411,7 @@ const SocialMediaManager = () => {
     if (!open) {
       setReviewSessionPlanId("");
       setPendingReviewDraftId("");
-      setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+      setReviewQueueNavigation(emptyReviewQueueNavigation());
     }
   };
 
@@ -1318,7 +1420,7 @@ const SocialMediaManager = () => {
     setReviewDrawerOpen(false);
     setReviewSessionPlanId("");
     setPendingReviewDraftId("");
-    setReviewQueueNavigation({ remainingReviewCount: 0, waitingGenerationCount: 0, complete: false });
+    setReviewQueueNavigation(emptyReviewQueueNavigation());
     setActiveTab("content");
     setContentView("calendar");
   };
@@ -1383,7 +1485,7 @@ const SocialMediaManager = () => {
           </details>
         </TabsContent>
       </Tabs>
-      <SocialDraftReviewDrawer open={reviewDrawerOpen && Boolean(draft)} onOpenChange={changeReviewDrawerOpen} draft={draft} todayProps={todayProps} queueNavigation={reviewQueueNavigation} onOpenCalendar={openReviewedCalendar} />
+      <SocialDraftReviewDrawer open={reviewDrawerOpen && Boolean(draft)} onOpenChange={changeReviewDrawerOpen} draft={draft} todayProps={todayProps} queueNavigation={reviewQueueNavigation} onOpenCalendar={openReviewedCalendar} onOpenFailureDraft={(draftId) => void openDraftById(draftId, true, reviewSessionPlanId)} />
     </>
   );
 };

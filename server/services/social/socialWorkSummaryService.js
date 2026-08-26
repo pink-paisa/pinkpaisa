@@ -247,6 +247,11 @@ async function getWorkSummary({ now = new Date(), weeklyPlanId = null, dependenc
       needs_review: contentNeedsReview,
       terminal_failure: contentTerminalFailure,
       open_manual_action: contentOpenManualActions,
+      unresolved_failure_or_blocker: contentTerminalFailure + contentOpenManualActions,
+      queue_complete_eligible: contentNeedsReview === 0
+        && contentGenerationWaiting === 0
+        && contentTerminalFailure === 0
+        && contentOpenManualActions === 0,
       generating_waiting: contentGenerationWaiting,
       priority_order: [...CONTENT_PRIORITY_ORDER],
       terminal_failure_items: contentFailureItems,

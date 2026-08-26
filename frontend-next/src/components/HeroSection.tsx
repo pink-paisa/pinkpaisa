@@ -39,9 +39,9 @@ const HeroSection = () => {
               transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
               className="mb-8 max-w-md text-lg leading-relaxed text-muted-foreground"
             >
-              Digital guides, workbooks, and challenges designed to help women
-              invest without stress, build wealth with clarity, and feel good
-              about every rupee.
+              Start with a free Wealthness Quiz, practical money calculators,
+              and carefully curated wellness finds for women building healthier
+              money habits.
             </motion.p>
             <motion.div
               variants={fadeUp}
@@ -49,10 +49,10 @@ const HeroSection = () => {
               className="flex flex-wrap gap-4"
             >
               <Button variant="hero" size="xl" asChild>
-                <a href="#products">Browse Products</a>
+                <Link href="/start-here">Start Here</Link>
               </Button>
               <Button variant="hero-outline" size="xl" asChild>
-                <Link href="/quiz">Take the WQ Quiz</Link>
+                <Link href="/quiz">Take the Wealthness Quiz</Link>
               </Button>
             </motion.div>
           </motion.div>

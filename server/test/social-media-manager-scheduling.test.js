@@ -8,6 +8,7 @@ const {
   requestGeneration,
   runDueSocialGeneration,
   scheduleDraft,
+  _private: { draftQueueNavigation },
 } = require("../services/social/socialManagerService");
 const { normalizeSocialManagerSettings } = require("../utils/socialManagerSettings");
 const { isInternalSocialOrchestrationSchedulerEnabled } = require("../services/dailyBatchScheduler");
@@ -531,6 +532,66 @@ function approvalSettings() {
   };
 }
 
+function approvableStoryDraftAndAsset({
+  draftId = "draft-companion-story-1",
+  candidateId = "candidate-companion-story-1",
+  bundleId = "weekly:weekly-plan-bundle-1:feed:candidate-parent-feed-1",
+  bundleRole = "COMPANION_STORY",
+} = {}) {
+  const draft = approvableDraft();
+  draft._id = draftId;
+  draft.generation_run_id = `run-${draftId}`;
+  draft.weekly_plan_id = "weekly-plan-bundle-1";
+  draft.candidate_id = candidateId;
+  draft.weekly_slot_number = bundleRole === "STANDALONE_STORY" ? 6 : 1;
+  draft.week_start = "2026-08-24";
+  draft.week_end = "2026-08-30";
+  draft.bundle_id = bundleId;
+  draft.bundle_role = bundleRole;
+  draft.parent_draft_id = null;
+  const recommendation = draft.current_package.primaryRecommendation;
+  recommendation.format = "STORY";
+  recommendation.caption = "";
+  recommendation.hashtags = [];
+  recommendation.onPostCopy = {
+    headline: null,
+    supportingCopy: null,
+    slides: [],
+    storyFrames: [{ frameNumber: 1, copy: "Choose one sustainable starting amount.", visualInstruction: "Warm editorial scene" }],
+    reelScenes: [],
+  };
+  recommendation.formatContent = {
+    format: "STORY",
+    frames: [{ frameNumber: 1, copy: "Choose one sustainable starting amount.", imagePrompt: "Warm editorial scene", overlayInstructions: "Exact approved copy" }],
+  };
+
+  const asset = approvableAsset();
+  asset._id = `asset-${draftId}`;
+  asset.social_format = "STORY";
+  const storyApprovedCopy = buildRenderItems(recommendation, "STORY")[0].approved_copy;
+  const storyApprovedCopyChecksum = crypto.createHash("sha256").update(stableStringify(storyApprovedCopy)).digest("hex");
+  asset.approved_copy_checksum_sha256 = storyApprovedCopyChecksum;
+  asset.overlay_json.approved_copy = storyApprovedCopy;
+  asset.overlay_json.approved_copy_checksum_sha256 = storyApprovedCopyChecksum;
+  asset.provenance.overlay.approved_copy_checksum_sha256 = storyApprovedCopyChecksum;
+  const storyContract = buildSocialCaptionContract(recommendation);
+  asset.provenance.caption_policy = {
+    method: "story_frame_overlay",
+    component_order: storyContract.component_order,
+    affiliate_disclosure_placement: "first_frame",
+    cta_placement: "final_frame",
+    financial_disclaimer_placement: "final_frame",
+    affiliate_disclosure_required: false,
+    cta_required: true,
+    financial_disclaimer_required: true,
+    instagram_caption_used: false,
+    caption_checksum_sha256: null,
+    caption_contract_valid: true,
+    caption_contract_violations: [],
+  };
+  return { draft, asset };
+}
+
 function weeklyApprovalHarness({
   plannedFor = "2026-08-25T05:30:00.000Z",
 } = {}) {
@@ -897,7 +958,233 @@ test("weekly approval uses the frozen slot when scheduled_for is omitted and ret
     next_review_draft_id: "draft-audio-repair",
     remaining_review_count: 2,
     waiting_generation_count: 2,
+    unresolved_failure_count: 0,
+    open_manual_blocker_count: 0,
+    first_failure_draft_id: null,
   });
+});
+
+test("weekly queue navigation never reports completion while another creative failed or a manual blocker is open", async () => {
+  const plan = {
+    _id: "weekly-plan-mixed-outcome",
+    selected_posts: [{
+      candidateId: "scheduled-feed",
+      slotNumber: 1,
+      status: "SCHEDULED",
+      draft_id: "draft-scheduled",
+    }, {
+      candidateId: "failed-feed",
+      slotNumber: 2,
+      status: "FAILED",
+      draft_id: "draft-failed",
+    }],
+    story_plan: [],
+  };
+  const navigation = await draftQueueNavigation({
+    _id: "draft-scheduled",
+    weekly_plan_id: plan._id,
+  }, {
+    PlanModel: { findById: async () => plan },
+    DraftModel: {
+      find: () => ({
+        select: () => ({
+          lean: async () => [{ _id: "draft-scheduled", status: "SCHEDULED" }, { _id: "draft-failed", status: "FAILED" }],
+        }),
+      }),
+    },
+    ManualActionModel: { countDocuments: async () => 1 },
+  });
+
+  assert.deepEqual(navigation, {
+    next_review_draft_id: null,
+    remaining_review_count: 0,
+    waiting_generation_count: 0,
+    unresolved_failure_count: 1,
+    open_manual_blocker_count: 1,
+    first_failure_draft_id: "draft-failed",
+  });
+});
+
+test("parent feed approval atomically schedules its reviewed companion Story and reuses the request", async () => {
+  const parent = approvableDraft();
+  parent._id = "draft-parent-feed-1";
+  parent.weekly_plan_id = "weekly-plan-bundle-1";
+  parent.candidate_id = "candidate-parent-feed-1";
+  parent.weekly_slot_number = 1;
+  parent.week_start = "2026-08-24";
+  parent.week_end = "2026-08-30";
+  parent.bundle_id = "weekly:weekly-plan-bundle-1:feed:candidate-parent-feed-1";
+  parent.bundle_role = "PARENT_FEED";
+  const parentAsset = approvableAsset();
+  parentAsset._id = "asset-parent-feed-1";
+  const { draft: companion, asset: companionAsset } = approvableStoryDraftAndAsset({ bundleId: parent.bundle_id });
+  const scheduledFor = new Date("2026-08-25T05:30:00.000Z");
+  const plan = {
+    _id: parent.weekly_plan_id,
+    week_start: parent.week_start,
+    week_end: parent.week_end,
+    timezone: "Asia/Kolkata",
+    selected_posts: [{
+      candidateId: parent.candidate_id,
+      slotNumber: 1,
+      scheduledFor,
+      status: "NEEDS_REVIEW",
+      draft_id: parent._id,
+      bundleId: parent.bundle_id,
+      bundleRole: "PARENT_FEED",
+    }],
+    story_plan: [{
+      candidateId: companion.candidate_id,
+      parentCandidateId: parent.candidate_id,
+      slotNumber: 1,
+      scheduledFor,
+      status: "NEEDS_REVIEW",
+      draft_id: companion._id,
+      parent_draft_id: null,
+      bundleId: parent.bundle_id,
+      bundleRole: "COMPANION_STORY",
+    }],
+    async save() { return this; },
+  };
+  const assets = new Map([[String(parent._id), parentAsset], [String(companion._id), companionAsset]]);
+  const audits = [];
+  let capacityChecks = 0;
+  let transactionRuns = 0;
+  const session = {
+    async withTransaction(work) { transactionRuns += 1; await work(); },
+    async endSession() {},
+  };
+  const dependencies = {
+    startSession: async () => session,
+    SocialPostDraft: {
+      findById: async (id) => String(id) === String(parent._id) ? parent : String(id) === String(companion._id) ? companion : null,
+      findOne: async (query) => query.bundle_role === "COMPANION_STORY"
+        && String(query.weekly_plan_id) === String(parent.weekly_plan_id)
+        && String(query.bundle_id) === String(parent.bundle_id)
+        ? companion
+        : null,
+      find: async () => [],
+    },
+    SocialAsset: {
+      find: async (query) => assets.has(String(query.draft_id)) ? [assets.get(String(query.draft_id))] : [],
+      updateMany: async (query) => {
+        for (const asset of assets.values()) {
+          if (query._id.$in.map(String).includes(String(asset._id))) asset.manual_review_status = "approved";
+        }
+      },
+    },
+    SocialWeeklyPlan: { findById: async () => plan },
+    SocialAuditLog: {
+      async create(records) {
+        const record = Array.isArray(records) ? records[0] : records;
+        audits.push(record);
+        return Array.isArray(records) ? [record] : record;
+      },
+    },
+    getSocialManagerSettings: async () => approvalSettings(),
+    assertWeeklyPublicationCapacity: async () => { capacityChecks += 1; },
+    syncWeeklyPlanFromDraft: async (changedDraft, { status }) => {
+      const collection = changedDraft.bundle_role === "COMPANION_STORY" ? plan.story_plan : plan.selected_posts;
+      const item = collection.find((entry) => entry.candidateId === changedDraft.candidate_id);
+      item.status = status;
+      item.parent_draft_id = changedDraft.parent_draft_id || item.parent_draft_id;
+      return plan;
+    },
+    getDraftDetail: async (id) => {
+      const value = String(id) === String(parent._id) ? parent : companion;
+      return { id: value._id, status: value.status, bundle_role: value.bundle_role, parent_draft_id: value.parent_draft_id || null };
+    },
+  };
+
+  const first = await approveAndScheduleDraft(parent._id, undefined, {
+    actor: { _id: "admin-1" },
+    now: new Date("2026-08-24T04:00:00.000Z"),
+    requestKey: "approve-parent-with-companion-1",
+    includeCompanionStory: true,
+    dependencies,
+  });
+
+  assert.equal(transactionRuns, 1);
+  assert.equal(capacityChecks, 1);
+  assert.equal(parent.status, "SCHEDULED");
+  assert.equal(companion.status, "SCHEDULED");
+  assert.equal(companion.parent_draft_id, parent._id);
+  assert.equal(parent.scheduled_for.toISOString(), scheduledFor.toISOString());
+  assert.equal(companion.scheduled_for.toISOString(), scheduledFor.toISOString());
+  assert.equal(parentAsset.manual_review_status, "approved");
+  assert.equal(companionAsset.manual_review_status, "approved");
+  assert.deepEqual(audits.map((entry) => `${entry.entity_id}:${entry.action}`), [
+    `${parent._id}:APPROVED`,
+    `${parent._id}:SCHEDULED`,
+    `${companion._id}:APPROVED`,
+    `${companion._id}:SCHEDULED`,
+  ]);
+  assert.equal(first.companion_story.id, companion._id);
+  assert.deepEqual(first.queue_navigation, {
+    next_review_draft_id: null,
+    remaining_review_count: 0,
+    waiting_generation_count: 0,
+    unresolved_failure_count: 0,
+    open_manual_blocker_count: 0,
+    first_failure_draft_id: null,
+  });
+
+  const second = await approveAndScheduleDraft(parent._id, undefined, {
+    actor: { _id: "admin-1" },
+    now: new Date("2026-08-24T04:00:00.000Z"),
+    requestKey: "approve-parent-with-companion-1",
+    includeCompanionStory: true,
+    dependencies,
+  });
+  assert.equal(second.reused, true);
+  assert.equal(transactionRuns, 2);
+  assert.equal(capacityChecks, 1);
+  assert.equal(audits.length, 4);
+});
+
+test("a parent feed cannot mutate when its companion Story is not yet reviewable", async () => {
+  const parent = approvableDraft();
+  parent.weekly_plan_id = "weekly-plan-bundle-not-ready";
+  parent.candidate_id = "candidate-parent-not-ready";
+  parent.weekly_slot_number = 1;
+  parent.week_start = "2026-08-24";
+  parent.week_end = "2026-08-30";
+  parent.bundle_id = "weekly:weekly-plan-bundle-not-ready:feed:candidate-parent-not-ready";
+  parent.bundle_role = "PARENT_FEED";
+  const asset = approvableAsset();
+  const plan = {
+    _id: parent.weekly_plan_id,
+    week_start: parent.week_start,
+    week_end: parent.week_end,
+    timezone: "Asia/Kolkata",
+    selected_posts: [{ candidateId: parent.candidate_id, slotNumber: 1, scheduledFor: new Date("2026-08-25T05:30:00.000Z"), status: "NEEDS_REVIEW", draft_id: parent._id }],
+    story_plan: [],
+  };
+  let assetReviews = 0;
+  let saves = 0;
+  parent.save = async function save() { saves += 1; return this; };
+  const audits = [];
+  await assert.rejects(
+    () => approveAndScheduleDraft(parent._id, undefined, {
+      actor: { _id: "admin-1" },
+      now: new Date("2026-08-24T04:00:00.000Z"),
+      includeCompanionStory: true,
+      dependencies: {
+        SocialPostDraft: { findById: async () => parent, findOne: async () => null },
+        SocialAsset: { find: async () => [asset], updateMany: async () => { assetReviews += 1; } },
+        SocialWeeklyPlan: { findById: async () => plan },
+        SocialAuditLog: { create: async (record) => { audits.push(record); return record; } },
+        getSocialManagerSettings: async () => approvalSettings(),
+      },
+    }),
+    (error) => error.code === "social_companion_story_not_ready",
+  );
+  assert.equal(parent.status, "NEEDS_REVIEW");
+  assert.equal(parent.scheduled_for, null);
+  assert.equal(asset.manual_review_status, "pending");
+  assert.equal(assetReviews, 0);
+  assert.equal(saves, 0);
+  assert.equal(audits.length, 0);
 });
 
 test("a supplied weekly time equal to the frozen slot does not require an override reason", async () => {

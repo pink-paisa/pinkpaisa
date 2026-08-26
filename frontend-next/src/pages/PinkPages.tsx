@@ -231,20 +231,16 @@ const PinkPages = () => {
               List your business on Pink Pages
             </h2>
             <p className="mb-6 text-muted-foreground">
-              Join a community of enterprising women. Register for free or go
-              premium for featured placement and verified badges.
+              Join a community of enterprising women. Free submissions are
+              reviewed before anything appears publicly.
             </p>
-            <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+            <div className="flex justify-center">
               <Button variant="hero" size="xl" asChild>
-                <Link href="/pink-pages/submit?plan=free">Register Free</Link>
-              </Button>
-              <Button variant="hero-outline" size="xl" asChild>
-                <Link href="/pink-pages/submit?plan=premium">Go Premium - Rs 999/yr</Link>
+                <Link href="/pink-pages/submit">Submit a Free Listing</Link>
               </Button>
             </div>
             <p className="mt-4 text-xs text-muted-foreground">
-              Premium includes: featured listing, verified badge, priority in
-              search, and analytics dashboard.
+              Paid plans are unavailable until billing, entitlement, and reporting are fully operational.
             </p>
           </div>
         </div>

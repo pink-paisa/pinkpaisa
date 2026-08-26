@@ -172,6 +172,50 @@ describe("SocialDraftReviewDrawer", () => {
     expect(onOpenCalendar).toHaveBeenCalledOnce();
   });
 
+  it("does not declare the weekly queue complete while a creative failed and exposes its retry path", async () => {
+    const user = userEvent.setup();
+    const draft = fixture();
+    const onOpenFailureDraft = vi.fn();
+    render(<SocialDraftReviewDrawer
+      open
+      onOpenChange={vi.fn()}
+      draft={draft}
+      todayProps={{
+        draft,
+        previousDraft: null,
+        generationRun: null,
+        readiness: EMPTY_READINESS,
+        loading: false,
+        generating: false,
+        busyAction: "",
+        dirty: false,
+        loadError: "",
+        onGenerate: vi.fn(),
+        onReload: vi.fn(),
+        onRecommendationChange: vi.fn(),
+        onScheduleChange: vi.fn(),
+        onSave: vi.fn(),
+        onAction: vi.fn(),
+        onAdoptAlternative: vi.fn(),
+        onExport: vi.fn(),
+      }}
+      queueNavigation={{
+        remainingReviewCount: 0,
+        waitingGenerationCount: 0,
+        unresolvedFailureCount: 1,
+        openManualBlockerCount: 0,
+        firstFailureDraftId: "draft-failed-weekly",
+        complete: false,
+      }}
+      onOpenFailureDraft={onOpenFailureDraft}
+    />);
+
+    expect(screen.queryByText("All weekly creatives reviewed")).not.toBeInTheDocument();
+    expect(screen.getByText(/blocked by 1 failed creative/)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry failed creative" }));
+    expect(onOpenFailureDraft).toHaveBeenCalledWith("draft-failed-weekly");
+  });
+
   it("labels a weekly proposal as a frozen India-time slot before scheduling", () => {
     const draft = { ...fixture(), weeklyPlanId: "weekly-review", scheduledFor: "2026-09-01T12:30:00.000Z" };
     render(<SocialDraftReviewDrawer

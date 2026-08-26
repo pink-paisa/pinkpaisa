@@ -16,6 +16,8 @@ import {
 import { toast } from "sonner";
 import { ArrowLeft } from "lucide-react";
 import { motion } from "framer-motion";
+import { getMarketingAttribution } from "@/lib/marketingAttribution";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 const formatPrice = (n: number) => `${String.fromCharCode(8377)}${Number(n).toLocaleString("en-IN")}`;
 
@@ -108,15 +110,19 @@ const WorkshopBooking = () => {
           notes: form.notes || null,
           recording_addon: form.recording_addon,
           certification_addon: form.certification_addon,
+          attribution: getMarketingAttribution(),
         }),
       });
-      if (!booking.checkout_url || !booking.merchant_order_id) {
+      if (!booking.checkout_url || !booking.merchant_order_id || !booking.verification_secret) {
         throw new Error("Workshop payment session could not be created");
       }
       sessionStorage.setItem("phonepe_pending_workshop_booking", JSON.stringify({
         booking_id: booking.id,
         merchant_order_id: booking.merchant_order_id,
+        verification_secret: booking.verification_secret,
+        receipt_token: booking.receipt_token || null,
       }));
+      trackAnalyticsEvent("begin_checkout", { value: total, currency: "INR", item_category: "workshop" });
       window.location.assign(booking.checkout_url);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to place booking");

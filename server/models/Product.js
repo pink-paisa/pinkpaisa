@@ -8,6 +8,7 @@ const ProductImageSchema = new mongoose.Schema({
 
 const ProductSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
+  editorial_title: { type: String, default: null, trim: true, maxlength: 120 },
   slug: { type: String, required: true, trim: true, unique: true },
   short_description: { type: String, default: null },
   full_description: { type: String, default: null },
@@ -113,7 +114,7 @@ const ProductSchema = new mongoose.Schema({
   affiliate_link_last_checked_at: { type: Date, default: null },
   affiliate_link_check_status: {
     type: String,
-    enum: ["unchecked", "ok", "failed", "paused", null],
+    enum: ["unchecked", "ok", "indeterminate", "failed", "paused", null],
     default: "unchecked",
     index: true,
   },

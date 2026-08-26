@@ -221,9 +221,11 @@ function prepareVerifiedCandidate(candidate = {}, internalSignals = {}, generati
   if (product.is_affiliate && (
     product.compliance_status !== "compliant"
     || !product.verified_affiliate_url
+    || product.affiliate_is_instagram_pick !== true
+    || product.affiliate_link_check_status !== "ok"
     || !["admin_confirmed", "owned", "licensed", "api_permitted"].includes(product.usage_rights_status)
   )) {
-    return { ...candidate, server_rejection_reason: "The selected affiliate product is not compliance-cleared with a verified URL and rights-cleared image." };
+    return { ...candidate, server_rejection_reason: "The selected affiliate product must be an approved Instagram pick with link health exactly ok, a verified URL, compliant status, and rights-cleared image." };
   }
   return {
     ...candidate,

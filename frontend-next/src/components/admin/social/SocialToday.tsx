@@ -88,6 +88,10 @@ type SocialTodayProps = {
   reviewAdvancedContent?: ReactNode;
   reviewSupplementContent?: ReactNode;
   weeklyLinked?: boolean;
+  companionStoryReady?: boolean;
+  companionDraft?: SocialDraft | null;
+  companionLoading?: boolean;
+  companionError?: string;
   defaultVisualMode?: SocialVisualMode;
 };
 
@@ -590,6 +594,7 @@ const CreativePreview = ({
   showProvenance = true,
   compactReview = false,
   mediaSupplement = null,
+  readOnly = false,
 }: {
   draft: SocialDraft;
   onExport: () => void;
@@ -597,6 +602,7 @@ const CreativePreview = ({
   showProvenance?: boolean;
   compactReview?: boolean;
   mediaSupplement?: ReactNode;
+  readOnly?: boolean;
 }) => {
   const recommendation = draft.primary;
   const originalAsset = draft.assets.find((asset) => asset.originalUrl || asset.role.toUpperCase().includes("ORIGINAL"));
@@ -733,10 +739,10 @@ const CreativePreview = ({
           ) : (
             <p className="text-xs text-muted-foreground">No landing page is attached to this post.</p>
           )}
-          <div className="grid grid-cols-2 gap-2">
+          {!readOnly ? <div className="grid grid-cols-2 gap-2">
             <Button variant="outline" onClick={() => void copyCaption()}><Clipboard className="h-4 w-4" /> Copy package</Button>
             <Button variant="outline" onClick={onExport}><Download className="h-4 w-4" /> Export JSON</Button>
-          </div>
+          </div> : null}
         </CardContent>
       </Card>
     </div>
@@ -1022,6 +1028,7 @@ const LifecycleActions = ({
   onAction,
   generationRun,
   weeklyLinked = false,
+  companionStoryReady = true,
 }: {
   draft: SocialDraft;
   readiness: SocialReadiness;
@@ -1031,6 +1038,7 @@ const LifecycleActions = ({
   onAction: SocialTodayProps["onAction"];
   generationRun: SocialGenerationRun | null;
   weeklyLinked?: boolean;
+  companionStoryReady?: boolean;
 }) => {
   const [scheduleOverrideOpen, setScheduleOverrideOpen] = useState(false);
   const [scheduleOverrideReason, setScheduleOverrideReason] = useState("");
@@ -1084,6 +1092,7 @@ const LifecycleActions = ({
     || (workflow.primaryAction === "submit-review" && !canSubmit)
     || (workflow.primaryAction === "generate-creative" && working)
     || (workflow.primaryAction === "approve-and-schedule" && (approvalBlockers.length > 0 || (!weeklyLinked && !draft.scheduledFor)))
+    || (workflow.primaryAction === "approve-and-schedule" && draft.bundleRole === "PARENT_FEED" && !companionStoryReady)
     || (workflow.primaryAction === "approve-and-schedule" && scheduleOverrideOpen && (!scheduleOverrideChanged || !scheduleOverrideReason.trim()))
     || (workflow.primaryAction === "schedule" && !canSchedule);
   const runPrimary = () => {
@@ -1092,8 +1101,8 @@ const LifecycleActions = ({
     if (workflow.primaryAction === "generate-creative") return onAction("regenerate", { scope: "image" });
     if (workflow.primaryAction === "approve-and-schedule") return onAction("approve-and-schedule", weeklyLinked
       ? scheduleOverrideOpen
-        ? { scheduled_for: requestedScheduleOverride, schedule_override_reason: scheduleOverrideReason.trim() }
-        : {}
+        ? { scheduled_for: requestedScheduleOverride, schedule_override_reason: scheduleOverrideReason.trim(), ...(draft.bundleRole === "PARENT_FEED" ? { include_companion_story: true } : {}) }
+        : draft.bundleRole === "PARENT_FEED" ? { include_companion_story: true } : {}
       : { scheduled_for: draft.scheduledFor });
     if (workflow.primaryAction === "schedule") return onAction("schedule");
     if (workflow.primaryAction === "retry-generation-run") return onAction("retry-run");
@@ -1107,6 +1116,7 @@ const LifecycleActions = ({
           {workflow.primaryAction !== "none" && !["view-calendar", "view-results", "complete-manual-action"].includes(workflow.primaryAction) ? <Button onClick={runPrimary} disabled={primaryDisabled}><>{busyIcon(workflow.primaryAction) || (workflow.primaryAction === "save" ? <Save className="h-4 w-4" /> : workflow.primaryAction === "approve-and-schedule" || workflow.primaryAction === "schedule" ? <CalendarClock className="h-4 w-4" /> : workflow.primaryAction === "generate-creative" ? <Sparkles className="h-4 w-4" /> : <Check className="h-4 w-4" />)}</> {workflow.label}</Button> : <Badge variant="outline">{workflow.label}</Badge>}
           {canReject ? <Button variant="ghost" onClick={() => onAction("reject")} disabled={working} className="text-destructive"><>{busyIcon("reject") || <X className="h-4 w-4" />}</> Reject</Button> : null}
         </div>
+        {weeklyLinked && status === "NEEDS_REVIEW" && draft.bundleRole === "PARENT_FEED" ? <div className="mt-3 rounded-xl border border-primary/15 bg-primary/[0.03] p-3 text-sm"><span className="font-medium">Companion Story included</span><span className="mt-1 block text-xs text-muted-foreground">{companionStoryReady ? "The feed and companion Story shown above will be preflighted and committed in one transaction. If either fails, neither is approved." : "The companion Story is still loading or generating. This feed waits so the final approval remains one atomic decision."}</span></div> : null}
         {weeklyLinked && status === "NEEDS_REVIEW" ? <details className="mt-3 rounded-xl border border-border/70 p-3" open={scheduleOverrideOpen} onToggle={(event) => setScheduleOverrideOpen(event.currentTarget.open)}><summary className="cursor-pointer text-xs font-medium text-primary">Advanced · change frozen time</summary><div className="mt-3 grid gap-3 sm:grid-cols-2"><Field label="New posting date and time" hint="Must remain in this Asia/Kolkata plan week."><Input type="datetime-local" value={toDateTimeLocal(scheduleOverrideFor)} onChange={(event) => setScheduleOverrideFor(event.target.value)} /></Field><Field label="Required override reason" hint="Stored in the immutable audit trail."><Textarea rows={2} value={scheduleOverrideReason} onChange={(event) => setScheduleOverrideReason(event.target.value)} /></Field></div>{scheduleOverrideOpen && !scheduleOverrideChanged ? <p className="mt-2 text-xs text-amber-700">Choose a different Asia/Kolkata posting time to create an override.</p> : null}</details> : null}
         {status === "SCHEDULED" ? <details className="mt-3 rounded-xl border border-border/70 p-3"><summary className="cursor-pointer text-xs font-medium text-primary">Advanced · publishing override</summary><div className="mt-3"><Button size="sm" variant="outline" onClick={() => onAction("publish")} disabled={!canPublish || working}><Send className="h-4 w-4" /> Publish now</Button>{!canPublish && publicationBlockers.length ? <p className="mt-2 text-xs text-muted-foreground">Unavailable: {publicationBlockers.join(" · ")}</p> : null}</div></details> : null}
         {dirty ? <p className="mt-2 text-xs text-amber-700">Save edits and recheck before approving, scheduling or publishing.</p> : null}
@@ -1144,6 +1154,10 @@ export const SocialToday = ({
   reviewAdvancedContent = null,
   reviewSupplementContent = null,
   weeklyLinked = false,
+  companionStoryReady = true,
+  companionDraft = null,
+  companionLoading = false,
+  companionError = "",
   defaultVisualMode = "FULL_AI_GRAPHIC",
 }: SocialTodayProps) => {
   const [formatPreference, setFormatPreference] = useState<SocialFormatPreference>("AUTO_CHOOSE");
@@ -1235,18 +1249,19 @@ export const SocialToday = ({
           <CreativePreview draft={draft} onExport={onExport} onAction={onAction} showProvenance={false} compactReview mediaSupplement={reviewSupplementContent} />
           <CompliancePanel draft={draft} />
           <ReadinessNotice readiness={readiness} />
+          {draft.bundleRole === "PARENT_FEED" ? <section aria-label="Companion Story final review" className="space-y-4 rounded-3xl border border-primary/20 bg-primary/[0.025] p-4 sm:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">Bundled final review</p><h3 className="mt-1 font-serif text-2xl">Companion Story</h3><p className="mt-1 text-sm text-muted-foreground">Review this complete Story media set and on-frame text before the single atomic approval.</p></div><Badge variant={companionStoryReady ? "default" : "secondary"}>{companionStoryReady ? "Ready for bundled approval" : "Waiting"}</Badge></div>{companionLoading ? <div className="flex min-h-40 items-center justify-center gap-2 rounded-2xl border border-dashed text-sm text-muted-foreground"><Loader2 className="h-5 w-5 animate-spin" /> Loading companion Story for review</div> : companionError ? <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Companion Story is not reviewable</AlertTitle><AlertDescription>{companionError}</AlertDescription></Alert> : companionDraft ? <div className="space-y-4"><CreativePreview draft={companionDraft} onExport={onExport} onAction={onAction} showProvenance={false} compactReview readOnly /><CompliancePanel draft={companionDraft} /></div> : <div className="rounded-2xl border border-dashed p-6 text-sm text-muted-foreground">The companion Story is still generating. Final approval unlocks only after its complete media and copy can be reviewed here.</div>}</section> : null}
           {editableDraft ? <details className="rounded-3xl border border-border bg-card p-5"><summary className="cursor-pointer text-sm font-semibold">Edit content</summary><div className="mt-5"><ContentEditor draft={draft} onChange={onRecommendationChange} onScheduleChange={onScheduleChange} scheduleEditable={!weeklyLinked} /></div></details> : null}
           <details className="rounded-3xl border border-border bg-card p-5"><summary className="cursor-pointer text-sm font-semibold">Strategy, sources and readiness detail</summary><div className="mt-5"><RecommendationSummary draft={draft} /></div></details>
           <CreativeProvenancePanel draft={draft} />
           {generationRun && (generating || String(generationRun.status).startsWith("FAILED") || generationRun.status === "RUNNING") ? <GenerationRunPanel run={generationRun} generating={generating} onRetry={() => onAction("retry-run")} /> : generationRun ? <details className="rounded-3xl border border-border bg-card p-5"><summary className="cursor-pointer text-sm font-semibold">Advanced · generation run and cost</summary><div className="mt-5"><GenerationRunPanel run={generationRun} generating={generating} onRetry={() => onAction("retry-run")} /></div></details> : null}
           {advancedDraftControls}
           {reviewAdvancedContent}
-          <LifecycleActions key={draft.id} draft={draft} readiness={readiness} dirty={dirty} busyAction={busyAction} onSave={onSave} onAction={onAction} generationRun={generationRun} weeklyLinked={weeklyLinked} />
+          <LifecycleActions key={draft.id} draft={draft} readiness={readiness} dirty={dirty} busyAction={busyAction} onSave={onSave} onAction={onAction} generationRun={generationRun} weeklyLinked={weeklyLinked} companionStoryReady={companionStoryReady} />
         </> : <>
           <RecommendationSummary draft={draft} />
           <CompliancePanel draft={draft} />
           {editableDraft ? <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(340px,0.75fr)]"><ContentEditor draft={draft} onChange={onRecommendationChange} onScheduleChange={onScheduleChange} scheduleEditable={!weeklyLinked} /><CreativePreview draft={draft} onExport={onExport} onAction={onAction} /></div> : <CreativePreview draft={draft} onExport={onExport} onAction={onAction} />}
-          <LifecycleActions key={draft.id} draft={draft} readiness={readiness} dirty={dirty} busyAction={busyAction} onSave={onSave} onAction={onAction} generationRun={generationRun} weeklyLinked={weeklyLinked} />
+          <LifecycleActions key={draft.id} draft={draft} readiness={readiness} dirty={dirty} busyAction={busyAction} onSave={onSave} onAction={onAction} generationRun={generationRun} weeklyLinked={weeklyLinked} companionStoryReady={companionStoryReady} />
           {advancedDraftControls}
           <AlternativeIdeas draft={draft} onAdopt={onAdoptAlternative} />
         </>

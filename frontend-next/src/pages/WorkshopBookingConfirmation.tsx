@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
 import { apiFetch } from "@/lib/api";
@@ -8,9 +8,11 @@ import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { motion } from "framer-motion";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 const MAX_POLL_ATTEMPTS = 20;
 const POLL_INTERVAL_MS = 3000;
+const receiptSessionKey = (bookingId: string) => `pinkpaisa_workshop_receipt:${bookingId}`;
 
 type BookingStatus = "loading" | "processing" | "success" | "failed" | "error";
 
@@ -19,27 +21,72 @@ const formatPrice = (n: number) => `${String.fromCharCode(8377)}${Number(n).toLo
 const WorkshopBookingConfirmation = () => {
   const router = useRouter();
   const bookingId = typeof router.query.bookingId === "string" ? router.query.bookingId : "";
+  const queryReceiptToken = typeof router.query.t === "string" ? router.query.t.trim() : "";
+  const queryMerchantOrderId = typeof router.query.merchantOrderId === "string"
+    ? router.query.merchantOrderId.trim()
+    : "";
+  const [receiptToken, setReceiptToken] = useState("");
+  const [merchantOrderId, setMerchantOrderId] = useState<string | null>(null);
+  const [verificationSecret, setVerificationSecret] = useState("");
+  const [sensitiveQueryReady, setSensitiveQueryReady] = useState(false);
+  const consumedBookingIdRef = useRef("");
   const [booking, setBooking] = useState<any>(null);
   const [status, setStatus] = useState<BookingStatus>("loading");
   const [message, setMessage] = useState("Please wait while we confirm your workshop payment.");
   const [errorMessage, setErrorMessage] = useState("We couldn't confirm this workshop payment yet. If the payment succeeds, we'll email you shortly.");
 
-  const merchantOrderId = useMemo(() => {
-    if (typeof router.query.merchantOrderId === "string" && router.query.merchantOrderId.trim()) {
-      return router.query.merchantOrderId.trim();
-    }
-    if (typeof window === "undefined") return null;
-    try {
-      const stored = JSON.parse(sessionStorage.getItem("phonepe_pending_workshop_booking") || "null");
-      if (stored?.booking_id === bookingId) return String(stored.merchant_order_id || "").trim() || null;
-    } catch {
-      return null;
-    }
-    return null;
-  }, [bookingId, router.query.merchantOrderId]);
-
   useEffect(() => {
     if (!router.isReady || !bookingId) return;
+    if (consumedBookingIdRef.current === bookingId) return;
+    consumedBookingIdRef.current = bookingId;
+    let storedReceiptToken = "";
+    let storedMerchantOrderId = "";
+    let storedVerificationSecret = "";
+    try {
+      const storedReceipt = JSON.parse(sessionStorage.getItem(receiptSessionKey(bookingId)) || "null");
+      const pending = JSON.parse(sessionStorage.getItem("phonepe_pending_workshop_booking") || "null");
+      storedReceiptToken = String(
+        storedReceipt?.receipt_token
+          || (pending?.booking_id === bookingId ? pending.receipt_token : "")
+          || "",
+      ).trim();
+      storedMerchantOrderId = String(
+        storedReceipt?.merchant_order_id
+          || (pending?.booking_id === bookingId ? pending.merchant_order_id : "")
+          || "",
+      ).trim();
+      storedVerificationSecret = String(
+        storedReceipt?.verification_secret
+          || (pending?.booking_id === bookingId ? pending.verification_secret : "")
+          || "",
+      ).trim();
+    } catch {
+      storedReceiptToken = "";
+      storedMerchantOrderId = "";
+      storedVerificationSecret = "";
+    }
+    const nextReceiptToken = queryReceiptToken || storedReceiptToken;
+    const nextMerchantOrderId = queryMerchantOrderId || storedMerchantOrderId;
+    if (queryReceiptToken || queryMerchantOrderId) {
+      try {
+        sessionStorage.setItem(receiptSessionKey(bookingId), JSON.stringify({
+          receipt_token: nextReceiptToken || null,
+          merchant_order_id: nextMerchantOrderId || null,
+          verification_secret: storedVerificationSecret || null,
+        }));
+      } catch {
+        // Component state still keeps the one-time credentials for this visit.
+      }
+      void router.replace(`/workshop-booking-confirmation/${encodeURIComponent(bookingId)}`, undefined, { shallow: true });
+    }
+    setReceiptToken(nextReceiptToken);
+    setMerchantOrderId(nextMerchantOrderId || null);
+    setVerificationSecret(storedVerificationSecret);
+    setSensitiveQueryReady(true);
+  }, [bookingId, queryMerchantOrderId, queryReceiptToken, router]);
+
+  useEffect(() => {
+    if (!router.isReady || !bookingId || !sensitiveQueryReady) return;
     let cancelled = false;
     let pollIntervalId: number | null = null;
 
@@ -56,14 +103,35 @@ const WorkshopBookingConfirmation = () => {
         if (!stored || stored.booking_id === bookingId) {
           sessionStorage.removeItem("phonepe_pending_workshop_booking");
         }
+        sessionStorage.removeItem(receiptSessionKey(bookingId));
       } catch {
-        sessionStorage.removeItem("phonepe_pending_workshop_booking");
+        try {
+          sessionStorage.removeItem("phonepe_pending_workshop_booking");
+          sessionStorage.removeItem(receiptSessionKey(bookingId));
+        } catch {
+          // Storage cleanup must not change a verified payment result.
+        }
       }
+    };
+
+    const trackPaidBooking = (value: any) => {
+      if (!value || value.payment_status !== "paid") return;
+      const analyticsKey = `pinkpaisa_purchase_tracked:workshop:${bookingId}`;
+      if (localStorage.getItem(analyticsKey)) return;
+      const tracked = trackAnalyticsEvent("purchase", {
+        transaction_id: `workshop:${bookingId}`,
+        value: Number(value.total || 0),
+        currency: "INR",
+        item_category: "workshop",
+      });
+      if (tracked) localStorage.setItem(analyticsKey, "true");
     };
 
     const fetchBooking = async () => {
       try {
-        const data = await apiFetch<any>(`/workshop-bookings/${bookingId}`);
+        const data = await apiFetch<any>(`/workshop-bookings/${bookingId}`, receiptToken ? {
+          headers: { "X-Workshop-Receipt-Token": receiptToken },
+        } : {});
         if (!cancelled) setBooking(data);
         return data;
       } catch {
@@ -82,6 +150,7 @@ const WorkshopBookingConfirmation = () => {
       clearPendingSession();
       setBooking(fresh);
       setStatus("success");
+      trackPaidBooking(fresh);
     };
 
     const handleFailure = (nextStatus: "failed" | "error", nextMessage: string, clearSession = true) => {
@@ -98,6 +167,7 @@ const WorkshopBookingConfirmation = () => {
       if (freshBooking.payment_status === "paid") {
         clearPendingSession();
         setStatus("success");
+        trackPaidBooking(freshBooking);
         return;
       }
       if (["failed", "cancelled"].includes(String(freshBooking.payment_status || ""))) {
@@ -113,6 +183,9 @@ const WorkshopBookingConfirmation = () => {
       try {
         const result = await apiFetch<any>("/phonepe/verify-payment", {
           method: "POST",
+          headers: verificationSecret
+            ? { "X-Payment-Verification-Secret": verificationSecret }
+            : {},
           body: JSON.stringify({ merchant_order_id: merchantOrderId }),
         });
 
@@ -126,7 +199,7 @@ const WorkshopBookingConfirmation = () => {
           return;
         }
 
-        if (["MISSING", "EXPIRED"].includes(result.status)) {
+        if (["MISSING", "EXPIRED", "UNAVAILABLE"].includes(result.status)) {
           handleFailure("error", "This workshop payment session expired. Please start the booking again.");
           return;
         }
@@ -142,6 +215,9 @@ const WorkshopBookingConfirmation = () => {
           try {
             const pollResult = await apiFetch<any>("/phonepe/verify-payment", {
               method: "POST",
+              headers: verificationSecret
+                ? { "X-Payment-Verification-Secret": verificationSecret }
+                : {},
               body: JSON.stringify({ merchant_order_id: merchantOrderId }),
             });
 
@@ -157,7 +233,7 @@ const WorkshopBookingConfirmation = () => {
               return;
             }
 
-            if (["MISSING", "EXPIRED"].includes(pollResult.status)) {
+            if (["MISSING", "EXPIRED", "UNAVAILABLE"].includes(pollResult.status)) {
               stopPolling();
               handleFailure("error", "This workshop payment session expired. Please start the booking again.");
               return;
@@ -193,7 +269,7 @@ const WorkshopBookingConfirmation = () => {
       cancelled = true;
       stopPolling();
     };
-  }, [bookingId, merchantOrderId, router.isReady]);
+  }, [bookingId, merchantOrderId, receiptToken, router.isReady, sensitiveQueryReady, verificationSecret]);
 
   if (!booking && status === "loading") {
     return (

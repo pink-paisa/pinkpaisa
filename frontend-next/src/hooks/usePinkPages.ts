@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch } from "@/lib/api";
 
 // Types
 export type PinkPagesCategory = {
@@ -67,11 +68,12 @@ export const usePinkPagesCategoryMutations = () => {
   const upsert = useMutation({
     mutationFn: async (cat: Partial<PinkPagesCategory> & { name: string; slug: string }) => {
       if (cat.id) {
-        const { error } = await supabase.from("pink_pages_categories" as any).update({ ...cat, updated_at: new Date().toISOString() } as any).eq("id", cat.id);
-        if (error) throw error;
+        await apiFetch(`/pink-pages/categories/${encodeURIComponent(cat.id)}`, {
+          method: "PUT",
+          body: JSON.stringify({ ...cat, updated_at: new Date().toISOString() }),
+        });
       } else {
-        const { error } = await supabase.from("pink_pages_categories" as any).insert(cat as any);
-        if (error) throw error;
+        await apiFetch("/pink-pages/categories", { method: "POST", body: JSON.stringify(cat) });
       }
     },
     onSuccess: invalidate,
@@ -79,8 +81,7 @@ export const usePinkPagesCategoryMutations = () => {
 
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase.from("pink_pages_categories" as any).delete().eq("id", id);
-      if (error) throw error;
+      await apiFetch(`/pink-pages/categories/${encodeURIComponent(id)}`, { method: "DELETE" });
     },
     onSuccess: invalidate,
   });
@@ -119,11 +120,12 @@ export const usePinkPagesListingMutations = () => {
       delete payload.category_name;
       delete payload.pink_pages_categories;
       if (listing.id) {
-        const { error } = await supabase.from("pink_pages_listings" as any).update(payload).eq("id", listing.id);
-        if (error) throw error;
+        await apiFetch(`/pink-pages/listings/${encodeURIComponent(listing.id)}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
       } else {
-        const { error } = await supabase.from("pink_pages_listings" as any).insert(payload);
-        if (error) throw error;
+        await apiFetch("/pink-pages/listings", { method: "POST", body: JSON.stringify(payload) });
       }
     },
     onSuccess: invalidate,
@@ -131,16 +133,17 @@ export const usePinkPagesListingMutations = () => {
 
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase.from("pink_pages_listings" as any).delete().eq("id", id);
-      if (error) throw error;
+      await apiFetch(`/pink-pages/listings/${encodeURIComponent(id)}`, { method: "DELETE" });
     },
     onSuccess: invalidate,
   });
 
   const toggleField = useMutation({
     mutationFn: async ({ id, field, value }: { id: string; field: string; value: any }) => {
-      const { error } = await supabase.from("pink_pages_listings" as any).update({ [field]: value, updated_at: new Date().toISOString() } as any).eq("id", id);
-      if (error) throw error;
+      await apiFetch(`/pink-pages/listings/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        body: JSON.stringify({ [field]: value, updated_at: new Date().toISOString() }),
+      });
     },
     onSuccess: invalidate,
   });

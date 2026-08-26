@@ -1,5 +1,6 @@
 const logger = require("./logger");
 const { createGuestOrderReceiptToken } = require("./orderReceiptToken");
+const { createGuestWorkshopReceiptToken } = require("./workshopReceiptToken");
 
 let smtpTransporter = null;
 
@@ -318,7 +319,8 @@ async function sendOrderConfirmationEmail({ order, items = [] }) {
 }
 
 async function sendWorkshopBookingConfirmationEmail({ booking }) {
-  const bookingUrl = `${getPublicAppUrl()}/workshop-booking-confirmation/${booking._id?.toString?.() || booking.id}`;
+  const receiptToken = createGuestWorkshopReceiptToken(booking);
+  const bookingUrl = `${getPublicAppUrl()}/workshop-booking-confirmation/${booking._id?.toString?.() || booking.id}?t=${encodeURIComponent(receiptToken)}`;
   await sendEmail({
     to: booking.email,
     subject: `Pink Paisa workshop booking confirmed - ${booking.workshop_title}`,
@@ -371,6 +373,7 @@ async function sendQuoteRequestReceivedEmails({ quoteRequest }) {
 module.exports = {
   assertEmailConfigForProduction,
   getPublicAppUrl,
+  sendEmail,
   sendSocialDraftReviewNotification,
   sendAdminPasswordResetEmail,
   sendOrderConfirmationEmail,

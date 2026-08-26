@@ -16,7 +16,14 @@ const { calculateShippingCost } = require("../utils/commerceConfig");
 const logger = require("../utils/logger");
 const { sendOrderConfirmationEmail, sendWorkshopBookingConfirmationEmail } = require("../utils/email");
 const { createGuestOrderReceiptToken } = require("../utils/orderReceiptToken");
+const { isDirectPaymentsLive } = require("../utils/phonepeClient");
 const { StandardCheckoutClient, StandardCheckoutPayRequest, Env } = require("@phonepe-pg/pg-sdk-node");
+const { normalizeMarketingAttribution } = require("../utils/marketingAttribution");
+const {
+  createPaymentVerificationSecret,
+  getPaymentVerificationSecret,
+  canVerifyPendingPayment,
+} = require("../utils/paymentVerificationSecret");
 
 let phonepeClient = null;
 const CLAIMABLE_PENDING_STATUSES = ["initiated", "pending"];
@@ -282,6 +289,7 @@ async function createOrderFromPending(pending, transactionId) {
       phonepe_order_id: pending.merchant_order_id,
       phonepe_transaction_id: transactionId || pending.merchant_order_id,
       vendor_payout_status: "not_ready",
+      attribution: pending.attribution || null,
     });
 
     const finalizedOrderItems = orderItems.map((entry) => ({
@@ -445,6 +453,12 @@ async function buildWorkshopBookingSummary(booking) {
 
 router.post("/create-order", optionalProtect, async (req, res) => {
   try {
+    if (!isDirectPaymentsLive()) {
+      return res.status(503).json({
+        error: "Direct payments are not live yet. Please use the available affiliate or quote options.",
+        code: "direct_payments_not_live",
+      });
+    }
     await releaseExpiredPendingPayments().catch(() => null);
     const { items = [] } = req.body;
     const user = req.user?._id ? await User.findById(req.user._id).lean() : null;
@@ -458,6 +472,7 @@ router.post("/create-order", optionalProtect, async (req, res) => {
     const actualShippingCost = calculateShippingCost(actualSubtotal);
     const actualTotal = actualSubtotal + actualShippingCost;
     const merchantOrderId = `PP_${(user?._id?.toString?.().slice(-8) || "GUEST").replace(/[^A-Z0-9]/gi, "")}_${Date.now()}`;
+    const paymentVerification = createPaymentVerificationSecret();
     let reservedItems = [];
     let pending = null;
 
@@ -471,9 +486,11 @@ router.post("/create-order", optionalProtect, async (req, res) => {
 
       pending = await PendingPayment.create({
         merchant_order_id: merchantOrderId,
+        verification_secret_hash: paymentVerification.secret_hash,
         purpose: "order",
         reference_id: null,
         metadata: null,
+        attribution: normalizeMarketingAttribution(req.body.attribution),
         user_id: user?._id || null,
         ...checkoutDetails,
         subtotal: actualSubtotal,
@@ -492,7 +509,9 @@ router.post("/create-order", optionalProtect, async (req, res) => {
         return res.status(503).json({ error: "Payment gateway is not configured" });
       }
 
-      const redirectUrl = `${getClientBaseUrl()}/phonepe-return?merchantOrderId=${encodeURIComponent(merchantOrderId)}`;
+      // The browser keeps the merchant ID and verification capability in sessionStorage.
+      // Do not put either value in the provider return URL, analytics, referrers, or access logs.
+      const redirectUrl = `${getClientBaseUrl()}/phonepe-return`;
 
       const payRequest = StandardCheckoutPayRequest.builder()
         .merchantOrderId(merchantOrderId)
@@ -508,7 +527,11 @@ router.post("/create-order", optionalProtect, async (req, res) => {
         return res.status(502).json({ error: "Payment gateway did not return a checkout URL" });
       }
 
-      return res.json({ checkout_url: checkoutUrl, merchant_order_id: merchantOrderId });
+      return res.json({
+        checkout_url: checkoutUrl,
+        merchant_order_id: merchantOrderId,
+        verification_secret: paymentVerification.secret,
+      });
     } catch (phonepeErr) {
       if (pending) {
         await markPendingPaymentFailed(pending).catch(() => null);
@@ -524,31 +547,25 @@ router.post("/create-order", optionalProtect, async (req, res) => {
   }
 });
 
-router.post("/verify-payment", optionalProtect, async (req, res) => {
+async function verifyPayment(req, res) {
   try {
     await releaseExpiredPendingPayments().catch(() => null);
-    const { merchant_order_id } = req.body;
+    const merchant_order_id = String(req.body?.merchant_order_id || "").trim();
     if (!merchant_order_id) return res.status(400).json({ error: "merchant_order_id is required" });
-
-    const pending = await PendingPayment.findOne({ merchant_order_id });
-    if (!pending) return res.json({ verified: false, status: "MISSING" });
-
-    if (pending.status === "completed") {
-      const order = await Order.findOne({ phonepe_order_id: merchant_order_id });
-      return res.json({
-        purpose: "order",
-        verified: true,
-        status: "COMPLETED",
-        order_id: order?._id?.toString() || null,
-        order_summary: await buildOrderSummary(order),
-        booking_id: null,
-        booking_summary: null,
-        receipt_token: getGuestReceiptToken(order),
-      });
+    if (merchant_order_id.length > 160) {
+      return res.status(404).json({ verified: false, status: "UNAVAILABLE" });
     }
 
-    if (pending.status === "failed") {
-      return res.json({ verified: false, status: "FAILED" });
+    const pending = await PendingPayment.findOne({ merchant_order_id })
+      .select("+verification_secret_hash");
+    const verificationSecret = getPaymentVerificationSecret(req);
+    if (!pending || !canVerifyPendingPayment({
+      pending,
+      user: req.user,
+      verificationSecret,
+    })) {
+      // Missing and unauthorized IDs intentionally have the same minimal response.
+      return res.status(404).json({ verified: false, status: "UNAVAILABLE" });
     }
 
     try {
@@ -574,7 +591,9 @@ router.post("/verify-payment", optionalProtect, async (req, res) => {
     logger.error({ err }, "Unhandled PhonePe verify-payment error");
     return res.status(500).json({ error: err.message });
   }
-});
+}
+
+router.post("/verify-payment", optionalProtect, verifyPayment);
 
 router.post("/callback", async (req, res) => {
   try {
@@ -603,5 +622,10 @@ const pendingPaymentCleanupTimer = setInterval(() => {
 }, PENDING_PAYMENT_CLEANUP_INTERVAL_MS);
 
 pendingPaymentCleanupTimer.unref?.();
+
+router._private = {
+  verifyPayment,
+  finalizePendingPayment,
+};
 
 module.exports = router;

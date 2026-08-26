@@ -1,6 +1,5 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/router";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
@@ -18,13 +17,13 @@ import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 import { usePinkPagesCategories } from "@/hooks/usePinkPages";
 import { toast } from "sonner";
+import TurnstileWidget, { TURNSTILE_SITE_KEY } from "@/components/security/TurnstileWidget";
 
 const PinkPagesSubmit = () => {
-  const router = useRouter();
-  const plan = typeof router.query.plan === "string" ? router.query.plan : "free";
   const { data: categories = [] } = usePinkPagesCategories(true);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [form, setForm] = useState({
     business_name: "",
     category_id: "",
@@ -36,11 +35,6 @@ const PinkPagesSubmit = () => {
     short_description: "",
     website: "",
   });
-
-  const heading = useMemo(
-    () => (plan === "premium" ? "Apply for a Premium Pink Pages Listing" : "Submit Your Business to Pink Pages"),
-    [plan],
-  );
 
   const handleChange = (field: keyof typeof form, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -64,6 +58,7 @@ const PinkPagesSubmit = () => {
           website: form.website || null,
           city: form.city || null,
           state: form.state || null,
+          captcha_token: captchaToken,
         }),
       });
       setSubmitted(true);
@@ -100,7 +95,7 @@ const PinkPagesSubmit = () => {
               </div>
             ) : (
               <>
-                <h1 className="mb-2 font-serif text-3xl">{heading}</h1>
+                <h1 className="mb-2 font-serif text-3xl">Submit Your Business to Pink Pages</h1>
                 <p className="mb-8 text-muted-foreground">
                   Share your business details below. Every submission is reviewed before it appears publicly.
                 </p>
@@ -158,7 +153,9 @@ const PinkPagesSubmit = () => {
                     </div>
                   </div>
 
-                  <Button type="submit" size="xl" className="w-full" disabled={submitting}>
+                  <TurnstileWidget action="pink_pages_submit" onTokenChange={setCaptchaToken} className="flex justify-center" />
+
+                  <Button type="submit" size="xl" className="w-full" disabled={submitting || Boolean(TURNSTILE_SITE_KEY && !captchaToken)}>
                     {submitting ? "Submitting..." : "Submit for Review"}
                   </Button>
                   <p className="text-center text-xs text-muted-foreground">

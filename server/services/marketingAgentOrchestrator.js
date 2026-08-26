@@ -1550,7 +1550,8 @@ async function maybeQueueAutopilotCarousel(groupKey) {
 
 async function completeAutopilotAfterTracking(run) {
   const readiness = await buildCurrentRunPublishReadiness(run, { requireApproval: false });
-  if (isApprovalRequiredAutopilotCarousel(run)) {
+  if (isAutopilotRun(run)) {
+    const groupedCarousel = run.automation_mode === AUTOPILOT_CAROUSEL_MODE;
     const updated = await MarketingCampaignRun.findOneAndUpdate(
       {
         _id: run._id,
@@ -1563,12 +1564,20 @@ async function completeAutopilotAfterTracking(run) {
           status: "waiting_review",
           current_stage: "ready_for_review",
           review_status: "pending",
-          review_stage: "carousel_draft",
+          review_stage: groupedCarousel ? "carousel_draft" : "draft",
           review_notes: readiness.can_publish
-            ? "Autopilot carousel is ready for grouped admin approval."
-            : formatReadinessBlockers(readiness, "Review and resolve the carousel blockers before approval."),
+            ? groupedCarousel
+              ? "Autopilot carousel is ready for grouped admin approval."
+              : "Autopilot single-post draft is ready for admin approval."
+            : formatReadinessBlockers(
+              readiness,
+              groupedCarousel
+                ? "Review and resolve the carousel blockers before approval."
+                : "Review and resolve the draft blockers before approval."
+            ),
           publish_status: "draft",
           scheduled_for: null,
+          autopilot_publish_workflow: AUTOPILOT_APPROVAL_REQUIRED,
           last_error: null,
         },
       },
@@ -1590,46 +1599,6 @@ async function completeAutopilotAfterTracking(run) {
     return;
   }
 
-  if (!readiness.can_publish) {
-    await failAutopilotRun(run, formatReadinessBlockers(readiness, "Autopilot campaign is not ready to publish"), {
-      metadata: { readiness },
-    });
-    return;
-  }
-
-  if (run.automation_mode === AUTOPILOT_SINGLE_MODE) {
-    const updated = await approveAutopilotRunForPublishing(run, readiness, {
-      status: "publishing",
-      current_stage: "publish",
-      publish_status: "publishing",
-      scheduled_for: null,
-      publish_attempted_at: new Date(),
-    });
-    if (!updated) return;
-    await recordPublishEvent(updated, {
-      actionType: "publish",
-      status: "started",
-      readinessSnapshot: await buildCurrentRunPublishReadiness(updated, { requireApproval: true, allowPublishingState: true }).catch(() => readiness),
-      metadata: {
-        automatic: true,
-        automation_mode: updated.automation_mode,
-      },
-    });
-    await upsertTask(updated, "publish", "queued");
-    return;
-  }
-
-  if (run.automation_mode === AUTOPILOT_CAROUSEL_MODE) {
-    const updated = await approveAutopilotRunForPublishing(run, readiness, {
-      status: "approved_for_publish",
-      current_stage: "approved_for_publish",
-      publish_status: "ready",
-      scheduled_for: null,
-    });
-    if (!updated) return;
-    await refreshBatchRun(updated.batch_run_id);
-    await maybeQueueAutopilotCarousel(updated.autopilot_group_key);
-  }
 }
 
 function buildOrphanPublishRecoveryUpdates(run = {}, attempt = null, recoveredAt = new Date()) {
@@ -2936,12 +2905,10 @@ async function runAutopilotDailyBatch({
   }
 
   const mode = normalizeAutopilotMode(settings);
-  const publishWorkflow = mode === "carousel"
-    ? normalizeAutopilotPublishWorkflow(
-      settings.campaign_autopilot_publish_workflow,
-      AUTOPILOT_APPROVAL_REQUIRED
-    )
-    : AUTOPILOT_DIRECT_PUBLISH;
+  const publishWorkflow = normalizeAutopilotPublishWorkflow(
+    settings.campaign_autopilot_publish_workflow,
+    AUTOPILOT_APPROVAL_REQUIRED
+  );
   const queuedAt = date ? new Date(date) : new Date();
 
   const existingPublication = await findAutopilotPublicationForDay(queuedAt);
@@ -3269,7 +3236,7 @@ async function reviewAutopilotCarouselGroup(groupKey, action, {
   const runs = await MarketingCampaignRun.find({
     autopilot_group_key: normalizedGroupKey,
     automation_mode: AUTOPILOT_CAROUSEL_MODE,
-    autopilot_publish_workflow: AUTOPILOT_APPROVAL_REQUIRED,
+    autopilot_publish_workflow: { $in: [AUTOPILOT_APPROVAL_REQUIRED, AUTOPILOT_DIRECT_PUBLISH, null] },
     archived_at: null,
   }).sort({ autopilot_position: 1, created_at: 1 });
   if (runs.length < 2) throw carouselError("carousel_not_found", "Approval carousel group was not found.");

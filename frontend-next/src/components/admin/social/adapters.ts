@@ -88,6 +88,12 @@ const strings = (value: unknown): string[] => {
   return [];
 };
 
+const numberMap = (value: unknown): Record<string, number> => Object.fromEntries(
+  Object.entries(object(value))
+    .map(([key, raw]) => [key, number(raw)] as const)
+    .filter((entry): entry is readonly [string, number] => entry[1] !== null),
+);
+
 const visualMode = (value: unknown, fallback: SocialVisualMode = "AI_VISUAL_WITH_EXACT_OVERLAY"): SocialVisualMode => {
   const normalized = string(value).trim().toUpperCase();
   return ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC"].includes(normalized)
@@ -580,6 +586,9 @@ export const normalizeDraft = (value: unknown): SocialDraft | null => {
     weeklyPlanId: string(first(draft, ["weekly_plan_id", "weeklyPlanId"])),
     weeklyPlanItemId: string(first(draft, ["weekly_plan_item_id", "weeklyPlanItemId", "plan_item_id", "planItemId"])),
     candidateId: string(first(draft, ["candidate_id", "candidateId"])),
+    bundleId: string(first(draft, ["bundle_id", "bundleId"])),
+    bundleRole: string(first(draft, ["bundle_role", "bundleRole"])),
+    parentDraftId: string(first(draft, ["parent_draft_id", "parentDraftId"])),
     weeklySlotNumber: number(first(draft, ["weekly_slot_number", "weeklySlotNumber"])),
     weekStart: string(first(draft, ["week_start", "weekStart"])),
     weekEnd: string(first(draft, ["week_end", "weekEnd"])),
@@ -758,17 +767,22 @@ export const normalizeWeeklyPlanResponse = (value: unknown): SocialWeeklyPlan | 
   const response = object(unwrapData(value));
   const plan = object(first(response, ["plan", "weekly_plan", "weeklyPlan", "current"]) ?? response);
   const itemValues = array(first(plan, ["items", "posts", "selected_posts", "selectedPosts", "recommendations"]));
+  const storyValues = array(first(plan, ["story_plan", "storyPlan", "stories"]));
   if (!Object.keys(plan).length || (!string(first(plan, ["id", "_id"])) && !itemValues.length)) return null;
   const sources = array(first(plan, ["sources", "research_sources", "researchSources"])).map(normalizeSource);
   const generationErrorValue = first(plan, ["generation_error", "generationError"]);
   const generationError = object(generationErrorValue);
+  const configSnapshot = object(first(plan, ["config_snapshot", "configSnapshot"]));
+  const contentMixValue = first(configSnapshot, ["content_mix_snapshot", "contentMixSnapshot"])
+    ?? first(plan, ["content_mix_snapshot", "contentMixSnapshot"]);
+  const contentMix = object(contentMixValue);
   return {
     id: string(first(plan, ["id", "_id"])),
     status: string(first(plan, ["status"]), "PLANNED").toUpperCase(),
     weekStart: string(first(plan, ["week_start", "weekStart", "start_date", "startDate"])),
     weekEnd: string(first(plan, ["week_end", "weekEnd", "end_date", "endDate"])),
     timezone: string(first(plan, ["timezone"]), "Asia/Kolkata"),
-    maxFeedPosts: number(first(plan, ["max_feed_posts", "maxFeedPosts", "publication_maximum", "publicationMaximum"])) ?? 3,
+    maxFeedPosts: number(first(plan, ["max_feed_posts", "maxFeedPosts", "maximum_feed_posts", "maximumFeedPosts", "publication_maximum", "publicationMaximum"])) ?? 5,
     rationale: string(first(plan, ["rationale", "concise_rationale", "conciseRationale", "why_this_week", "whyThisWeek"])),
     version: number(first(plan, ["version"])) ?? 1,
     items: itemValues.map((itemValue, index) => {
@@ -797,8 +811,57 @@ export const normalizeWeeklyPlanResponse = (value: unknown): SocialWeeklyPlan | 
         draftId: string(first(item, ["draft_id", "draftId", "social_draft_id", "socialDraftId"])),
         sources: array(first(item, ["sources"])).map(normalizeSource),
         visualModeResolution: normalizeVisualModeResolution(first(item, ["visual_mode_resolution", "visualModeResolution"])),
+        bundleId: string(first(item, ["bundle_id", "bundleId"])),
+        bundleRole: string(first(item, ["bundle_role", "bundleRole"])),
+        parentCandidateId: string(first(item, ["parent_candidate_id", "parentCandidateId"])),
       };
     }),
+    storyPlan: storyValues.map((itemValue, index) => {
+      const item = object(itemValue);
+      const recommendation = normalizeRecommendation(first(item, ["recommendation", "content", "content_package", "contentPackage"]) ?? item);
+      return {
+        id: string(first(item, ["id", "_id", "candidate_id", "candidateId"]), `story-${index + 1}`),
+        order: number(first(item, ["order", "sequence", "position", "slot_number", "slotNumber"])) ?? index + 1,
+        status: normalizeStatus(first(item, ["status"])),
+        topic: string(first(item, ["topic"]), recommendation.topic),
+        internalTitle: string(first(item, ["internal_title", "internalTitle", "title"]), recommendation.internalTitle),
+        objective: string(first(item, ["objective"]), recommendation.objective),
+        primaryKpi: string(first(item, ["primary_kpi", "primaryKpi"])),
+        secondaryKpi: string(first(item, ["secondary_kpi", "secondaryKpi"])),
+        targetAudience: string(first(item, ["target_audience", "targetAudience", "audience_segment", "audienceSegment"]), recommendation.targetAudienceSegment),
+        contentPillar: string(first(item, ["content_pillar", "contentPillar"]), recommendation.contentPillar),
+        format: "STORY",
+        whyThisWeek: string(first(item, ["why_this_week", "whyThisWeek", "why_today", "whyToday"]), recommendation.whyToday),
+        whyThisFormat: string(first(item, ["why_this_format", "whyThisFormat", "format_reason", "formatReason"]), recommendation.formatReason),
+        pinkPaisaConnection: string(first(item, ["pink_paisa_connection", "pinkPaisaConnection", "business_connection", "businessConnection"])),
+        recommendedLandingPage: string(first(item, ["recommended_landing_page", "recommendedLandingPage", "landing_page", "landingPage"]), recommendation.recommendedLandingPage),
+        promotionalIntensity: string(first(item, ["promotional_intensity", "promotionalIntensity"])),
+        confidence: number(first(item, ["confidence", "confidence_score", "confidenceScore"])) ?? recommendation.confidence,
+        riskFlags: strings(first(item, ["risk_flags", "riskFlags"])).length ? strings(first(item, ["risk_flags", "riskFlags"])) : recommendation.riskFlags,
+        scheduledFor: dateString(first(item, ["scheduled_for", "scheduledFor"])),
+        draftId: string(first(item, ["draft_id", "draftId"])),
+        sources: array(first(item, ["sources"])).map(normalizeSource),
+        visualModeResolution: normalizeVisualModeResolution(first(item, ["visual_mode_resolution", "visualModeResolution"])),
+        bundleId: string(first(item, ["bundle_id", "bundleId"])),
+        bundleRole: string(first(item, ["bundle_role", "bundleRole"])),
+        parentCandidateId: string(first(item, ["parent_candidate_id", "parentCandidateId"])),
+        parentDraftId: string(first(item, ["parent_draft_id", "parentDraftId"])),
+      };
+    }),
+    contentMixSnapshot: Object.keys(contentMix).length ? {
+      windowWeeks: number(first(contentMix, ["window_weeks", "windowWeeks"])) ?? 4,
+      historyWeeksFound: number(first(contentMix, ["history_weeks_found", "historyWeeksFound"])) ?? 0,
+      historicalPosts: number(first(contentMix, ["historical_posts", "historicalPosts"])) ?? 0,
+      currentWeekPosts: number(first(contentMix, ["current_week_posts", "currentWeekPosts"])) ?? 0,
+      totalPosts: number(first(contentMix, ["total_posts", "totalPosts"])) ?? 0,
+      counts: numberMap(first(contentMix, ["counts"])),
+      targetPercentages: numberMap(first(contentMix, ["target_percentages", "targetPercentages"])),
+      actualPercentages: numberMap(first(contentMix, ["actual_percentages", "actualPercentages"])),
+      deltaPercentages: numberMap(first(contentMix, ["delta_percentages", "deltaPercentages"])),
+      hardQuotaEnforced: boolean(first(contentMix, ["hard_quota_enforced", "hardQuotaEnforced"]), false),
+      enforcement: string(first(contentMix, ["enforcement"])),
+      limitation: string(first(contentMix, ["limitation"])),
+    } : null,
     candidates: array(first(plan, ["candidates", "candidate_ideas", "candidateIdeas"])).map(normalizeCandidateSummary),
     sources,
     generationError: typeof generationErrorValue === "string"
@@ -1532,7 +1595,7 @@ export const settingsPayload = (settings: SocialSettings) => {
   const [postingHour, postingMinute] = settings.defaultPostingTime.split(":").map(Number);
   const [planningHour, planningMinute] = settings.weeklyPlanningTime.split(":").map(Number);
   const existingPostingSlots = array(first(object(raw.weekly_planning), ["posting_slots", "postingSlots"])).map(object);
-  const postingSlots = settings.postingDays.slice(0, 3).map((weekday, index) => {
+  const postingSlots = settings.postingDays.slice(0, 5).map((weekday, index) => {
     const existing = existingPostingSlots[index] || {};
     return {
       slot_number: index + 1,

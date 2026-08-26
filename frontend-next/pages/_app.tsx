@@ -8,7 +8,10 @@ import "yet-another-react-lightbox/plugins/counter.css";
 import "@/index.css";
 import AppProviders from "@/components/AppProviders";
 import MicrosoftClarity from "@/components/analytics/MicrosoftClarity";
+import GoogleAnalytics from "@/components/analytics/GoogleAnalytics";
+import AnalyticsConsentBanner from "@/components/analytics/AnalyticsConsentBanner";
 import { persistAffiliateAttribution } from "@/lib/affiliateTracking";
+import { persistMarketingAttribution } from "@/lib/marketingAttribution";
 import { isClarityBlockedPath } from "@/lib/microsoftClarity";
 
 export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
@@ -17,6 +20,7 @@ export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
 
   useEffect(() => {
     persistAffiliateAttribution();
+    persistMarketingAttribution();
   }, [router.asPath]);
 
   return (
@@ -25,6 +29,7 @@ export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
       </Head>
       <MicrosoftClarity />
+      <GoogleAnalytics />
       {maskPageForClarity ? (
         <div data-clarity-mask="true">
           <Component {...pageProps} />
@@ -32,6 +37,7 @@ export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
       ) : (
         <Component {...pageProps} />
       )}
+      <AnalyticsConsentBanner />
     </AppProviders>
   );
 }

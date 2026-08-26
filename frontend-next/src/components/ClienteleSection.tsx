@@ -14,6 +14,8 @@ const clients = [
 ];
 
 const ClienteleSection = () => {
+  if (process.env.NEXT_PUBLIC_TRUSTED_BY_ENABLED !== "true") return null;
+
   return (
     <section className="bg-cream py-16 md:py-24">
       <div className="container mx-auto">

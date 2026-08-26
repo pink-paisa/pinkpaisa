@@ -13,13 +13,13 @@ const reasons = [
     icon: Shield,
     title: "No jargon, no judgment",
     description:
-      "Every guide is written in plain language for women who are just getting started or rebuilding their confidence.",
+      "Every explanation is written in plain language for women who are just getting started or rebuilding their confidence.",
   },
   {
     icon: TrendingUp,
     title: "Action-first frameworks",
     description:
-      "Checklists, templates, and trackers you actually use, not 200-page ebooks that collect dust.",
+      "Clear questions, calculators, and next steps that turn a useful idea into a calmer decision.",
   },
   {
     icon: Users,

@@ -17,6 +17,7 @@ const { startDailyBatchScheduler } = require("./services/dailyBatchScheduler");
 const { createCorsOptions, createRateLimiter, securityHeaders } = require("./middleware/requestGuards");
 const { csrfProtection } = require("./middleware/csrf");
 const { assertEmailConfigForProduction } = require("./utils/email");
+const { startEmailOutboxWorker } = require("./services/emailOutboxService");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -103,10 +104,12 @@ app.use("/api/poll-votes", require("./routes/polls"));
 app.use("/api/poll-comments", require("./routes/polls"));
 app.use("/api/predictions", require("./routes/predictions"));
 app.use("/api/quote-requests", require("./routes/quoteRequests"));
+app.use("/api/marketing", require("./routes/marketing"));
 app.use("/api/phonepe", paymentLimiter, require("./routes/phonepe"));
 app.use("/api/uploads", uploadLimiter, require("./routes/uploads"));
 app.use("/api/vendors", require("./routes/vendors"));
 app.use("/api/admin/analytics", require("./routes/adminAnalytics"));
+app.use("/api/admin/marketing-leads", require("./routes/adminMarketingLeads"));
 app.use("/api/admin/amazon-reports", require("./routes/adminAmazonReports"));
 app.use("/api/admin/backups", require("./routes/adminBackups"));
 app.use("/api/admin/predictions-ai", require("./routes/adminPredictions"));
@@ -143,6 +146,7 @@ app.use((err, req, res, _next) => {
 async function bootstrapApplication() {
   assertEmailConfigForProduction();
   await connectDB();
+  startEmailOutboxWorker();
 
   if (shouldBootstrapSeedData) {
     await seedVendorDemoData().catch((err) => logger.error({ err }, "vendor seed failed"));

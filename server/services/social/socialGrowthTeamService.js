@@ -11,7 +11,11 @@ const SocialPostDraft = require("../../models/SocialPostDraft");
 const SocialPublication = require("../../models/SocialPublication");
 const SocialResearchSource = require("../../models/SocialResearchSource");
 const SocialWeeklyPlan = require("../../models/SocialWeeklyPlan");
-const { buildSocialManagerRuntimeSettings, getSocialManagerSettings } = require("../../utils/socialManagerSettings");
+const {
+  buildSocialManagerRuntimeSettings,
+  DEFAULT_GROWTH_CONTENT_MIX,
+  getSocialManagerSettings,
+} = require("../../utils/socialManagerSettings");
 const { collectInternalSignals } = require("./socialInternalSignals");
 const { collectExternalResearch } = require("./socialResearchService");
 const { collectSocialGrowthResearchSignals } = require("./socialGrowthResearchAdapters");
@@ -49,10 +53,24 @@ const {
 } = require("./socialCommunityWorkflowService");
 
 const DEFAULT_POSTING_SLOTS = Object.freeze([
-  { weekday: "TUESDAY", hour_ist: 11, minute_ist: 0 },
-  { weekday: "THURSDAY", hour_ist: 11, minute_ist: 0 },
-  { weekday: "SATURDAY", hour_ist: 11, minute_ist: 0 },
+  { weekday: "MONDAY", hour_ist: 11, minute_ist: 0 },
+  { weekday: "TUESDAY", hour_ist: 18, minute_ist: 0 },
+  { weekday: "WEDNESDAY", hour_ist: 11, minute_ist: 0 },
+  { weekday: "THURSDAY", hour_ist: 18, minute_ist: 0 },
+  { weekday: "FRIDAY", hour_ist: 11, minute_ist: 0 },
 ]);
+const STORY_WEEKEND_SLOTS = Object.freeze([
+  { weekday: "SATURDAY", hour_ist: 11, minute_ist: 0 },
+  { weekday: "SUNDAY", hour_ist: 11, minute_ist: 0 },
+]);
+const APPROVED_SERIES_KEYS = Object.freeze([
+  "PINK_PAISA_RULES",
+  "WOULD_I_BUY_IT",
+  "RICH_GIRL_MATH",
+  "AFTER_40",
+  "PINK_PAISA_FINDS",
+]);
+const APPROVED_HOOK_FORMULA = Object.freeze(["HOOK", "TENSION", "VALUE", "IDENTITY", "CTA"]);
 const ACTIVE_PLAN_STATUSES = new Set(["QUEUED", "RESEARCHING", "PLANNING"]);
 const COMMUNITY_SENDABLE_TYPES = new Set(["COMMENT", "REPLY", "MESSAGE", "DIRECT_MESSAGE", "PRIVATE_REPLY"]);
 const COMMUNITY_ADMIN_RECOMMENDABLE_STATUSES = new Set(["NEW", "OPEN", "CLASSIFIED", "REPLY_RECOMMENDED"]);
@@ -79,6 +97,7 @@ const KPI_METRIC_KEYS = Object.freeze({
   QUIZ_COMPLETIONS: ["quiz_completions"],
   CALCULATOR_OPENS: ["calculator_opens"],
   WORKSHOP_ENQUIRIES: ["workshop_enquiries"],
+  MARKETING_LEADS: ["marketing_leads"],
   PRODUCT_PAGE_VISITS: ["product_page_visits"],
   AFFILIATE_CLICKS: ["affiliate_clicks", "affiliate_cta_clicks"],
   RETURNING_VISITORS: ["returning_visitors"],
@@ -153,9 +172,251 @@ function publicWeeklyPlan(plan) {
       draft_id: selected.draft_id || null,
       candidate: undefined,
     })),
+    story_plan: (value.story_plan || []).map((story, index) => ({
+      ...(story.candidate || {}),
+      ...story,
+      id: story.candidateId || story.candidate_id || `weekly-story-${index + 1}`,
+      order: story.slotNumber || story.slot_number || index + 1,
+      scheduled_for: story.scheduledFor || story.scheduled_for || null,
+      draft_id: story.draft_id || null,
+      parent_draft_id: story.parent_draft_id || null,
+      bundle_id: story.bundleId || story.bundle_id || null,
+      bundle_role: story.bundleRole || story.bundle_role || null,
+      parent_candidate_id: story.parentCandidateId || story.parent_candidate_id || null,
+      candidate: undefined,
+    })),
     _id: undefined,
     __v: undefined,
   };
+}
+
+function growthCategoryForCandidate(candidate = {}) {
+  const haystack = `${candidate.contentPillar || ""} ${candidate.topic || ""} ${candidate.title || ""}`.toLowerCase();
+  if (/pink paisa|quiz|calculator|resource/.test(haystack)) return "PINK_PAISA";
+  if (/fitness|body|exercise|yoga|stretch|strength|workout/.test(haystack)) return "BODY_FITNESS";
+  if (/wellness|beauty|skin|sleep|self-care|self care/.test(haystack)) return "WELLNESS_BEAUTY";
+  if (/women|woman|career|life|after 40|forty|mother|family/.test(haystack)) return "WOMEN_LIFE";
+  return "MONEY";
+}
+
+const CONTENT_MIX_CATEGORIES = Object.freeze(Object.keys(DEFAULT_GROWTH_CONTENT_MIX));
+
+function contentMixCandidate(selected = {}) {
+  return selected.candidate || selected;
+}
+
+function buildRollingContentMixSnapshot({ historyPlans = [], currentSelected = [], targetMix = DEFAULT_GROWTH_CONTENT_MIX } = {}) {
+  const counts = Object.fromEntries(CONTENT_MIX_CATEGORIES.map((category) => [category, 0]));
+  const historicalSelected = historyPlans.flatMap((historicalPlan) => historicalPlan?.selected_posts || historicalPlan?.selectedPosts || []);
+  const counted = [...historicalSelected, ...currentSelected];
+  for (const selected of counted) {
+    const candidate = contentMixCandidate(selected);
+    if (String(candidate?.format || "").toUpperCase() === "STORY") continue;
+    const category = String(candidate?.growthCategory || candidate?.growth_category || growthCategoryForCandidate(candidate)).toUpperCase();
+    if (Object.hasOwn(counts, category)) counts[category] += 1;
+  }
+  const totalPosts = Object.values(counts).reduce((sum, value) => sum + value, 0);
+  const targetPercentages = Object.fromEntries(CONTENT_MIX_CATEGORIES.map((category) => [
+    category,
+    Number(targetMix?.[category] ?? DEFAULT_GROWTH_CONTENT_MIX[category]),
+  ]));
+  const actualPercentages = Object.fromEntries(CONTENT_MIX_CATEGORIES.map((category) => [
+    category,
+    totalPosts ? Number(((counts[category] / totalPosts) * 100).toFixed(1)) : 0,
+  ]));
+  const deltaPercentages = Object.fromEntries(CONTENT_MIX_CATEGORIES.map((category) => [
+    category,
+    Number((actualPercentages[category] - targetPercentages[category]).toFixed(1)),
+  ]));
+  const historyWeeks = [...new Set(historyPlans.map((historicalPlan) => historicalPlan?.week_start || historicalPlan?.weekStart).filter(Boolean))];
+  const historyWeeksFound = historyWeeks.length;
+  return {
+    window_weeks: 4,
+    history_weeks_requested: 3,
+    history_weeks_found: historyWeeksFound,
+    history_week_starts: historyWeeks,
+    historical_posts: historicalSelected.length,
+    current_week_posts: currentSelected.length,
+    total_posts: totalPosts,
+    counts,
+    target_percentages: targetPercentages,
+    actual_percentages: actualPercentages,
+    delta_percentages: deltaPercentages,
+    hard_quota_enforced: false,
+    enforcement: "ACCOUNTED_AI_GUIDANCE",
+    limitation: historyWeeksFound < 3
+      ? `Only ${historyWeeksFound} prior approved week(s) were available; the rolling mix is visibly accounted but not treated as a hard quota.`
+      : "The prior three approved weeks and current selection are accounted. Evidence, compliance and campaign safety may justify a visible variance from the target mix.",
+  };
+}
+
+async function loadRollingContentMixHistory({ PlanModel, plan, dependencies = {} }) {
+  if (typeof dependencies.loadRollingContentMixHistory === "function") {
+    const supplied = await dependencies.loadRollingContentMixHistory({ plan, limit: 3 });
+    return Array.isArray(supplied) ? supplied.slice(0, 3) : [];
+  }
+  if (typeof PlanModel?.find !== "function") return [];
+  let query = PlanModel.find({
+    _id: { $ne: plan._id },
+    week_start: { $lt: plan.week_start },
+    status: { $in: ["APPROVED", "SCHEDULED", "ACTIVE", "COMPLETED"] },
+    selected_posts: { $ne: [] },
+  });
+  if (typeof query?.sort === "function") query = query.sort({ week_start: -1 });
+  if (typeof query?.limit === "function") query = query.limit(3);
+  if (typeof query?.select === "function") query = query.select("week_start selected_posts");
+  return clone(typeof query?.lean === "function" ? await query.lean() : await query) || [];
+}
+
+function seriesKeyForCandidate(candidate = {}) {
+  const category = candidate.growthCategory || growthCategoryForCandidate(candidate);
+  const haystack = `${candidate.topic || ""} ${candidate.title || ""} ${candidate.whyThisWeek || ""}`.toLowerCase();
+  if (candidate.verifiedInternalEntityId || String(candidate.objective || "").toUpperCase() === "PRODUCT_PROMOTION") {
+    return /would i buy|should (?:you|i) buy|review|worth it|buying decision/.test(haystack)
+      ? "WOULD_I_BUY_IT"
+      : "PINK_PAISA_FINDS";
+  }
+  if (category === "WOMEN_LIFE" || /after 40|forty/.test(haystack)) return "AFTER_40";
+  if (category === "MONEY" && /math|number|budget|cost|save/.test(haystack)) return "RICH_GIRL_MATH";
+  return "PINK_PAISA_RULES";
+}
+
+function enrichWeeklyCandidates(candidates = []) {
+  return candidates.map((candidate) => {
+    const growthCategory = growthCategoryForCandidate(candidate);
+    return {
+      ...candidate,
+      growthCategory,
+      seriesKey: seriesKeyForCandidate({ ...candidate, growthCategory }),
+      hookFormula: [...APPROVED_HOOK_FORMULA],
+    };
+  });
+}
+
+function requiresAuthenticTalkingHead(candidate = {}) {
+  if (!["REEL", "VIDEO_FEED"].includes(String(candidate.format || "").toUpperCase())) return false;
+  return /\b(?:talking[-\s]?head|founder|spokesperson|on[-\s]?camera|to camera|testimonial|customer story)\b/i
+    .test(`${candidate.title || ""} ${candidate.topic || ""} ${candidate.whyThisFormat || ""} ${candidate.conciseRationale || ""}`);
+}
+
+async function ensureTalkingHeadManualAction({ plan, selected, run, actor, dependencies = {} }) {
+  const candidate = selected.candidate || {};
+  if (!requiresAuthenticTalkingHead(candidate)) return null;
+  const ActionModel = dependencies.SocialManualAction || SocialManualAction;
+  const candidateId = selected.candidateId || selected.candidate_id;
+  const record = {
+    action_key: `social-talking-head:${plan._id}:${candidateId}:v${plan.version || 1}`,
+    action_type: "CONTENT_ESCALATION",
+    status: "OPEN",
+    priority: "HIGH",
+    title: "Record authentic talking-head footage",
+    description: `This ${candidate.format} concept needs a real Pink Paisa spokesperson. AI may prepare the script and shot list, but must not fabricate an endorsement or on-camera person.`.slice(0, 4000),
+    instructions: [
+      `Record the approved ${APPROVED_HOOK_FORMULA.join(" → ")} script with an authorised real spokesperson.`,
+      "Upload the original footage and confirm the speaker's approval before final creative review.",
+      "Do not replace missing footage with an AI-generated founder, customer, expert, or endorsement.",
+    ],
+    provider: "INTERNAL",
+    weekly_plan_id: plan._id,
+    generation_run_id: run?._id || null,
+    external_reference_id: String(candidateId),
+    created_by_admin_id: actorId(actor),
+    due_at: selected.scheduledFor || selected.scheduled_for || null,
+  };
+  if (typeof ActionModel.findOneAndUpdate === "function") {
+    return ActionModel.findOneAndUpdate(
+      { action_key: record.action_key },
+      { $setOnInsert: record },
+      { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true, ...(dependencies.mongoSession ? { session: dependencies.mongoSession } : {}) },
+    );
+  }
+  return createWithSession(ActionModel, record, dependencies.mongoSession || null);
+}
+
+function storyCandidateId(role, sourceId, index) {
+  return `story_${role === "COMPANION_STORY" ? "companion" : "standalone"}_${sha256(`${sourceId}:${index}`).slice(0, 20)}`;
+}
+
+function asStoryCandidate(source, { candidateId, role, weekday }) {
+  return {
+    ...clone(source),
+    candidateId,
+    title: `${role === "COMPANION_STORY" ? "Companion Story" : `${weekday} Story`}: ${source.title}`.slice(0, 180),
+    format: "STORY",
+    whyThisFormat: role === "COMPANION_STORY"
+      ? "A concise Story extends the approved feed idea without adding a separate claim or automatic approval."
+      : "A standalone weekend Story keeps the daily cadence useful while retaining a separate final human review.",
+    conciseRationale: `${source.conciseRationale} This Story remains separately generated and reviewable.`.slice(0, 800),
+    hookFormula: [...APPROVED_HOOK_FORMULA],
+  };
+}
+
+function buildWeeklyStoryPlan({ plan, selectedPosts, candidates }) {
+  const selectedIds = new Set(selectedPosts.map((item) => String(item.candidateId || "")));
+  const retained = candidates.filter((candidate) => !selectedIds.has(String(candidate.candidateId || ""))
+    && String(candidate.format || "").toUpperCase() !== "STORY");
+  if (selectedPosts.length !== 5 || retained.length < 2) {
+    const error = new Error("The five-feed, seven-Story cadence requires five selected feed ideas and at least two retained weekend ideas");
+    error.code = "social_weekly_story_plan_incomplete";
+    error.validation_errors = ["$.selectedPosts must contain five feeds and leave two retained candidates for weekend Stories"];
+    throw error;
+  }
+  const companionStories = selectedPosts.map((selected, index) => {
+    const source = selected.candidate;
+    const candidateId = storyCandidateId("COMPANION_STORY", source.candidateId, index);
+    const bundleId = `weekly:${plan._id}:feed:${source.candidateId}`.slice(0, 240);
+    selected.bundleId = bundleId;
+    selected.bundleRole = "PARENT_FEED";
+    return {
+      candidateId,
+      sourceCandidateId: source.candidateId,
+      slotNumber: index + 1,
+      scheduledFor: selected.scheduledFor,
+      selectionReason: "Companion Story for the approved feed slot; approval remains bundled with its parent creative.",
+      candidate: asStoryCandidate(source, { candidateId, role: "COMPANION_STORY" }),
+      parentCandidateId: source.candidateId,
+      bundleId,
+      bundleRole: "COMPANION_STORY",
+      visual_mode_resolution: {
+        requested: "AI_VISUAL_WITH_EXACT_OVERLAY",
+        effective: "AI_VISUAL_WITH_EXACT_OVERLAY",
+        eligible: true,
+        reasons: ["Instagram Stories require verified on-frame CTA and disclosure treatment."],
+      },
+      status: "PLANNED",
+      generation_run_id: null,
+      draft_id: null,
+      parent_draft_id: null,
+      publication_id: null,
+    };
+  });
+  const weekendStories = STORY_WEEKEND_SLOTS.map((slot, index) => {
+    const source = retained[index];
+    const candidateId = storyCandidateId("STANDALONE_STORY", source.candidateId, index + 5);
+    return {
+      candidateId,
+      sourceCandidateId: source.candidateId,
+      slotNumber: index + 6,
+      scheduledFor: isoForIstSlot(plan.week_start, slot.weekday, slot.hour_ist, slot.minute_ist),
+      selectionReason: `${slot.weekday} standalone Story from a retained candidate; separate final approval is mandatory.`,
+      candidate: asStoryCandidate(source, { candidateId, role: "STANDALONE_STORY", weekday: slot.weekday }),
+      parentCandidateId: null,
+      bundleId: `weekly:${plan._id}:story:${slot.weekday.toLowerCase()}`.slice(0, 240),
+      bundleRole: "STANDALONE_STORY",
+      visual_mode_resolution: {
+        requested: "AI_VISUAL_WITH_EXACT_OVERLAY",
+        effective: "AI_VISUAL_WITH_EXACT_OVERLAY",
+        eligible: true,
+        reasons: ["Instagram Stories require verified on-frame CTA and disclosure treatment."],
+      },
+      status: "PLANNED",
+      generation_run_id: null,
+      draft_id: null,
+      parent_draft_id: null,
+      publication_id: null,
+    };
+  });
+  return [...companionStories, ...weekendStories];
 }
 
 function publicCommunityItem(item) {
@@ -496,6 +757,18 @@ function knownInternalDestinations(internalSignals, websiteBaseUrl) {
 
 function validateCandidateInternalTruth(result, internalSignals, researchDigest, settings) {
   const validated = validateWeeklyCandidates(result);
+  const weeklyMaximum = Number(settings.weekly_planning?.maximum_feed_posts
+    || settings.weekly_planning?.max_feed_posts_per_week
+    || 3);
+  const feedCapableCount = validated.candidates.filter(
+    (candidate) => String(candidate.format || "").toUpperCase() !== "STORY",
+  ).length;
+  if (weeklyMaximum >= 5 && feedCapableCount < 7) {
+    const error = new Error("The five-feed cadence requires at least seven feed-capable candidates; Story candidates cannot replace feed or weekend source ideas");
+    error.code = "structured_output_invalid";
+    error.validation_errors = ["$.candidates must include at least seven candidates whose format is not STORY"];
+    throw error;
+  }
   const destinations = knownInternalDestinations(internalSignals, settings.brand_profile?.website_base_url);
   const internalIds = new Set([
     ...(internalSignals.products || []),
@@ -647,6 +920,11 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
     plan.research_source_ids = sourceDocuments.map((source) => source._id).filter(Boolean);
     await plan.save();
     const sourceCatalogue = buildSourceCatalogue(externalResearch, internalSignals, now);
+    const rollingContentMixHistory = await loadRollingContentMixHistory({ PlanModel, plan, dependencies });
+    const priorContentMixSnapshot = buildRollingContentMixSnapshot({
+      historyPlans: rollingContentMixHistory,
+      targetMix: settings.content_strategy?.growth_content_mix,
+    });
     const latestSnapshots = await GrowthSnapshotModel.find({}).sort({ captured_at: -1 }).limit(20).lean();
     let priorGrowthAnalysis = null;
     if (typeof PlanModel.findOne === "function") {
@@ -678,6 +956,7 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
       source_catalogue: sourceCatalogue,
       aggregate_growth_snapshots: latestSnapshots,
       prior_growth_analysis: priorGrowthAnalysis,
+      rolling_content_mix: priorContentMixSnapshot,
       aggregate_community: audienceAggregates,
       privacy: "No personal customer data is included.",
     };
@@ -745,6 +1024,20 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
         },
         configuredFormats: settings.weekly_planning?.enabled_formats || undefined,
         weeklyMaximum: planningWindow.maximum,
+        contentStrategy: {
+          rollingWindowWeeks: 4,
+          growthContentMix: settings.content_strategy?.growth_content_mix || {
+            MONEY: 40,
+            BODY_FITNESS: 20,
+            WELLNESS_BEAUTY: 15,
+            WOMEN_LIFE: 15,
+            PINK_PAISA: 10,
+          },
+          seriesKeys: settings.content_strategy?.series_keys || APPROVED_SERIES_KEYS,
+          hookFormula: settings.content_strategy?.hook_formula || APPROVED_HOOK_FORMULA,
+          talkingHeadPolicy: "SCRIPT_SHOT_LIST_ONLY",
+          priorApprovedPlanMix: priorContentMixSnapshot,
+        },
         suppliedSources: researchDigest.sources,
       },
       schema: WEEKLY_CANDIDATES_SCHEMA,
@@ -754,7 +1047,7 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
       maxOutputTokens: 18000,
     });
     completedCalls.push({ stage: "weekly_candidates", result: candidateResult });
-    const candidates = candidateResult.output.candidates;
+    const candidates = enrichWeeklyCandidates(candidateResult.output.candidates);
     plan.candidates = candidates;
     await plan.save();
 
@@ -773,7 +1066,12 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
         selectionRules: {
           selectedItemsMustBeFeedPublications: true,
           storyCandidatesMayBeCompanionsOnly: true,
-          companionStoriesEnabled: settings.weekly_planning?.companion_stories_enabled === true,
+          companionStoriesEnabled: true,
+          rollingFourWeekGrowthMix: settings.content_strategy?.growth_content_mix,
+          priorApprovedPlanMix: priorContentMixSnapshot,
+          approvedSeriesKeys: APPROVED_SERIES_KEYS,
+          hookFormula: APPROVED_HOOK_FORMULA,
+          talkingHeadPolicy: "Return a script and shot list for authentic uploaded footage; never fabricate a founder or spokesperson endorsement.",
         },
       },
       schema: WEEKLY_PLAN_SCHEMA,
@@ -793,6 +1091,7 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
         candidates,
         weeklyPlan,
         priorGrowthAnalysis,
+        rollingContentMixBeforeSelection: priorContentMixSnapshot,
         operationalRules: {
           humanApprovalRequired: true,
           weeklyMaximum: planningWindow.maximum,
@@ -830,9 +1129,28 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
       freezeSelectedVisualMode(planned, candidate, settings, dependencies);
       return planned;
     });
+    plan.story_plan = planningWindow.maximum === 5
+      ? buildWeeklyStoryPlan({
+        plan,
+        selectedPosts: plan.selected_posts,
+        candidates,
+      })
+      : [];
+    const contentMixSnapshot = buildRollingContentMixSnapshot({
+      historyPlans: rollingContentMixHistory,
+      currentSelected: plan.selected_posts,
+      targetMix: settings.content_strategy?.growth_content_mix,
+    });
     plan.config_snapshot = {
       ...(plan.config_snapshot || {}),
       default_visual_mode: settings.generation?.default_visual_mode || "AI_VISUAL_WITH_EXACT_OVERLAY",
+      story_cadence: {
+        companion_count: plan.story_plan.filter((item) => item.bundleRole === "COMPANION_STORY").length,
+        standalone_count: plan.story_plan.filter((item) => item.bundleRole === "STANDALONE_STORY").length,
+        human_approval_required: true,
+      },
+      content_strategy: clone(settings.content_strategy || {}),
+      content_mix_snapshot: contentMixSnapshot,
     };
     plan.plan_rationale = {
       format_balance: weeklyPlan.formatBalance,
@@ -921,6 +1239,7 @@ async function requestWeeklyPlan({ actor = null, now = new Date(), force = false
     plan.config_snapshot = { posting_slots: window.slots, candidate_count: Math.max(Number(settings.weekly_planning?.candidate_count || 8), 8) };
     plan.candidates = [];
     plan.selected_posts = [];
+    plan.story_plan = [];
     plan.research_digest = null;
     plan.audience_intelligence = null;
     plan.plan_rationale = null;
@@ -955,6 +1274,7 @@ async function requestWeeklyPlan({ actor = null, now = new Date(), force = false
         config_snapshot: { posting_slots: window.slots, candidate_count: Math.max(Number(settings.weekly_planning?.candidate_count || 8), 8) },
         candidates: [],
         selected_posts: [],
+        story_plan: [],
         requested_by_admin_id: actorId(actor),
         requested_at: now,
         version: 1,
@@ -1068,6 +1388,7 @@ async function queueWeeklySelectedPost(plan, selected, { actor = null, now = new
       required_landing_page: candidate.recommendedLandingPage || null,
       admin_instructions: [
         "Produce the selected weekly strategy exactly; do not substitute another topic, objective, destination, KPI, or format.",
+        "Use Hook → Tension → Value → Identity → CTA. If authentic talking-head footage would help, return a script and shot list for a real spokesperson upload; never generate or imply a founder/spokesperson endorsement.",
         JSON.stringify(candidate),
       ].join("\n").slice(0, 4000),
       request_id: `weekly:${plan._id}:${candidateId}`,
@@ -1094,6 +1415,40 @@ async function queueWeeklySelectedPost(plan, selected, { actor = null, now = new
   return { run, reused: Boolean(requestResult.reused), retryOfRunId };
 }
 
+function validateWeeklyCadenceCompleteness(plan) {
+  if (Number(plan.maximum_feed_posts || 0) !== 5) return;
+  const selected = plan.selected_posts || [];
+  const stories = plan.story_plan || [];
+  const companionStories = stories.filter((item) => String(item.bundleRole || item.bundle_role || "").toUpperCase() === "COMPANION_STORY");
+  const standaloneStories = stories.filter((item) => String(item.bundleRole || item.bundle_role || "").toUpperCase() === "STANDALONE_STORY");
+  const selectedIds = new Set(selected.map((item) => String(item.candidateId || item.candidate_id || "")).filter(Boolean));
+  const companionParents = companionStories.map((item) => String(item.parentCandidateId || item.parent_candidate_id || "")).filter(Boolean);
+  const standaloneSources = standaloneStories.map((item) => String(item.sourceCandidateId || item.source_candidate_id || "")).filter(Boolean);
+  const feedCandidateCount = (plan.candidates || []).filter((item) => String(item.format || "").toUpperCase() !== "STORY").length;
+  const complete = selected.length === 5
+    && selected.every((item) => String(item.candidate?.format || "").toUpperCase() !== "STORY")
+    && feedCandidateCount >= 7
+    && companionStories.length === 5
+    && companionParents.length === 5
+    && new Set(companionParents).size === 5
+    && companionParents.every((candidateId) => selectedIds.has(candidateId))
+    && standaloneStories.length === 2
+    && standaloneSources.length === 2
+    && new Set(standaloneSources).size === 2
+    && standaloneSources.every((candidateId) => !selectedIds.has(candidateId));
+  if (complete) return;
+  const error = new Error("The five-feed cadence is incomplete; approval requires five feed posts, five linked companion Stories and two distinct standalone Stories sourced from retained feed candidates");
+  error.statusCode = 409;
+  error.code = "social_weekly_cadence_incomplete";
+  error.details = {
+    selected_feed_posts: selected.length,
+    feed_capable_candidates: feedCandidateCount,
+    companion_stories: companionStories.length,
+    standalone_stories: standaloneStories.length,
+  };
+  throw error;
+}
+
 async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies = {} } = {}) {
   if (!actorId(actor)) { const error = new Error("An administrator identity is required"); error.statusCode = 403; throw error; }
   const PlanModel = dependencies.SocialWeeklyPlan || SocialWeeklyPlan;
@@ -1107,6 +1462,7 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
       error.statusCode = 409;
       throw error;
     }
+    validateWeeklyCadenceCompleteness(plan);
     const firstApproval = plan.status === "NEEDS_REVIEW";
     if (firstApproval) {
       plan.status = "APPROVED";
@@ -1114,12 +1470,16 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
       plan.approved_at = now;
     }
     const production = {
-      requested: (plan.selected_posts || []).length,
+      requested: (plan.selected_posts || []).length + (plan.story_plan || []).length,
       queued: 0,
       reused: 0,
       generation_runs: [],
     };
-    for (const selected of plan.selected_posts || []) {
+    const plannedCreatives = [
+      ...(plan.selected_posts || []).map((item) => ({ item, kind: "FEED" })),
+      ...(plan.story_plan || []).map((item) => ({ item, kind: "STORY" })),
+    ];
+    for (const { item: selected, kind } of plannedCreatives) {
       const candidateId = selected.candidateId || selected.candidate_id;
       const candidate = selected.candidate || (plan.candidates || []).find((item) => item.candidateId === candidateId);
       if (firstApproval || !selected.visual_mode_resolution) {
@@ -1130,13 +1490,24 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
         now,
         dependencies: transactionDependencies,
       });
+      const talkingHeadAction = await ensureTalkingHeadManualAction({
+        plan,
+        selected,
+        run: queued.run,
+        actor,
+        dependencies: transactionDependencies,
+      });
       if (queued.reused) production.reused += 1;
       else production.queued += 1;
       production.generation_runs.push({
         candidate_id: candidateId,
+        kind,
+        bundle_id: selected.bundleId || selected.bundle_id || null,
+        bundle_role: selected.bundleRole || selected.bundle_role || null,
         generation_run_id: queued.run?._id || queued.run?.id || null,
         reused: queued.reused,
         status: queued.run?.status || null,
+        manual_action_id: talkingHeadAction?._id || talkingHeadAction?.id || null,
       });
       if (!queued.reused || firstApproval) {
         await appendGrowthAudit({
@@ -1149,6 +1520,9 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
           actor,
           metadata: {
             candidate_id: candidateId,
+            kind,
+            bundle_id: selected.bundleId || selected.bundle_id || null,
+            bundle_role: selected.bundleRole || selected.bundle_role || null,
             generation_run_id: queued.run?._id || null,
             retry_of_generation_run_id: queued.retryOfRunId,
             reused: queued.reused,
@@ -1236,12 +1610,12 @@ async function replaceWeeklyPlanSlot(planId, slotNumber, candidateId, {
       throw error;
     }
     const previousCandidateId = String(selected.candidateId || selected.candidate_id || "");
-    const linkedRecordExists = Boolean(selected.generation_run_id || selected.draft_id || selected.publication_id)
-      || await modelExists(RunModel, { weekly_plan_id: plan._id, weekly_candidate_id: previousCandidateId }, session)
-      || await modelExists(DraftModel, {
-        weekly_plan_id: plan._id,
-        $or: [{ candidate_id: previousCandidateId }, { weekly_slot_number: parsedSlot }],
-      }, session);
+    const allPlanItems = [...(plan.selected_posts || []), ...(plan.story_plan || [])];
+    const linkedRecordExists = allPlanItems.some((item) => Boolean(
+      item.generation_run_id || item.draft_id || item.parent_draft_id || item.publication_id,
+    ))
+      || await modelExists(RunModel, { weekly_plan_id: plan._id }, session)
+      || await modelExists(DraftModel, { weekly_plan_id: plan._id }, session);
     if (linkedRecordExists) {
       const error = new Error("This slot already has creative-production history and cannot be replaced");
       error.statusCode = 409;
@@ -1277,6 +1651,13 @@ async function replaceWeeklyPlanSlot(planId, slotNumber, candidateId, {
     selected.draft_id = null;
     selected.publication_id = null;
     freezeSelectedVisualMode(selected, candidate, settings, transactionDependencies);
+    if (Number(plan.maximum_feed_posts || 0) === 5 || (plan.story_plan || []).length) {
+      plan.story_plan = buildWeeklyStoryPlan({
+        plan,
+        selectedPosts: plan.selected_posts,
+        candidates: plan.candidates,
+      });
+    }
     plan.version = previousVersion + 1;
     plan.output_checksum = sha256({
       prior_output_checksum: previousOutputChecksum,
@@ -1286,6 +1667,15 @@ async function replaceWeeklyPlanSlot(planId, slotNumber, candidateId, {
         slot_number: item.slotNumber || item.slot_number,
         scheduled_for: item.scheduledFor || item.scheduled_for,
         visual_mode_resolution: item.visual_mode_resolution || null,
+      })),
+      story_plan: (plan.story_plan || []).map((item) => ({
+        candidate_id: item.candidateId || item.candidate_id,
+        source_candidate_id: item.sourceCandidateId || item.source_candidate_id,
+        parent_candidate_id: item.parentCandidateId || item.parent_candidate_id,
+        slot_number: item.slotNumber || item.slot_number,
+        scheduled_for: item.scheduledFor || item.scheduled_for,
+        bundle_id: item.bundleId || item.bundle_id,
+        bundle_role: item.bundleRole || item.bundle_role,
       })),
     });
     await plan.save(session ? { session } : undefined);
@@ -1340,7 +1730,8 @@ async function requestWeeklyPostProduction(planId, candidateId, { actor = null, 
   const plan = await PlanModel.findById(planId);
   if (!plan) { const error = new Error("Weekly social plan not found"); error.statusCode = 404; throw error; }
   if (!["APPROVED", "SCHEDULED", "ACTIVE"].includes(plan.status)) { const error = new Error("Human approval of the weekly plan is required before creative production"); error.statusCode = 409; throw error; }
-  const selected = (plan.selected_posts || []).find((item) => item.candidateId === candidateId || item.candidate_id === candidateId);
+  const selected = [...(plan.selected_posts || []), ...(plan.story_plan || [])]
+    .find((item) => item.candidateId === candidateId || item.candidate_id === candidateId);
   if (!selected) { const error = new Error("The candidate is not selected in this weekly plan"); error.statusCode = 404; throw error; }
   const queued = await queueWeeklySelectedPost(plan, selected, { actor, now, dependencies });
   if (queued.run) await plan.save();
@@ -1353,12 +1744,15 @@ async function runDueWeeklyPrepublication({ now = new Date(), lookaheadHours = 2
   const end = new Date(now.getTime() + Math.min(Math.max(Number(lookaheadHours || 24), 1), 72) * 60 * 60 * 1000);
   const plans = await PlanModel.find({
     status: { $in: ["APPROVED", "SCHEDULED", "ACTIVE"] },
-    selected_posts: { $elemMatch: { scheduledFor: { $gte: now, $lte: end }, generation_run_id: null } },
+    $or: [
+      { selected_posts: { $elemMatch: { scheduledFor: { $gte: now, $lte: end }, generation_run_id: null } } },
+      { story_plan: { $elemMatch: { scheduledFor: { $gte: now, $lte: end }, generation_run_id: null } } },
+    ],
   }).limit(10);
   let queued = 0;
   const failures = [];
   for (const plan of plans) {
-    for (const selected of plan.selected_posts || []) {
+    for (const selected of [...(plan.selected_posts || []), ...(plan.story_plan || [])]) {
       const scheduled = new Date(selected.scheduledFor || selected.scheduled_for || 0);
       if (selected.generation_run_id || selected.status === "FAILED" || scheduled < now || scheduled > end) continue;
       try {
@@ -1859,7 +2253,7 @@ const GA4_EVENT_METRIC_NAMES = Object.freeze({
   workshop_enquiry: "workshop_enquiries",
   workshop_inquiry: "workshop_enquiries",
   workshop_lead: "workshop_enquiries",
-  generate_lead: "workshop_enquiries",
+  generate_lead: "marketing_leads",
   view_item: "product_page_visits",
   product_view: "product_page_visits",
   affiliate_click: "affiliate_clicks",
@@ -2032,8 +2426,9 @@ function snapshotPayload(provider, result, startDate, endDate, now) {
 
 async function persistGa4AttributionJoins({ ga4Snapshot, startDate, endDate, now, dependencies = {} }) {
   if (!ga4Snapshot) return [];
-  if (dependencies.SocialGrowthSnapshot && !dependencies.SocialPostDraft) return [];
+  if (dependencies.SocialGrowthSnapshot && (!dependencies.SocialPostDraft || !dependencies.SocialPublication)) return [];
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const PublicationModel = dependencies.SocialPublication || SocialPublication;
   const SnapshotModel = dependencies.SocialGrowthSnapshot || SocialGrowthSnapshot;
   const draftQuery = DraftModel.find({ status: "PUBLISHED" });
   const selectedDrafts = typeof draftQuery?.select === "function"
@@ -2042,12 +2437,32 @@ async function persistGa4AttributionJoins({ ga4Snapshot, startDate, endDate, now
   const limitedDrafts = typeof selectedDrafts?.limit === "function" ? selectedDrafts.limit(500) : selectedDrafts;
   const drafts = typeof limitedDrafts?.lean === "function" ? await limitedDrafts.lean() : await limitedDrafts;
   if (!Array.isArray(drafts) || !drafts.length) return [];
+  const publicationIds = drafts.map((draft) => draft.publication_id).filter(Boolean);
+  const draftIds = drafts.map((draft) => draft._id).filter(Boolean);
+  let publicationQuery = PublicationModel.find({
+    status: "PUBLISHED",
+    $or: [
+      { _id: { $in: publicationIds } },
+      { draft_id: { $in: draftIds } },
+    ],
+  });
+  if (typeof publicationQuery?.select === "function") {
+    publicationQuery = publicationQuery.select("_id draft_id status content_type tracked_url_delivery");
+  }
+  if (typeof publicationQuery?.lean === "function") publicationQuery = publicationQuery.lean();
+  const publicationRows = await publicationQuery;
+  const publications = Array.isArray(publicationRows) ? publicationRows : [];
+  const publicationById = new Map(publications.map((publication) => [String(publication._id || ""), publication]));
+  const publicationByDraftId = new Map(publications.map((publication) => [String(publication.draft_id || ""), publication]));
   const { attributionRows, conversionRows } = attributionRowsFromSnapshot(ga4Snapshot);
   const results = [];
   for (const draft of drafts) {
     const recommendation = draft.current_package?.primaryRecommendation || {};
     const utm = recommendation.utmParameters || null;
-    const attribution = attributedMetricsForUtm({ utm, attributionRows, conversionRows });
+    const publication = publicationById.get(String(draft.publication_id || ""))
+      || publicationByDraftId.get(String(draft._id || ""));
+    const attribution = attributionForPublishedDelivery({ publication, utm, attributionRows, conversionRows });
+    if (!attribution.eligible) continue;
     if (!Object.keys(attribution.metrics).length) continue;
     const payload = {
       snapshot_key: `social-growth:attribution-join:${String(ga4Snapshot.snapshot_key || ga4Snapshot._id)}:${draft._id}`.slice(0, 400),
@@ -2072,8 +2487,9 @@ async function persistGa4AttributionJoins({ ga4Snapshot, startDate, endDate, now
       dimensions: {
         landing_pages: attribution.landing_pages,
         matched_aggregate_rows: attribution.matched_rows,
+        tracked_url_delivery: attribution.delivery,
       },
-      provenance_note: "Aggregate GA4 Instagram organic-social rows joined to a Pink Paisa draft by its exact stored utm_campaign and utm_content; no user-level or personal data is stored.",
+      provenance_note: `Aggregate GA4 Instagram organic-social rows joined to a Pink Paisa draft only after provider-confirmed ${attribution.delivery.method} tracked-URL delivery; no user-level or personal data is stored.`,
       normalized_payload_hash: sha256({ draft_id: draft._id, utm, attribution }),
     };
     const stored = await SnapshotModel.findOneAndUpdate(
@@ -2352,6 +2768,7 @@ async function loadAggregatePostPerformance({ startDate, endDate, now = new Date
     if (!key) return;
     const current = metricsByDraft.get(key) || { instagram: {}, website: {} };
     const source = trimText(snapshot.source).toUpperCase();
+    if (source === "ATTRIBUTION_JOIN" && !verifiedTrackedUrlDelivery(snapshot)) return;
     const target = ["WEBSITE_ANALYTICS", "ATTRIBUTION_JOIN"].includes(source) ? current.website : current.instagram;
     Object.entries(numericMetrics(snapshot.metrics)).forEach(([metric, value]) => {
       if (!Object.hasOwn(target, metric)) target[metric] = value;
@@ -2366,7 +2783,12 @@ async function loadAggregatePostPerformance({ startDate, endDate, now = new Date
     if (!draft) return [];
     const recommendation = draft.current_package?.primaryRecommendation || {};
     const stored = metricsByDraft.get(key) || { instagram: {}, website: {} };
-    const attribution = attributedMetricsForUtm({ utm: recommendation.utmParameters, attributionRows, conversionRows });
+    const attribution = attributionForPublishedDelivery({
+      publication,
+      utm: recommendation.utmParameters,
+      attributionRows,
+      conversionRows,
+    });
     const website = { ...stored.website, ...attribution.metrics };
     return [{
       id: key,
@@ -2448,6 +2870,49 @@ function attributedMetricsForUtm({ utm, attributionRows, conversionRows }) {
   };
 }
 
+const VERIFIED_TRACKED_URL_METHODS = new Set(["STORY_LINK_STICKER", "DIRECT_MESSAGE", "PROVIDER_CONFIRMED_OTHER"]);
+
+function verifiedTrackedUrlDelivery(publication = {}) {
+  const delivery = publication.tracked_url_delivery
+    || publication.trackedUrlDelivery
+    || publication.dimensions?.tracked_url_delivery
+    || publication.dimensions?.trackedUrlDelivery
+    || null;
+  if (!delivery || delivery.verified !== true) return null;
+  const method = trimText(delivery.method).toUpperCase();
+  const targetUrl = trimText(delivery.target_url || delivery.targetUrl);
+  const providerReferenceId = trimText(delivery.provider_reference_id || delivery.providerReferenceId);
+  const verifiedAt = delivery.verified_at || delivery.verifiedAt;
+  if (!VERIFIED_TRACKED_URL_METHODS.has(method) || !targetUrl || !providerReferenceId || !verifiedAt) return null;
+  return {
+    verified: true,
+    method,
+    target_url: targetUrl,
+    provider_reference_id: providerReferenceId,
+    verified_at: verifiedAt,
+  };
+}
+
+function attributionForPublishedDelivery({ publication, utm, attributionRows, conversionRows }) {
+  const delivery = verifiedTrackedUrlDelivery(publication);
+  if (!delivery) {
+    return {
+      metrics: {},
+      landing_pages: [],
+      matched_rows: 0,
+      eligible: false,
+      delivery: null,
+      limitation: "No provider-confirmed tracked URL delivery exists for this publication; feed link-in-bio traffic remains aggregate and is not assigned to this post.",
+    };
+  }
+  return {
+    ...attributedMetricsForUtm({ utm, attributionRows, conversionRows }),
+    eligible: true,
+    delivery,
+    limitation: null,
+  };
+}
+
 async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies = {} } = {}) {
   const SnapshotModel = dependencies.SocialGrowthSnapshot || SocialGrowthSnapshot;
   const MetricModel = dependencies.SocialMetricSnapshot || SocialMetricSnapshot;
@@ -2470,6 +2935,7 @@ async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies =
   metricSnapshots.forEach((snapshot) => {
     const key = String(snapshot.draft_id || "");
     if (!key) return;
+    if (trimText(snapshot.source).toUpperCase() === "ATTRIBUTION_JOIN" && !verifiedTrackedUrlDelivery(snapshot)) return;
     const current = latestMetricByDraft.get(key) || { metrics: {}, utm_parameters: null, captured_at: null };
     Object.entries(numericMetrics(snapshot.metrics)).forEach(([metric, value]) => {
       if (!Object.hasOwn(current.metrics, metric)) current.metrics[metric] = value;
@@ -2485,7 +2951,7 @@ async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies =
     const recommendation = draft?.current_package?.primaryRecommendation || {};
     const metricSnapshot = latestMetricByDraft.get(String(publication.draft_id));
     const utm = recommendation.utmParameters || metricSnapshot?.utm_parameters || null;
-    const attribution = attributedMetricsForUtm({ utm, attributionRows, conversionRows });
+    const attribution = attributionForPublishedDelivery({ publication, utm, attributionRows, conversionRows });
     return {
       id: String(publication.draft_id),
       title: recommendation.internalTitle || recommendation.topic || "Published Instagram post",
@@ -2519,6 +2985,7 @@ async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies =
     if (Object.hasOwn(totals, "engaged_sessions")) rates.landing_page_engagement_rate = totals.engaged_sessions / websiteSessions;
     if (Object.hasOwn(totals, "quiz_starts")) rates.quiz_start_rate = totals.quiz_starts / websiteSessions;
     if (Object.hasOwn(totals, "workshop_enquiries")) rates.workshop_enquiry_rate = totals.workshop_enquiries / websiteSessions;
+    if (Object.hasOwn(totals, "marketing_leads")) rates.marketing_lead_rate = totals.marketing_leads / websiteSessions;
     if (Object.hasOwn(totals, "product_page_visits")) rates.product_page_visit_rate = totals.product_page_visits / websiteSessions;
     if (Object.hasOwn(totals, "affiliate_clicks")) rates.affiliate_click_rate = totals.affiliate_clicks / websiteSessions;
   }
@@ -2529,6 +2996,14 @@ async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies =
     post.objective_assessment = campaignObjectiveAssessment(post);
   });
   const campaignObjectiveAssessments = posts.map((post) => ({ post_id: post.id, ...post.objective_assessment }));
+  const legacyUnverifiedAttributionJoins = latest.filter((snapshot) => (
+    String(snapshot.provider || "").toUpperCase() === "ATTRIBUTION_JOIN"
+    && !verifiedTrackedUrlDelivery(snapshot)
+  ));
+  const safeHistoricalSnapshots = latest.filter((snapshot) => (
+    String(snapshot.provider || "").toUpperCase() !== "ATTRIBUTION_JOIN"
+    || Boolean(verifiedTrackedUrlDelivery(snapshot))
+  ));
   const currentPlan = await (dependencies.SocialWeeklyPlan || SocialWeeklyPlan).findOne({}).sort({ week_start: -1 }).lean();
   const growth = currentPlan?.growth_analysis || null;
   return {
@@ -2556,9 +3031,10 @@ async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies =
     ],
     warnings: [
       "Observed associations do not establish causation. Missing provider metrics are unavailable, not zero.",
+      ...(legacyUnverifiedAttributionJoins.length ? [`${legacyUnverifiedAttributionJoins.length} legacy per-post attribution join(s) lacked provider-confirmed tracked-URL delivery and were excluded; their traffic remains aggregate-only.`] : []),
       ...(attributionRows.length > 250 || conversionRows.length > 250 ? ["GA4 detail rows are truncated in this view; stored aggregate history remains complete."] : []),
     ],
-    historical_snapshots: latest,
+    historical_snapshots: safeHistoricalSnapshots,
     social_performance: social,
     growth_analysis: growth,
     interpretation: "Aggregates are directional and do not establish causation. Missing provider metrics remain unavailable rather than being converted to zero.",
@@ -2892,17 +3368,27 @@ module.exports = {
   sendApprovedCommunityReply,
   _private: {
     aggregateCommunityForAudience,
+    attributionForPublishedDelivery,
+    buildRollingContentMixSnapshot,
+    buildWeeklyStoryPlan,
     buildSourceCatalogue,
     configuredPostingSlots,
     enforceCommunityEscalation,
+    enrichWeeklyCandidates,
+    growthCategoryForCandidate,
+    requiresAuthenticTalkingHead,
     knownInternalDestinations,
+    loadRollingContentMixHistory,
     persistCommunityAutomationFailure,
     promptRun,
     resolvePlanningWindow,
+    seriesKeyForCandidate,
     weeklyMixRole,
     validateCandidateInternalTruth,
+    validateWeeklyCadenceCompleteness,
     validatePlanSelection,
     validateWeeklyResearchAgainstCatalogue,
+    verifiedTrackedUrlDelivery,
     metaDeskAsExternalResearch,
   },
 };

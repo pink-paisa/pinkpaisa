@@ -86,7 +86,7 @@ async function resolveVerifiedProductRecord(reference = {}, dependencies = {}) {
         archived_at: null,
       });
       if (typeof query.select === "function") {
-        query = query.select("title status is_visible archived_at is_affiliate affiliate_compliance_status affiliate_campaign_usage_rights affiliate_campaign_asset_url featured_image images affiliate_image_provenance");
+        query = query.select("title status is_visible archived_at is_affiliate affiliate_is_instagram_pick affiliate_link_check_status affiliate_compliance_status affiliate_campaign_usage_rights affiliate_campaign_asset_url featured_image images affiliate_image_provenance");
       }
       if (typeof query.lean === "function") query = query.lean();
       product = await query;
@@ -115,12 +115,14 @@ async function resolveVerifiedProductRecord(reference = {}, dependencies = {}) {
     );
   }
   if (product.is_affiliate && (
-    product.affiliate_compliance_status !== "compliant"
+    product.affiliate_is_instagram_pick !== true
+    || product.affiliate_link_check_status !== "ok"
+    || product.affiliate_compliance_status !== "compliant"
     || !RIGHTS_CLEARED.has(trimText(product.affiliate_campaign_usage_rights).toLowerCase())
   )) {
     throw productCreativeError(
       "social_product_reference_rights_invalid",
-      "The affiliate product image is not compliance-cleared and rights-cleared for social creative use.",
+      "The affiliate product must remain an approved Instagram pick with link health exactly ok, compliant status, and rights-cleared imagery for social creative use.",
     );
   }
 

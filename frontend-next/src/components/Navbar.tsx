@@ -11,15 +11,15 @@ import { useProductTaxonomy } from "@/hooks/useProductTaxonomy";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { financialCalculatorGroups } from "@/data/financialCalculators";
 import { useWishlist } from "@/hooks/useWishlist";
+import { useBlogs } from "@/hooks/useBlogs";
 
 const navLinks = [
-  { label: "Featured Products", href: "/#products", isHash: true },
+  { label: "Start Here", href: "/start-here" },
   { label: "Wellness", href: "/wellness" },
   { label: "Pink Pages", href: "/pink-pages" },
   { label: "Workshops", href: "/workshops" },
   { label: "Predictions", href: "/predictions" },
   { label: "Quiz", href: "/quiz" },
-  { label: "Blog", href: "/blogs" },
 ];
 
 const Navbar = () => {
@@ -31,6 +31,11 @@ const Navbar = () => {
   const [megaOpen, setMegaOpen] = useState(false);
   const [financialOpen, setFinancialOpen] = useState(false);
   const { data: taxonomy } = useProductTaxonomy();
+  const { data: publishedBlogs } = useBlogs(false);
+  const visibleNavLinks = useMemo(
+    () => publishedBlogs?.length ? [...navLinks, { label: "Blog", href: "/blogs" }] : navLinks,
+    [publishedBlogs],
+  );
 
   const visibleTaxonomy = useMemo(
     () => (taxonomy ?? []).filter((category) => category.slug !== "uncategorized" && category.is_active),
@@ -48,7 +53,7 @@ const Navbar = () => {
         </Link>
 
         <nav className="hidden items-center gap-4 lg:flex">
-          {navLinks.slice(0, 1).map((link) => (
+          {visibleNavLinks.slice(0, 1).map((link) => (
             <Link key={link.label} href={link.href} className="text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground">
               {link.label}
             </Link>
@@ -152,7 +157,7 @@ const Navbar = () => {
             </AnimatePresence>
           </div>
 
-          {navLinks.slice(1).map((link) => (
+          {visibleNavLinks.slice(1).map((link) => (
             <Link key={link.label} href={link.href} className="text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground">
               {link.label}
             </Link>
@@ -202,8 +207,8 @@ const Navbar = () => {
             className="max-h-[calc(100dvh-3.5rem)] overflow-y-auto overscroll-contain border-t border-border/50 bg-background lg:hidden"
           >
             <div className="container mx-auto flex flex-col gap-1 py-4">
-              <Link href="/#products" onClick={() => setMobileOpen(false)} className="rounded-lg px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent">
-                Featured Products
+              <Link href="/start-here" onClick={() => setMobileOpen(false)} className="rounded-lg px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent">
+                Start Here
               </Link>
               <Accordion type="single" collapsible className="rounded-lg border border-border/60 px-4">
                 <AccordionItem value="wellness" className="border-none">
@@ -266,7 +271,7 @@ const Navbar = () => {
                   </AccordionContent>
                 </AccordionItem>
               </Accordion>
-              {navLinks.slice(1).map((link) => (
+              {visibleNavLinks.slice(1).map((link) => (
                 <Link key={link.label} href={link.href} onClick={() => setMobileOpen(false)} className="rounded-lg px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-accent">
                   {link.label}
                 </Link>

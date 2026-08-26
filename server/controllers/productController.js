@@ -385,6 +385,13 @@ const buildProductFilter = async (req) => {
     filterClauses.push({ affiliate_is_instagram_pick: true });
   }
 
+  const affiliateLinkStatus = String(
+    req.query.affiliate_link_status || req.query.affiliate_link_check_status || "",
+  ).trim().toLowerCase();
+  if (["unchecked", "ok", "indeterminate", "failed", "paused"].includes(affiliateLinkStatus)) {
+    filterClauses.push({ affiliate_link_check_status: affiliateLinkStatus });
+  }
+
   if (req.query.campaign_label) {
     filterClauses.push({ campaign_label: String(req.query.campaign_label).trim() });
   }
@@ -429,6 +436,8 @@ const buildPassthroughQuery = (query = {}) => {
   delete passthroughQuery.brand;
   delete passthroughQuery.featured;
   delete passthroughQuery.affiliate_instagram_pick;
+  delete passthroughQuery.affiliate_link_status;
+  delete passthroughQuery.affiliate_link_check_status;
   delete passthroughQuery.campaign_label;
   delete passthroughQuery.bestseller;
   return passthroughQuery;
@@ -553,6 +562,7 @@ const buildProductPayload = async (body = {}, existingProduct = null) => {
 
   return {
     title: normalizeString(nextSource.title) || "Untitled product",
+    editorial_title: normalizeString(nextSource.editorial_title),
     slug,
     short_description: normalizeString(nextSource.short_description),
     full_description: normalizeString(nextSource.full_description),

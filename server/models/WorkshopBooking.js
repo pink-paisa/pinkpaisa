@@ -55,6 +55,7 @@ const WorkshopBookingSchema = new mongoose.Schema(
     cancelled_at: { type: Date, default: null },
     internal_notes: { type: String, default: null },
     certificate_url: { type: String, default: null },
+    attribution: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

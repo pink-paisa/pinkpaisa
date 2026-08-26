@@ -12,7 +12,7 @@
  *   supabase.channel()           → polling-based realtime shim
  *   supabase.removeChannel()     → clear polling interval
  */
-import { API_URL, authHeaders, routeFor } from "@/lib/api";
+import { API_URL, authHeaders, csrfHeadersFor, routeFor } from "@/lib/api";
 
 // ── Helpers ──────────────────────────────────────────────────
 
@@ -22,10 +22,11 @@ function j(body: unknown) {
 
 async function doFetch(url: string, opts: RequestInit = {}): Promise<{ data: any; error: any }> {
   try {
+    const csrfHeaders = await csrfHeadersFor(String(opts.method || "GET"));
     const res = await fetch(url, {
       ...opts,
       credentials: "include",
-      headers: { ...authHeaders(), ...(opts.headers as Record<string, string> || {}) },
+      headers: { ...authHeaders(), ...csrfHeaders, ...(opts.headers as Record<string, string> || {}) },
     });
     const json = await res.json().catch(() => null);
     if (!res.ok) return { data: null, error: json ?? { message: res.statusText } };
@@ -159,9 +160,11 @@ class StorageObjectRef {
     try {
       const form = new FormData();
       form.append("image", file);
+      const csrfHeaders = await csrfHeadersFor("POST");
       const res = await fetch(`${API_URL}/uploads/image`, {
         method: "POST",
         credentials: "include",
+        headers: csrfHeaders,
         body: form,
       });
       if (!res.ok) {

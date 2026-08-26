@@ -1394,6 +1394,8 @@ test("product image generation passes the verified authentic product reference w
         is_visible: true,
         archived_at: null,
         is_affiliate: true,
+        affiliate_is_instagram_pick: true,
+        affiliate_link_check_status: "ok",
         affiliate_compliance_status: "compliant",
         affiliate_campaign_usage_rights: "admin_confirmed",
         affiliate_campaign_asset_url: recommendation.verifiedProductFacts.imageUrl,

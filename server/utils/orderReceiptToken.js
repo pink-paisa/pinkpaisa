@@ -8,7 +8,6 @@ function createGuestOrderReceiptToken(order) {
     {
       type: GUEST_ORDER_RECEIPT_TYPE,
       order_id: String(order?._id || ""),
-      guest_email: String(order?.guest_email || "").toLowerCase(),
     },
     getJwtSecret(),
     { expiresIn: "30d" }

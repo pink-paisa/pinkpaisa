@@ -56,17 +56,22 @@ let workSummaryResponse: Record<string, unknown> | null = null;
 let customDrafts: Record<string, unknown>[] | null = null;
 let approveScheduleResponse: Record<string, unknown> | null = null;
 let draftDetailFailures: Record<string, number> = {};
+let weeklyPlanResponse: Record<string, unknown> | null = null;
+let heldDraftDetailId = "";
+let releaseHeldDraftDetail: (() => void) | null = null;
+let heldDraftDetail: Promise<void> | null = null;
 
 const apiFetch = vi.fn(async (path: string, _options?: Record<string, unknown>) => {
   const requestPath = String(path || "");
   if (requestPath.includes("/today")) return { data: { draft: null, previous_draft: null, generation_run: null, readiness: {} } };
-  if (requestPath.includes("weekly-plans/current")) return { data: { plan: null } };
+  if (requestPath.includes("weekly-plans/current")) return weeklyPlanResponse || { data: { plan: null } };
   if (requestPath.includes("research/weekly")) return { data: { research: null } };
   if (requestPath.endsWith("/approve-and-schedule")) return approveScheduleResponse || {};
   if (requestPath.includes("/drafts?")) return { data: { drafts: customDrafts || (includeDrafts ? [queuedDraft] : []) } };
   const customDetail = customDrafts?.find((draft) => requestPath.endsWith(`/drafts/${String(draft._id)}`));
   if (customDetail) {
     const id = String(customDetail._id);
+    if (id === heldDraftDetailId && heldDraftDetail) await heldDraftDetail;
     if ((draftDetailFailures[id] || 0) > 0) {
       draftDetailFailures[id] -= 1;
       throw new Error("Temporary draft detail failure");
@@ -95,6 +100,10 @@ describe("Social Media Manager workspace composition", () => {
     customDrafts = null;
     approveScheduleResponse = null;
     draftDetailFailures = {};
+    weeklyPlanResponse = null;
+    heldDraftDetailId = "";
+    releaseHeldDraftDetail = null;
+    heldDraftDetail = null;
   });
 
   it("renders exactly the five simplified workspace tabs", async () => {
@@ -293,6 +302,99 @@ describe("Social Media Manager workspace composition", () => {
     expect(screen.getByText(/1 more creative waiting/)).toBeVisible();
     const approveCall = apiFetch.mock.calls.find(([path]) => String(path).endsWith("/approve-and-schedule"));
     expect(approveCall?.[1]).toMatchObject({ body: "{}" });
+  });
+
+  it("loads and shows both bundled media sets before mandatory atomic approval", async () => {
+    const bundleId = "weekly:weekly-bundle-review:feed:feed-candidate-1";
+    const parent = {
+      ...reviewReadyDraft("draft-bundled-feed", "Bundled feed creative", "weekly-bundle-review", 1),
+      candidate_id: "feed-candidate-1",
+      bundle_id: bundleId,
+      bundle_role: "PARENT_FEED",
+    };
+    const companionBase = reviewReadyDraft("draft-bundled-story", "Bundled companion Story", "weekly-bundle-review", 1);
+    const companion = {
+      ...companionBase,
+      candidate_id: "story-candidate-1",
+      bundle_id: bundleId,
+      bundle_role: "COMPANION_STORY",
+      parent_draft_id: "draft-bundled-feed",
+      current_package: { primary_recommendation: {
+        ...(companionBase.current_package as { primary_recommendation: Record<string, unknown> }).primary_recommendation,
+        format: "STORY",
+        story_frames: [
+          { frame_number: 1, headline: "Pause", body: "Read the source before acting.", visual_instruction: "Editorial newspaper icon" },
+          { frame_number: 2, headline: "Verify", body: "Check the impact calmly.", visual_instruction: "Magnifier and shield icons" },
+        ],
+        alt_text: "A pink companion Story illustration",
+      } },
+      assets: [{ _id: "draft-bundled-story-asset", role: "FINAL_COMPOSED", url: "/uploads/draft-bundled-story.png", original_asset_url: "/uploads/draft-bundled-story-original.png", source_provenance: "generated", status: "VALID" }],
+    };
+    customDrafts = [parent, companion];
+    weeklyPlanResponse = { data: { plan: {
+      _id: "weekly-bundle-review",
+      status: "APPROVED",
+      week_start: "2099-08-31",
+      week_end: "2099-09-06",
+      timezone: "Asia/Kolkata",
+      maximum_feed_posts: 5,
+      selected_posts: [{
+        candidate_id: "feed-candidate-1",
+        slot_number: 1,
+        status: "NEEDS_REVIEW",
+        scheduled_for: "2099-09-01T05:30:00.000Z",
+        draft_id: "draft-bundled-feed",
+        bundle_id: bundleId,
+        bundle_role: "PARENT_FEED",
+        candidate: { title: "Bundled feed creative", topic: "Emergency buffer", format: "SINGLE_IMAGE", objective: "EDUCATION" },
+      }],
+      story_plan: [{
+        candidate_id: "story-candidate-1",
+        parent_candidate_id: "feed-candidate-1",
+        slot_number: 1,
+        status: "NEEDS_REVIEW",
+        scheduled_for: "2099-09-01T05:30:00.000Z",
+        draft_id: "draft-bundled-story",
+        parent_draft_id: "draft-bundled-feed",
+        bundle_id: bundleId,
+        bundle_role: "COMPANION_STORY",
+        candidate: { title: "Bundled companion Story", topic: "Emergency buffer", format: "STORY", objective: "EDUCATION" },
+      }],
+    } } };
+    heldDraftDetailId = "draft-bundled-story";
+    heldDraftDetail = new Promise<void>((resolve) => { releaseHeldDraftDetail = resolve; });
+    approveScheduleResponse = {
+      draft: { ...parent, status: "SCHEDULED" },
+      companion_story: { ...companion, status: "SCHEDULED" },
+      queue_navigation: { next_review_draft_id: null, remaining_review_count: 0, waiting_generation_count: 0 },
+    };
+
+    const user = userEvent.setup();
+    render(<SocialMediaManager />);
+    await user.click(screen.getByRole("tab", { name: /Content/ }));
+    await user.click((await screen.findAllByRole("button", { name: "Review creative" }))[0]);
+    expect(await screen.findByRole("region", { name: "Companion Story final review" })).toBeVisible();
+    expect(screen.getByText("Loading companion Story for review")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve & schedule" })).toBeDisabled();
+
+    releaseHeldDraftDetail?.();
+    expect(await screen.findByAltText("A pink companion Story illustration")).toBeVisible();
+    expect(screen.getByAltText("A pink savings illustration")).toBeVisible();
+    expect(screen.getByText("Story text package")).toBeVisible();
+    expect(screen.getByText("Complete Instagram caption")).toBeVisible();
+    expect(screen.getByText("Ready for bundled approval")).toBeVisible();
+    expect(screen.queryByRole("checkbox", { name: "Include companion Story" })).not.toBeInTheDocument();
+
+    const approve = screen.getByRole("button", { name: "Approve & schedule" });
+    expect(approve).toBeEnabled();
+    await user.click(approve);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      "/social-media-manager/admin/drafts/draft-bundled-feed/approve-and-schedule",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ include_companion_story: true }),
+      }),
+    ));
   });
 
   it("does not start or complete weekly queue navigation for a one-off draft", async () => {

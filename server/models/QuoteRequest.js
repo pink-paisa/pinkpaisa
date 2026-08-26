@@ -12,6 +12,7 @@ const QuoteRequestSchema = new mongoose.Schema(
     goals: { type: String, default: null },
     preferred_format: { type: String, default: null },
     budget: { type: String, default: null },
+    attribution: { type: mongoose.Schema.Types.Mixed, default: null },
     internal_notes: { type: String, default: null },
     status: { type: String, enum: ["new", "contacted", "proposal_sent", "converted", "lost", "closed"], default: "new" },
   },

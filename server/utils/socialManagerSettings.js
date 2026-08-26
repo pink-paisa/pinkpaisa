@@ -63,8 +63,34 @@ const DEFAULT_CONTENT_PILLAR_RATIOS = Object.freeze({
   curated_wellness_and_affiliate_products: 5,
 });
 
+const GROWTH_CONTENT_MIX_KEYS = Object.freeze([
+  "MONEY",
+  "BODY_FITNESS",
+  "WELLNESS_BEAUTY",
+  "WOMEN_LIFE",
+  "PINK_PAISA",
+]);
+
+const DEFAULT_GROWTH_CONTENT_MIX = Object.freeze({
+  MONEY: 40,
+  BODY_FITNESS: 20,
+  WELLNESS_BEAUTY: 15,
+  WOMEN_LIFE: 15,
+  PINK_PAISA: 10,
+});
+
+const SOCIAL_SERIES_KEYS = Object.freeze([
+  "PINK_PAISA_RULES",
+  "WOULD_I_BUY_IT",
+  "RICH_GIRL_MATH",
+  "AFTER_40",
+  "PINK_PAISA_FINDS",
+]);
+
+const SOCIAL_HOOK_FORMULA = Object.freeze(["HOOK", "TENSION", "VALUE", "IDENTITY", "CTA"]);
+
 const DEFAULT_SOCIAL_MANAGER_SETTINGS = Object.freeze({
-  settings_version: 3,
+  settings_version: 4,
   feature_enabled: true,
   brand_profile: {
     name: "Pink Paisa",
@@ -116,6 +142,13 @@ const DEFAULT_SOCIAL_MANAGER_SETTINGS = Object.freeze({
   important_dates: [],
   campaign_priorities: [],
   content_pillar_ratios: DEFAULT_CONTENT_PILLAR_RATIOS,
+  content_strategy: {
+    rolling_window_weeks: 4,
+    growth_content_mix: DEFAULT_GROWTH_CONTENT_MIX,
+    series_keys: SOCIAL_SERIES_KEYS,
+    hook_formula: SOCIAL_HOOK_FORMULA,
+    talking_head_policy: "SCRIPT_SHOT_LIST_ONLY",
+  },
   scoring_weights: {
     brand_relevance: 25,
     audience_usefulness: 20,
@@ -149,19 +182,21 @@ const DEFAULT_SOCIAL_MANAGER_SETTINGS = Object.freeze({
     enabled: true,
     cadence: "WEEKLY",
     candidate_count: 8,
-    maximum_feed_posts: 3,
-    max_feed_posts_per_week: 3,
+    maximum_feed_posts: 5,
+    max_feed_posts_per_week: 5,
     planning_weekday: "SUNDAY",
     planning_hour_ist: 18,
     planning_minute_ist: 0,
     prepublication_lead_hours: 24,
     research_digest_cache_hours: 168,
-    companion_stories_enabled: false,
+    companion_stories_enabled: true,
     timezone: SOCIAL_MANAGER_TIMEZONE,
     posting_slots: [
-      { slot_number: 1, weekday: "TUESDAY", hour_ist: 11, minute_ist: 0 },
-      { slot_number: 2, weekday: "THURSDAY", hour_ist: 18, minute_ist: 0 },
-      { slot_number: 3, weekday: "SATURDAY", hour_ist: 11, minute_ist: 0 },
+      { slot_number: 1, weekday: "MONDAY", hour_ist: 11, minute_ist: 0 },
+      { slot_number: 2, weekday: "TUESDAY", hour_ist: 18, minute_ist: 0 },
+      { slot_number: 3, weekday: "WEDNESDAY", hour_ist: 11, minute_ist: 0 },
+      { slot_number: 4, weekday: "THURSDAY", hour_ist: 18, minute_ist: 0 },
+      { slot_number: 5, weekday: "FRIDAY", hour_ist: 11, minute_ist: 0 },
     ],
   },
   default_posting_time: {
@@ -414,6 +449,23 @@ function normalizeRatios(value) {
   return normalized;
 }
 
+function normalizeGrowthContentMix(value) {
+  const source = isPlainObject(value) ? value : DEFAULT_GROWTH_CONTENT_MIX;
+  const raw = Object.fromEntries(GROWTH_CONTENT_MIX_KEYS.map((key) => [
+    key,
+    clampNumber(source[key], DEFAULT_GROWTH_CONTENT_MIX[key], 0, 100),
+  ]));
+  const total = Object.values(raw).reduce((sum, amount) => sum + amount, 0);
+  if (total <= 0) return { ...DEFAULT_GROWTH_CONTENT_MIX };
+  const normalized = Object.fromEntries(GROWTH_CONTENT_MIX_KEYS.map((key) => [
+    key,
+    Number(((raw[key] / total) * 100).toFixed(2)),
+  ]));
+  const normalizedTotal = Object.values(normalized).reduce((sum, amount) => sum + amount, 0);
+  normalized.MONEY = Number((normalized.MONEY + (100 - normalizedTotal)).toFixed(2));
+  return normalized;
+}
+
 function normalizeDomain(value) {
   const input = String(value || "").trim().toLowerCase();
   if (!input) return "";
@@ -495,13 +547,16 @@ function normaliseSocialManagerSettings(input = {}) {
   const merged = mergeKnown(DEFAULT_SOCIAL_MANAGER_SETTINGS, isPlainObject(input) ? input : {});
   const defaults = DEFAULT_SOCIAL_MANAGER_SETTINGS;
   const suppliedWeeklyPlanning = isPlainObject(input.weekly_planning) ? input.weekly_planning : {};
+  const legacyCadenceSettings = Number(input.settings_version || 3) < 4;
   const weeklyMaximumFeedPosts = clampInteger(
-    suppliedWeeklyPlanning.maximum_feed_posts
-      ?? suppliedWeeklyPlanning.max_feed_posts_per_week
-      ?? merged.weekly_planning.maximum_feed_posts,
-    3,
+    legacyCadenceSettings
+      ? defaults.weekly_planning.maximum_feed_posts
+      : suppliedWeeklyPlanning.maximum_feed_posts
+        ?? suppliedWeeklyPlanning.max_feed_posts_per_week
+        ?? merged.weekly_planning.maximum_feed_posts,
+    5,
     1,
-    3
+    5
   );
   const suppliedModels = isPlainObject(input.models) ? input.models : {};
   const audienceModel = normalizeString(
@@ -513,7 +568,7 @@ function normaliseSocialManagerSettings(input = {}) {
   );
 
   return {
-    settings_version: 3,
+    settings_version: 4,
     feature_enabled: parseBoolean(merged.feature_enabled, defaults.feature_enabled),
     brand_profile: {
       name: normalizeString(merged.brand_profile.name, defaults.brand_profile.name, 100),
@@ -560,6 +615,13 @@ function normaliseSocialManagerSettings(input = {}) {
     important_dates: normalizeImportantDates(merged.important_dates),
     campaign_priorities: normalizeCampaignPriorities(merged.campaign_priorities),
     content_pillar_ratios: normalizeRatios(merged.content_pillar_ratios),
+    content_strategy: {
+      rolling_window_weeks: 4,
+      growth_content_mix: normalizeGrowthContentMix(merged.content_strategy?.growth_content_mix),
+      series_keys: [...SOCIAL_SERIES_KEYS],
+      hook_formula: [...SOCIAL_HOOK_FORMULA],
+      talking_head_policy: "SCRIPT_SHOT_LIST_ONLY",
+    },
     scoring_weights: {
       brand_relevance: clampNumber(merged.scoring_weights.brand_relevance, 25, 0, 25),
       audience_usefulness: clampNumber(merged.scoring_weights.audience_usefulness, 20, 0, 20),
@@ -615,13 +677,10 @@ function normaliseSocialManagerSettings(input = {}) {
       planning_minute_ist: clampInteger(merged.weekly_planning.planning_minute_ist, 0, 0, 59),
       prepublication_lead_hours: clampInteger(merged.weekly_planning.prepublication_lead_hours, 24, 1, 168),
       research_digest_cache_hours: clampInteger(merged.weekly_planning.research_digest_cache_hours, 168, 1, 336),
-      companion_stories_enabled: parseBoolean(
-        merged.weekly_planning.companion_stories_enabled,
-        defaults.weekly_planning.companion_stories_enabled,
-      ),
+      companion_stories_enabled: true,
       timezone: SOCIAL_MANAGER_TIMEZONE,
       posting_slots: normalizePostingSlots(
-        merged.weekly_planning.posting_slots,
+        legacyCadenceSettings ? defaults.weekly_planning.posting_slots : merged.weekly_planning.posting_slots,
         defaults.weekly_planning.posting_slots
       ),
     },
@@ -848,8 +907,11 @@ function validateSocialManagerSettings(input, { partial = false } = {}) {
     }
   }
 
-  if (input.settings_version !== undefined && ![2, 3].includes(Number(input.settings_version))) {
-    issues.push("settings_version must be 2 or 3");
+  if (input.settings_version !== undefined && ![2, 3, 4].includes(Number(input.settings_version))) {
+    issues.push("settings_version must be 2, 3, or 4");
+  }
+  if (input.weekly_planning?.companion_stories_enabled === false && Number(input.settings_version || 4) >= 4) {
+    issues.push("weekly_planning.companion_stories_enabled cannot be disabled for the approved daily Story cadence");
   }
   if (input.approval?.require_human_approval === false) {
     issues.push("approval.require_human_approval cannot be disabled");
@@ -954,6 +1016,29 @@ function validateSocialManagerSettings(input, { partial = false } = {}) {
     if (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100) {
       issues.push(`content_pillar_ratios.${key} must be between 0 and 100`);
     }
+  }
+
+  for (const [key, value] of Object.entries(input.content_strategy?.growth_content_mix || {})) {
+    if (!GROWTH_CONTENT_MIX_KEYS.includes(key)) continue;
+    if (!Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 100) {
+      issues.push(`content_strategy.growth_content_mix.${key} must be between 0 and 100`);
+    }
+  }
+  if (input.content_strategy?.rolling_window_weeks !== undefined
+    && Number(input.content_strategy.rolling_window_weeks) !== 4) {
+    issues.push("content_strategy.rolling_window_weeks must remain 4");
+  }
+  if (input.content_strategy?.talking_head_policy !== undefined
+    && input.content_strategy.talking_head_policy !== "SCRIPT_SHOT_LIST_ONLY") {
+    issues.push("content_strategy.talking_head_policy must remain SCRIPT_SHOT_LIST_ONLY");
+  }
+  if (input.content_strategy?.series_keys !== undefined
+    && JSON.stringify(input.content_strategy.series_keys) !== JSON.stringify(SOCIAL_SERIES_KEYS)) {
+    issues.push("content_strategy.series_keys must contain the approved Pink Paisa series keys in canonical order");
+  }
+  if (input.content_strategy?.hook_formula !== undefined
+    && JSON.stringify(input.content_strategy.hook_formula) !== JSON.stringify(SOCIAL_HOOK_FORMULA)) {
+    issues.push("content_strategy.hook_formula must remain HOOK, TENSION, VALUE, IDENTITY, CTA");
   }
 
   for (const listPath of ["primary_audience", "voice", "avoid"]) {
@@ -1073,8 +1158,8 @@ function validateSocialManagerSettings(input, { partial = false } = {}) {
     ["daily_generation.hour_ist", 0, 23],
     ["daily_generation.minute_ist", 0, 59],
     ["weekly_planning.candidate_count", 8, 30],
-    ["weekly_planning.maximum_feed_posts", 1, 3],
-    ["weekly_planning.max_feed_posts_per_week", 1, 3],
+    ["weekly_planning.maximum_feed_posts", 1, 5],
+    ["weekly_planning.max_feed_posts_per_week", 1, 5],
     ["weekly_planning.planning_hour_ist", 0, 23],
     ["weekly_planning.planning_minute_ist", 0, 59],
     ["weekly_planning.prepublication_lead_hours", 1, 168],
@@ -1407,6 +1492,10 @@ function buildSocialManagerRuntimeSettings(input = {}) {
     business_priorities: [...settings.business_priorities],
     important_dates: clone(settings.important_dates),
     campaign_priorities: clone(settings.campaign_priorities),
+    growth_content_mix: clone(settings.content_strategy.growth_content_mix),
+    social_series_keys: [...settings.content_strategy.series_keys],
+    social_hook_formula: [...settings.content_strategy.hook_formula],
+    talking_head_policy: settings.content_strategy.talking_head_policy,
     research_enabled: settings.research.enabled,
     research_provider: researchProvider,
     research_domains: [...settings.research.allow_domains],
@@ -1559,11 +1648,15 @@ module.exports = {
   CONTENT_PILLAR_KEYS,
   DEFAULT_ANALYTICS_INTERVAL_HOURS,
   DEFAULT_CONTENT_PILLAR_RATIOS,
+  DEFAULT_GROWTH_CONTENT_MIX,
+  GROWTH_CONTENT_MIX_KEYS,
   DEFAULT_SOCIAL_MANAGER_SETTINGS,
   SETTINGS_CACHE_MS,
   SOCIAL_MANAGER_SETTINGS_KEY,
   SOCIAL_MANAGER_TIMEZONE,
   SOCIAL_OBJECTIVES,
+  SOCIAL_HOOK_FORMULA,
+  SOCIAL_SERIES_KEYS,
   SOCIAL_VISUAL_MODES,
   SOCIAL_WEEKDAYS,
   SocialManagerSettingsValidationError,

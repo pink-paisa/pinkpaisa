@@ -114,7 +114,7 @@ function applyAffiliateQuickFilter(filter = {}, quickFilter = "all") {
       { $or: [{ featured_image: null }, { featured_image: "" }, { featured_image: { $exists: false } }] },
     ];
   }
-  if (quickFilter === "link_issue") nextFilter.affiliate_link_check_status = { $in: ["unchecked", "failed", "invalid", null] };
+  if (quickFilter === "link_issue") nextFilter.affiliate_link_check_status = { $in: ["unchecked", "indeterminate", "failed", "invalid", null] };
   return nextFilter;
 }
 
@@ -611,6 +611,7 @@ async function buildAffiliatePayload(item, existing = null) {
 
   const payload = {
     title,
+    editorial_title: normalizeString(source.editorial_title),
     slug,
     short_description: rawShortDescription || normalizeString(source.short_title),
     full_description: normalizeString(source.full_description || source.description),
@@ -1159,7 +1160,7 @@ async function applyAffiliateBulkAction(product, action, payload = {}) {
       id: product._id,
       action,
       ok: Boolean(result.ok),
-      message: result.message || (result.ok ? "Amazon link reachable" : "Amazon link check failed"),
+      message: result.message || result.failure_reason || (result.ok ? "Amazon link reachable" : "Amazon link check failed"),
       product,
       extra: { link_check: result },
     });

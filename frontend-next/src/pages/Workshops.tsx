@@ -105,6 +105,7 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
   const benefitsInView = useInView(benefitsRef, { once: true, amount: 0.2 });
 
   const { data: workshops, isLoading } = useWorkshops(false, initialWorkshops);
+  const hasBookableWorkshops = Boolean(workshops?.length);
 
   const filtered = useMemo(() => {
     if (!workshops) return [];
@@ -139,10 +140,10 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
               Wellness workshops for organizations & groups
             </motion.h1>
             <motion.p variants={fadeUp} transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }} className="mb-8 text-lg text-muted-foreground">
-              Specially developed sessions covering physical, emotional, and financial wellbeing. For every corporate workshop purchased, Pink Paisa sponsors a complimentary workshop at a university.
+              Tell us your group size, goals, and preferred format. While the public workshop catalogue is being confirmed, every request is handled as a custom quote.
             </motion.p>
             <motion.div variants={fadeUp} transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }} className="flex flex-wrap gap-4">
-              <Button variant="hero" size="xl" asChild><a href="#workshop-list">Explore Workshops</a></Button>
+              {hasBookableWorkshops ? <Button variant="hero" size="xl" asChild><a href="#workshop-list">Explore Workshops</a></Button> : null}
               <Button variant="hero-outline" size="xl" onClick={() => setQuoteOpen(true)}>Get a Custom Quote</Button>
             </motion.div>
           </motion.div>
@@ -190,7 +191,7 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
       {/* Workshop list */}
       <section id="workshop-list" className="bg-rose-soft py-14 md:py-20">
         <div className="container mx-auto">
-          <div className="mb-8 flex flex-wrap gap-2">
+          {hasBookableWorkshops ? <div className="mb-8 flex flex-wrap gap-2">
             {workshopCategories.map((cat) => (
               <button
                 key={cat}
@@ -207,22 +208,29 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
                 )}
               </button>
             ))}
-          </div>
+          </div> : null}
 
-          <p className="mb-6 text-sm text-muted-foreground">
+          {hasBookableWorkshops ? <p className="mb-6 text-sm text-muted-foreground">
             {filtered.length} {filtered.length === 1 ? "workshop" : "workshops"} available
-          </p>
+          </p> : null}
 
           {isLoading ? (
             <div className="flex items-center justify-center py-20">
               <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
             </div>
-          ) : (
+          ) : filtered.length ? (
             <motion.div ref={gridRef} initial="hidden" animate="visible" transition={{ staggerChildren: 0.05 }} className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
               {filtered.map((ws, i) => (
                 <WorkshopCard key={ws.id} ws={ws} index={i} />
               ))}
             </motion.div>
+          ) : (
+            <div className="rounded-3xl border border-dashed border-primary/30 bg-card px-6 py-12 text-center">
+              <MessageCircle className="mx-auto h-10 w-10 text-primary" />
+              <h2 className="mt-4 font-serif text-2xl">Workshop bookings are quote-only right now</h2>
+              <p className="mx-auto mt-3 max-w-xl leading-7 text-muted-foreground">No fixed workshop inventory is currently available for online booking. Request a tailored proposal and the team will confirm scope, delivery, and pricing before you commit.</p>
+              <Button className="mt-6" size="lg" onClick={() => setQuoteOpen(true)}>Request Custom Quote</Button>
+            </div>
           )}
         </div>
       </section>
@@ -247,7 +255,7 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
               <a href="tel:+919987707611" className="text-sm font-medium opacity-80 transition-opacity hover:opacity-100">or call +91 99877 07611</a>
             </div>
 
-            <div className="mt-10 grid gap-4 border-t border-primary-foreground/20 pt-8 text-left sm:grid-cols-3">
+            {hasBookableWorkshops ? <div className="mt-10 grid gap-4 border-t border-primary-foreground/20 pt-8 text-left sm:grid-cols-3">
               {[
                 { title: "Annual Plan", desc: "₹14,999/yr — 12 workshops at 15% off", cta: "Save 15%" },
                 { title: "Recording Add-on", desc: "₹2,999/session — get a replay for absent employees", cta: "+₹2,999" },
@@ -259,13 +267,15 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
                   <span className="rounded-full bg-primary-foreground/15 px-2.5 py-0.5 text-xs font-semibold">{addon.cta}</span>
                 </div>
               ))}
-            </div>
+            </div> : (
+              <p className="mt-8 border-t border-primary-foreground/20 pt-6 text-sm opacity-80">Any price, add-on, or delivery date will be confirmed in writing in your quote.</p>
+            )}
           </div>
         </div>
       </section>
 
-      {/* Clientele */}
-      <section className="bg-secondary py-10">
+      {/* Client logos remain hidden until public-use approval is documented. */}
+      {process.env.NEXT_PUBLIC_TRUSTED_BY_ENABLED === "true" ? <section className="bg-secondary py-10">
         <div className="container mx-auto text-center">
           <p className="mb-6 text-sm font-semibold uppercase tracking-widest text-muted-foreground">Trusted by leading organizations</p>
           <div className="flex flex-wrap items-center justify-center gap-10 opacity-50 grayscale">
@@ -274,7 +284,7 @@ const Workshops = ({ initialWorkshops }: { initialWorkshops?: Workshop[] }) => {
             ))}
           </div>
         </div>
-      </section>
+      </section> : null}
 
       <Footer />
       <WorkshopQuoteModal open={quoteOpen} onClose={() => setQuoteOpen(false)} />

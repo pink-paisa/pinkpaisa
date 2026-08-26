@@ -11,7 +11,7 @@ type CampaignPageProps = {
 
 export const getServerSideProps: GetServerSideProps<CampaignPageProps> = async ({ params }) => {
   const slug = String(params?.slug || "");
-  const response = await serverFetch<CatalogProductsResponse>(`/products?include_meta=true&is_affiliate=true&campaign_label=${encodeURIComponent(slug)}&_page=1&_limit=24`).catch(() => null);
+  const response = await serverFetch<CatalogProductsResponse>(`/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&affiliate_link_status=ok&campaign_label=${encodeURIComponent(slug)}&_page=1&_limit=24`).catch(() => null);
   return { props: { slug, products: response?.items ?? [] } };
 };
 

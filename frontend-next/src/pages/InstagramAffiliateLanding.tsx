@@ -5,6 +5,7 @@ import Navbar from "@/components/Navbar";
 import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
 import type { CatalogProduct } from "@/hooks/useCatalogProducts";
 import { WELLNESS_INSTAGRAM_PICKS_PATH } from "@/lib/wellnessSeo";
+import { getAffiliateProductDisplayTitle } from "@/lib/affiliateProductDisplay";
 
 type InstagramAffiliateLandingProps = {
   title: string;
@@ -14,9 +15,8 @@ type InstagramAffiliateLandingProps = {
 };
 
 const tabs = [
-  { key: "home", label: "Best Finds", href: "/instagram" },
+  { key: "home", label: "Start Here", href: "/start-here" },
   { key: "picks", label: "Instagram Picks", href: "/instagram/picks" },
-  { key: "trending", label: "Trending Now", href: "/instagram/trending" },
 ] as const;
 
 export default function InstagramAffiliateLanding({
@@ -52,21 +52,25 @@ export default function InstagramAffiliateLanding({
               Campaign
             </span>
           ) : null}
-          <Link
-            href={WELLNESS_INSTAGRAM_PICKS_PATH}
-            className="inline-flex min-h-11 items-center rounded-full border border-border bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
-          >
-            Wellness Instagram Picks
-          </Link>
+          {products.length ? (
+            <Link
+              href={WELLNESS_INSTAGRAM_PICKS_PATH}
+              className="inline-flex min-h-11 items-center rounded-full border border-border bg-background px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-accent"
+            >
+              Wellness Instagram Picks
+            </Link>
+          ) : null}
         </div>
 
         {products.length ? (
           <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
-            {products.map((product) => (
+            {products.map((product) => {
+              const displayTitle = getAffiliateProductDisplayTitle(product);
+              return (
               <article key={product.id} className="flex flex-col rounded-2xl border border-border bg-card p-4 shadow-sm">
                 <Link href={`/product/${product.slug}`} className="mb-4 aspect-square overflow-hidden rounded-xl bg-accent/30">
                   {product.featured_image ? (
-                    <img src={product.featured_image} alt={product.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 hover:scale-105" />
+                    <img src={product.featured_image} alt={displayTitle} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 hover:scale-105" />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center">
                       <Sparkles className="h-12 w-12 text-muted-foreground/30" />
@@ -75,7 +79,7 @@ export default function InstagramAffiliateLanding({
                 </Link>
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">{product.category}</p>
                 <Link href={`/product/${product.slug}`} className="mt-2">
-                  <h2 className="line-clamp-2 font-serif text-lg leading-tight hover:text-primary">{product.title}</h2>
+                  <h2 className="line-clamp-2 font-serif text-lg leading-tight hover:text-primary">{displayTitle}</h2>
                 </Link>
                 {product.short_description ? (
                   <p className="mt-2 line-clamp-3 text-sm leading-6 text-muted-foreground">{product.short_description}</p>
@@ -84,7 +88,8 @@ export default function InstagramAffiliateLanding({
                   <AffiliateCta product={product} variant="product" className="w-full rounded-xl" />
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="rounded-2xl border border-dashed border-border p-10 text-center text-muted-foreground">

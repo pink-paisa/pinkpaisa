@@ -4,7 +4,7 @@ const { getBookings, getBooking, createBooking, updateBooking } = require("../co
 const { protect, optionalProtect, adminOnly } = require("../middleware/auth");
 
 router.get("/", protect, adminOnly, getBookings);
-router.get("/:id", getBooking);
+router.get("/:id", optionalProtect, getBooking);
 router.post("/", optionalProtect, createBooking);
 router.put("/:id", protect, adminOnly, updateBooking);
 

@@ -50,11 +50,15 @@ const STATIC_RESOURCES = Object.freeze([
   {
     type: "instagram_hub",
     title: "Pink Paisa Instagram Link Hub",
-    summary: "The permanent public Instagram route for the Wealthness Quiz, calculators, current articles and workshops, plus verified affiliate catalog products with disclosure.",
+    summary: "The permanent Start Here route for the Wealthness Quiz, calculators, verified affiliate picks and workshop quote requests.",
     landing_page: "/instagram",
     active: true,
   },
 ]);
+
+function digitalProductsArePromotable() {
+  return String(process.env.DIGITAL_PRODUCTS_ENABLED || "false").trim().toLowerCase() === "true";
+}
 
 function getIstDateKey(date = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {
@@ -90,11 +94,19 @@ function serialiseProduct(product = {}) {
     affiliate_asin: product.is_affiliate ? normalizeWhitespace(product.affiliate_asin) || null : null,
     verified_affiliate_url: product.is_affiliate ? trimText(product.affiliate_url) || null : null,
     compliance_status: product.affiliate_compliance_status || null,
+    affiliate_is_instagram_pick: product.is_affiliate ? product.affiliate_is_instagram_pick === true : false,
+    affiliate_link_check_status: product.is_affiliate ? product.affiliate_link_check_status || null : null,
     media_url: product.affiliate_campaign_asset_url || product.featured_image || product.images?.[0] || null,
     usage_rights_status: product.affiliate_campaign_usage_rights || null,
     landing_page: product.slug ? `/product/${encodeURIComponent(product.slug)}` : null,
     verified_facts_only: true,
   };
+}
+
+function productEligibleForSocialSignals(product = {}) {
+  if (!product.is_affiliate) return true;
+  return product.affiliate_is_instagram_pick === true
+    && product.affiliate_link_check_status === "ok";
 }
 
 function serialiseRecentSocialDraft(draft = {}) {
@@ -221,14 +233,15 @@ async function collectInternalSignals({ now = new Date(), settings = {}, depende
         { is_affiliate: false },
         {
           is_affiliate: true,
+          affiliate_is_instagram_pick: true,
           affiliate_compliance_status: "compliant",
           affiliate_url: { $nin: [null, ""] },
-          affiliate_link_check_status: { $in: ["ok", "unchecked", null] },
+          affiliate_link_check_status: "ok",
           affiliate_campaign_usage_rights: { $in: ["admin_confirmed", "owned", "licensed", "api_permitted"] },
         },
       ],
     })
-      .select("title slug short_description category subcategory brand_name tags pros buying_intent campaign_label is_affiliate affiliate_marketplace affiliate_asin affiliate_url affiliate_compliance_status affiliate_campaign_asset_url featured_image images affiliate_campaign_usage_rights affiliate_is_instagram_pick is_featured_affiliate featured createdAt")
+      .select("title slug short_description category subcategory brand_name tags pros buying_intent campaign_label is_affiliate affiliate_marketplace affiliate_asin affiliate_url affiliate_compliance_status affiliate_link_check_status affiliate_campaign_asset_url featured_image images affiliate_campaign_usage_rights affiliate_is_instagram_pick is_featured_affiliate featured createdAt")
       .sort({ affiliate_is_instagram_pick: -1, is_featured_affiliate: -1, featured: -1, createdAt: -1 })
       .limit(60)
       .lean(),
@@ -254,6 +267,8 @@ async function collectInternalSignals({ now = new Date(), settings = {}, depende
       disabled_reason: normalizeWhitespace(error?.message).slice(0, 300) || "Pink Predictions aggregate is unavailable",
     })),
   ]);
+  const promotableProducts = products.filter(productEligibleForSocialSignals);
+  const promotableVirtualProducts = digitalProductsArePromotable() ? virtualProducts : [];
 
   const recentHistory = [
     ...socialDrafts.map(serialiseRecentSocialDraft),
@@ -342,11 +357,11 @@ async function collectInternalSignals({ now = new Date(), settings = {}, depende
     day_of_week: dayOfWeek,
     salary_cycle_context: salaryCycleContext,
     summary: {
-      active_product_count: products.length,
-      active_affiliate_product_count: products.filter((product) => product.is_affiliate).length,
+      active_product_count: promotableProducts.length,
+      active_affiliate_product_count: promotableProducts.filter((product) => product.is_affiliate).length,
       active_blog_count: blogs.length,
       active_workshop_count: workshops.length,
-      active_virtual_product_count: virtualProducts.length,
+      active_virtual_product_count: promotableVirtualProducts.length,
       active_poll_count: polls.length,
       verified_pink_pages_count: pinkPages.length,
       recent_social_draft_count: socialDrafts.length,
@@ -357,7 +372,7 @@ async function collectInternalSignals({ now = new Date(), settings = {}, depende
     priorities: compactList(configuredPriorities, 30),
     important_dates: activeImportantDates,
     campaign_priorities: activeCampaignPriorities,
-    products: products.map(serialiseProduct),
+    products: promotableProducts.map(serialiseProduct),
     blogs: blogs.map((blog) => ({
       id: blog._id?.toString?.() || null,
       title: normalizeWhitespace(blog.title),
@@ -376,13 +391,13 @@ async function collectInternalSignals({ now = new Date(), settings = {}, depende
       supported_benefits: compactList(workshop.benefits, 8),
       landing_page: "/workshops",
     })),
-    virtual_products: virtualProducts.map((product) => ({
+    virtual_products: promotableVirtualProducts.map((product) => ({
       id: product._id?.toString?.() || null,
       title: normalizeWhitespace(product.title),
       summary: normalizeWhitespace(product.subtitle || product.description).slice(0, 500) || null,
       includes: compactList(product.includes, 10),
       format: normalizeWhitespace(product.format) || null,
-      landing_page: "/#products",
+      landing_page: product.slug ? `/product/${encodeURIComponent(product.slug)}` : "/products",
     })),
     polls: polls.map((poll) => ({
       id: poll._id?.toString?.() || null,
@@ -426,5 +441,5 @@ module.exports = {
   serialiseProduct,
   serialisePredictionSnapshot,
   serialiseRecentSocialDraft,
-  _private: { compactList, getIstDateKey },
+  _private: { compactList, digitalProductsArePromotable, getIstDateKey, productEligibleForSocialSignals },
 };

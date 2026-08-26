@@ -5,7 +5,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertTriangle, Clock3, MessageSquareQuote, Rocket, ShieldCheck, Sparkles } from "lucide-react";
-import ConfirmActionDialog from "@/components/ui/confirm-action-dialog";
 
 export type CampaignAutomationSettings = {
   campaign_mode: "manual" | "automatic";
@@ -160,7 +159,6 @@ const CampaignAutomationPanel = ({
   onSave: () => void;
 }) => {
   const [activePrompt, setActivePrompt] = useState<"affiliate" | "catalog">("affiliate");
-  const [directPublishConfirmOpen, setDirectPublishConfirmOpen] = useState(false);
   const scheduledTime = `${pad(settings.campaign_batch_hour_ist)}:${pad(settings.campaign_batch_minute_ist)}`;
   const activeMode = settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode !== "manual_review"
     ? settings.campaign_autopilot_mode
@@ -189,9 +187,9 @@ const CampaignAutomationPanel = ({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Campaign automation</p>
-          <h3 className="mt-2 font-serif text-2xl">Instagram autopilot mode</h3>
+          <h3 className="mt-2 font-serif text-2xl">Instagram draft automation</h3>
           <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-            Choose whether campaigns stop for review or publish automatically after the same compliance and Instagram readiness gates pass.
+            Automate product selection and draft generation. Every post still requires human review before it can publish.
           </p>
         </div>
         <Button className="rounded-2xl" onClick={onSave} disabled={loading || saving}>
@@ -223,7 +221,7 @@ const CampaignAutomationPanel = ({
 
             <button
               type="button"
-              onClick={() => onChange({ campaign_mode: "automatic", campaign_autopilot_mode: "single_post" })}
+              onClick={() => onChange({ campaign_mode: "automatic", campaign_autopilot_mode: "single_post", campaign_autopilot_publish_workflow: "require_approval" })}
               className={`rounded-2xl border p-4 text-left transition-all ${
                 activeMode === "single_post"
                   ? "border-primary bg-primary/5"
@@ -232,16 +230,16 @@ const CampaignAutomationPanel = ({
             >
               <div className="flex items-center gap-2 text-foreground">
                 <Rocket className="h-4 w-4 text-primary" />
-                <p className="font-medium">Single post autopilot</p>
+                <p className="font-medium">Single-post drafts</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Selects one eligible affiliate product and publishes one Instagram post per day.
+                Selects one approved affiliate pick and prepares one reviewable Instagram draft per day.
               </p>
             </button>
 
             <button
               type="button"
-              onClick={() => onChange({ campaign_mode: "automatic", campaign_autopilot_mode: "carousel" })}
+              onClick={() => onChange({ campaign_mode: "automatic", campaign_autopilot_mode: "carousel", campaign_autopilot_publish_workflow: "require_approval" })}
               className={`rounded-2xl border p-4 text-left transition-all ${
                 activeMode === "carousel"
                   ? "border-primary bg-primary/5"
@@ -250,10 +248,10 @@ const CampaignAutomationPanel = ({
             >
               <div className="flex items-center gap-2 text-foreground">
                 <Rocket className="h-4 w-4 text-primary" />
-                <p className="font-medium">Carousel autopilot</p>
+                <p className="font-medium">Carousel drafts</p>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                Selects one category, fills 2-10 eligible products, and publishes one carousel per day.
+                Selects one category and prepares a 2-10 product carousel for grouped human review.
               </p>
             </button>
           </div>
@@ -265,7 +263,7 @@ const CampaignAutomationPanel = ({
             <p className="font-medium">Morning IST schedule</p>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Autopilot uses this time for the daily post trigger. Review queue mode uses it only when automatic draft generation is enabled.
+            Draft automation uses this time as its daily generation trigger. Approval and publishing remain separate human-controlled steps.
           </p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -298,23 +296,9 @@ const CampaignAutomationPanel = ({
             <div className="mt-4 space-y-4">
               <div>
                 <p className="mb-2 text-xs uppercase tracking-[0.12em] text-muted-foreground">Publishing workflow</p>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <button
-                    type="button"
-                    onClick={() => onChange({ campaign_autopilot_publish_workflow: "require_approval" })}
-                    className={`rounded-xl border p-3 text-left transition-colors ${settings.campaign_autopilot_publish_workflow === "require_approval" ? "border-primary bg-primary/5" : "border-border bg-background hover:border-primary/40"}`}
-                  >
-                    <span className="flex items-center gap-2 text-sm font-medium"><ShieldCheck className="h-4 w-4 text-primary" /> Require approval</span>
-                    <span className="mt-1 block text-xs leading-5 text-muted-foreground">Generate the complete carousel, then wait for grouped admin review.</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDirectPublishConfirmOpen(true)}
-                    className={`rounded-xl border p-3 text-left transition-colors ${settings.campaign_autopilot_publish_workflow === "direct_publish" ? "border-primary bg-primary/5" : "border-border bg-background hover:border-primary/40"}`}
-                  >
-                    <span className="flex items-center gap-2 text-sm font-medium"><Rocket className="h-4 w-4 text-primary" /> Publish automatically</span>
-                    <span className="mt-1 block text-xs leading-5 text-muted-foreground">Publish without human approval after every safety gate passes.</span>
-                  </button>
+                <div className="rounded-xl border border-primary bg-primary/5 p-3">
+                  <span className="flex items-center gap-2 text-sm font-medium"><ShieldCheck className="h-4 w-4 text-primary" /> Human approval required</span>
+                  <span className="mt-1 block text-xs leading-5 text-muted-foreground">The complete carousel waits for grouped admin review. Direct publishing is disabled.</span>
                 </div>
               </div>
               <div>
@@ -493,18 +477,6 @@ const CampaignAutomationPanel = ({
           />
         </div>
       </div>
-      <ConfirmActionDialog
-        open={directPublishConfirmOpen}
-        onOpenChange={setDirectPublishConfirmOpen}
-        title="Enable direct carousel publishing?"
-        description="AI-generated carousels will publish without human approval when all product, affiliate, media, disclosure, and Instagram readiness checks pass."
-        confirmLabel="Enable direct publishing"
-        pending={saving}
-        onConfirm={() => {
-          onChange({ campaign_autopilot_publish_workflow: "direct_publish" });
-          setDirectPublishConfirmOpen(false);
-        }}
-      />
     </div>
   );
 };

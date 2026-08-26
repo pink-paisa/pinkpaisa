@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const AffiliateEventSchema = new mongoose.Schema({
   event_type: {
     type: String,
-    enum: ["product_view", "cta_click", "outbound_click"],
+    enum: ["card_impression", "detail_view", "product_view", "cta_click", "outbound_click"],
     required: true,
     index: true,
   },

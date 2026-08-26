@@ -39,8 +39,9 @@ export async function fetchWellnessCategoryProducts(config: WellnessPageConfig) 
   const attempts: string[] = [];
 
   if (config.key === "instagram-picks") {
-    attempts.push(`/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&_page=1&_limit=${PRODUCT_LIMIT}`);
-    attempts.push(`/products?include_meta=true&is_affiliate=true&featured=true&_page=1&_limit=${PRODUCT_LIMIT}`);
+    return fetchCatalogProducts(
+      `/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&affiliate_link_status=ok&_page=1&_limit=${PRODUCT_LIMIT}`,
+    );
   }
 
   if (config.categorySlug || config.subcategorySlug) {
@@ -75,13 +76,9 @@ export async function fetchWellnessCategoryProducts(config: WellnessPageConfig) 
 }
 
 export async function fetchWellnessHubProducts() {
-  const [instagramPicks, featured, recent] = await Promise.all([
-    fetchCatalogProducts(`/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&_page=1&_limit=8`),
-    fetchCatalogProducts(`/products?include_meta=true&is_affiliate=true&featured=true&_page=1&_limit=8`),
-    fetchCatalogProducts(`/products?include_meta=true&is_affiliate=true&sort=newest&_page=1&_limit=8`),
-  ]);
-
-  return dedupeProducts([...instagramPicks, ...featured, ...recent]).slice(0, 24);
+  return fetchCatalogProducts(
+    `/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&affiliate_link_status=ok&_page=1&_limit=${PRODUCT_LIMIT}`,
+  );
 }
 
 export async function fetchIndexableWellnessCollections() {

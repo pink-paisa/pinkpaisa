@@ -11,6 +11,9 @@ import {
 import { toast } from "sonner";
 import { X, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import TurnstileWidget, { TURNSTILE_SITE_KEY } from "@/components/security/TurnstileWidget";
+import { getMarketingAttribution } from "@/lib/marketingAttribution";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 interface Props {
   open: boolean;
@@ -20,6 +23,7 @@ interface Props {
 const WorkshopQuoteModal = ({ open, onClose }: Props) => {
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [form, setForm] = useState({
     company_name: "", contact_name: "", email: "", phone: "",
     team_size: "", goals: "", preferred_format: "", budget: "",
@@ -34,6 +38,9 @@ const WorkshopQuoteModal = ({ open, onClose }: Props) => {
     if (!form.company_name || !form.contact_name || !form.email || !form.phone) {
       toast.error("Please fill in required fields"); return;
     }
+    if (TURNSTILE_SITE_KEY && !captchaToken) {
+      toast.error("Please complete the security check"); return;
+    }
     setSubmitting(true);
     const { error } = await (supabase as any).from("workshop_quote_requests").insert({
       company_name: form.company_name,
@@ -44,14 +51,20 @@ const WorkshopQuoteModal = ({ open, onClose }: Props) => {
       goals: form.goals || null,
       preferred_format: form.preferred_format || null,
       budget: form.budget || null,
+      captcha_token: captchaToken,
+      attribution: getMarketingAttribution(),
     });
     if (error) { toast.error("Failed to submit"); console.error(error); }
-    else setSubmitted(true);
+    else {
+      setSubmitted(true);
+      trackAnalyticsEvent("workshop_enquiry", { preferred_format: form.preferred_format || "unspecified", team_size: Number(form.team_size || 0) });
+    }
     setSubmitting(false);
   };
 
   const handleClose = () => {
     setSubmitted(false);
+    setCaptchaToken(null);
     setForm({ company_name: "", contact_name: "", email: "", phone: "", team_size: "", goals: "", preferred_format: "", budget: "" });
     onClose();
   };
@@ -97,6 +110,7 @@ const WorkshopQuoteModal = ({ open, onClose }: Props) => {
               </div>
               <div className="space-y-1.5"><Label>Goals / Objectives</Label><Textarea value={form.goals} onChange={(e) => handleChange("goals", e.target.value)} rows={3} placeholder="What do you hope to achieve?" /></div>
               <div className="space-y-1.5"><Label>Budget Range</Label><Input value={form.budget} onChange={(e) => handleChange("budget", e.target.value)} placeholder="e.g. ₹50,000 – ₹1,00,000" /></div>
+              <TurnstileWidget action="workshop_quote" onTokenChange={setCaptchaToken} />
               <Button type="submit" className="w-full rounded-xl" size="lg" disabled={submitting}>
                 {submitting ? "Submitting..." : "Submit Quote Request"}
               </Button>

@@ -4,6 +4,7 @@ import { apiFetch } from "@/lib/api";
 export type PhysicalProduct = {
   id: string;
   title: string;
+  editorial_title?: string | null;
   slug: string;
   source_type?: "admin" | "vendor";
   is_affiliate?: boolean;
@@ -35,7 +36,7 @@ export type PhysicalProduct = {
   affiliate_sort_order?: number;
   affiliate_is_instagram_pick?: boolean;
   affiliate_link_last_checked_at?: string | null;
-  affiliate_link_check_status?: "unchecked" | "ok" | "failed" | "invalid" | string | null;
+  affiliate_link_check_status?: "unchecked" | "ok" | "indeterminate" | "failed" | "invalid" | string | null;
   affiliate_link_failure_count?: number;
   affiliate_link_failure_reason?: string | null;
   short_description: string | null;

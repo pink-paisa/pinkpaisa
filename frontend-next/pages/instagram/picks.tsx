@@ -9,7 +9,7 @@ type InstagramPicksPageProps = {
 };
 
 export const getServerSideProps: GetServerSideProps<InstagramPicksPageProps> = async () => {
-  const response = await serverFetch<CatalogProductsResponse>("/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&_page=1&_limit=24").catch(() => null);
+  const response = await serverFetch<CatalogProductsResponse>("/products?include_meta=true&is_affiliate=true&affiliate_instagram_pick=true&affiliate_link_status=ok&_page=1&_limit=24").catch(() => null);
   return { props: { products: response?.items ?? [] } };
 };
 

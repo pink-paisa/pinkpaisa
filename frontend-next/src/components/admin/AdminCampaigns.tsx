@@ -230,11 +230,10 @@ type CampaignSettingsResponse = Partial<CampaignAutomationSettings> & { message?
 
 const getCampaignAutomationModeLabel = (settings: CampaignAutomationSettings) => {
   if (settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode === "single_post") {
-    return "Single post autopilot";
+    return "Single-post drafts (approval required)";
   }
   if (settings.campaign_mode === "automatic" && settings.campaign_autopilot_mode === "carousel") {
-    const workflow = settings.campaign_autopilot_publish_workflow === "direct_publish" ? "direct" : "approval";
-    return `Carousel autopilot (${settings.campaign_autopilot_carousel_count} products, ${workflow})`;
+    return `Carousel drafts (${settings.campaign_autopilot_carousel_count} products, approval required)`;
   }
   return "Review queue";
 };
@@ -242,6 +241,7 @@ const getCampaignAutomationModeLabel = (settings: CampaignAutomationSettings) =>
 const normalizeCampaignSettingsResponse = (response: CampaignSettingsResponse): CampaignAutomationSettings => ({
   ...DEFAULT_CAMPAIGN_SETTINGS,
   ...response,
+  campaign_autopilot_publish_workflow: "require_approval",
   campaign_ai_affiliate_prompt_template: response.campaign_ai_affiliate_prompt_template
     || response.campaign_ai_prompt_template
     || "",

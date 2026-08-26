@@ -496,8 +496,20 @@ test("Instagram autopilot mode normalization and daily lock are conservative", (
   assert.equal(marketingPrivate.normalizeAutopilotCarouselCount(11), 10);
   assert.equal(marketingPrivate.normalizeAutopilotCarouselCount("7"), 7);
   assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("require_approval"), "require_approval");
-  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("direct_publish"), "direct_publish");
-  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("unknown"), "direct_publish");
+  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("direct_publish"), "require_approval");
+  assert.equal(marketingPrivate.normalizeAutopilotPublishWorkflow("unknown"), "require_approval");
+  assert.deepEqual(marketingPrivate.buildAutopilotEligibleProductQuery(), {
+    is_affiliate: true,
+    source_type: "admin",
+    status: "active",
+    is_visible: true,
+    archived_at: null,
+    affiliate_compliance_status: "compliant",
+    affiliate_url: { $nin: [null, ""] },
+    affiliate_tag: { $nin: [null, ""] },
+    affiliate_is_instagram_pick: true,
+    affiliate_link_check_status: "ok",
+  });
   assert.equal(marketingPrivate.isApprovalRequiredAutopilotCarousel({
     automation_mode: "autopilot_carousel",
     autopilot_publish_workflow: "require_approval",
@@ -505,7 +517,7 @@ test("Instagram autopilot mode normalization and daily lock are conservative", (
   assert.equal(marketingPrivate.isApprovalRequiredAutopilotCarousel({
     automation_mode: "autopilot_carousel",
     autopilot_publish_workflow: "direct_publish",
-  }), false);
+  }), true);
   assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: { autopilot_attempted: true }, run_ids: [] }), true);
   assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: {}, run_ids: ["run-id"] }), true);
   assert.equal(marketingPrivate.shouldReturnExistingAutopilotBatch({ metadata_json: {}, run_ids: [], total_runs: 0 }), false);
@@ -1767,7 +1779,11 @@ test("affiliate reference-edit prompts preserve exact products and prohibit comm
 test("campaign prompts separate affiliate and catalog rules and resolve canonical copy", () => {
   const settings = normaliseCampaignSettings({});
   assert.equal(settings.campaign_autopilot_publish_workflow, "require_approval");
-  assert.equal(normaliseCampaignSettings({ _id: "legacy-settings" }).campaign_autopilot_publish_workflow, "direct_publish");
+  assert.equal(normaliseCampaignSettings({ _id: "legacy-settings" }).campaign_autopilot_publish_workflow, "require_approval");
+  assert.equal(normaliseCampaignSettings({
+    _id: "legacy-direct-settings",
+    campaign_autopilot_publish_workflow: "direct_publish",
+  }).campaign_autopilot_publish_workflow, "require_approval");
   assert.equal(normaliseCampaignSettings({
     _id: "saved-settings",
     campaign_autopilot_publish_workflow: "require_approval",

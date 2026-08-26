@@ -73,6 +73,8 @@ test("work summary returns lightweight actionable counts in the required content
     needs_review: 3,
     terminal_failure: 6,
     open_manual_action: 6,
+    unresolved_failure_or_blocker: 12,
+    queue_complete_eligible: false,
     generating_waiting: 5,
     priority_order: [...CONTENT_PRIORITY_ORDER],
     terminal_failure_items: [],
