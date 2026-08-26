@@ -6,6 +6,8 @@ module.exports = {
       cwd: "/home/ubuntu/pinkpaisa/server",
       env: {
         NODE_ENV: "production",
+        MARKETING_WORKER_IN_API: "false",
+        MARKETING_SCHEDULER_IN_API: "false",
       },
     },
     {

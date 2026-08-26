@@ -1055,6 +1055,7 @@ async function clearCurrentPredictions() {
 module.exports = {
   castDailyPredictionVote,
   clearCurrentPredictions,
+  collectTrustedFeedItems: collectFeedItems,
   generateDailyPredictions,
   getAdminPredictionStatus,
   getPublicDailyPredictions,

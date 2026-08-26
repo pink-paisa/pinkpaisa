@@ -1,0 +1,129 @@
+{
+  "name": "Pink Paisa - Weekly Social Plan Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [0],
+              "triggerAtHour": 18,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "3c1a0d68-6760-4ac4-b08b-2a83493238c8",
+      "name": "Sunday 18:00 IST",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-620, 0]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3bf952e3-ac73-4e83-a1d8-b589341220f0",
+              "name": "timestamp",
+              "value": "={{ Math.floor(Date.now() / 1000).toString() }}",
+              "type": "string"
+            },
+            {
+              "id": "89cb0e08-f370-4436-93b7-16248d635498",
+              "name": "request_body",
+              "value": "={{ JSON.stringify({ source: 'n8n', trigger: 'weekly_schedule', force: false }) }}",
+              "type": "string"
+            },
+            {
+              "id": "f96e3494-bbcc-4912-86db-f59605bd637b",
+              "name": "idempotency_key",
+              "value": "={{ 'weekly-plan:' + $now.setZone('Asia/Kolkata').toISODate() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "13bd6767-1ce1-4c77-900b-ed4b2dd4dd2f",
+      "name": "Build Stable Request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-380, 0]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ ['pink-paisa-social-orchestration/v1', 'POST', '/api/social-media-manager/orchestration/weekly-plan', 'WEEKLY_PLAN', $json.idempotency_key, $json.timestamp, $json.request_body].join('\\n') }}",
+        "dataPropertyName": "signature_hex",
+        "secret": "={{ $env.N8N_SOCIAL_WEBHOOK_SECRET }}",
+        "encoding": "hex"
+      },
+      "id": "a911ea47-c2fd-4d94-a690-da8f6031f798",
+      "name": "Sign Canonical Request v1",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [-140, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PINK_PAISA_BASE_URL + '/api/social-media-manager/orchestration/weekly-plan' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Pink-Paisa-Timestamp", "value": "={{ $json.timestamp }}" },
+            { "name": "X-Pink-Paisa-Signature", "value": "={{ 'v1=sha256=' + $json.signature_hex }}" },
+            { "name": "X-Idempotency-Key", "value": "={{ $json.idempotency_key }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.request_body }}",
+        "options": {
+          "redirect": { "redirect": { "followRedirects": false, "maxRedirects": 0 } },
+          "timeout": 60000
+        }
+      },
+      "id": "7baf96c0-62b7-48e6-a84c-993bf28b8e8a",
+      "name": "Request Weekly Plan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [100, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Sunday 18:00 IST": {
+      "main": [[{ "node": "Build Stable Request", "type": "main", "index": 0 }]]
+    },
+    "Build Stable Request": {
+      "main": [[{ "node": "Sign Canonical Request v1", "type": "main", "index": 0 }]]
+    },
+    "Sign Canonical Request v1": {
+      "main": [[{ "node": "Request Weekly Plan", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "versionId": "f503845f-6406-4f90-bc07-5b91328587ab",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

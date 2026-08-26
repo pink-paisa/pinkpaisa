@@ -234,6 +234,41 @@ function getSupportInbox() {
   return String(process.env.SUPPORT_EMAIL || process.env.ADMIN_ALERT_EMAIL || "").trim().toLowerCase() || null;
 }
 
+function escapeEmailHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+async function sendSocialDraftReviewNotification({ recipients = [], draft }) {
+  const to = [...new Set((Array.isArray(recipients) ? recipients : [])
+    .map((email) => String(email || "").trim().toLowerCase())
+    .filter(Boolean))];
+  if (!to.length || !draft) return { delivered: false, skipped: "no_recipients" };
+  const recommendation = draft.current_package?.primaryRecommendation || {};
+  const adminUrl = `${getPublicAppUrl()}/admin?section=social_media_manager&draft=${encodeURIComponent(String(draft._id || draft.id || ""))}`;
+  const topic = String(recommendation.topic || recommendation.internalTitle || "Social draft").slice(0, 240);
+  const whyToday = String(recommendation.whyToday || "").slice(0, 700);
+  return sendEmail({
+    to,
+    subject: `Pink Paisa social draft ready: ${topic}`,
+    text: `${topic}\n\nWhy this recommendation: ${whyToday}\n\nReview it in Pink Paisa Admin: ${adminUrl}`,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.6;color:#30282b;">
+        <h2 style="margin:0 0 12px;">A Pink Paisa social draft is ready</h2>
+        <p style="margin:0 0 8px;"><strong>${escapeEmailHtml(topic)}</strong></p>
+        <p style="margin:0 0 16px;">${escapeEmailHtml(whyToday)}</p>
+        <p style="margin:16px 0;"><a href="${escapeEmailHtml(adminUrl)}" style="display:inline-block;padding:12px 18px;border-radius:999px;background:#d95f86;color:#fff;text-decoration:none;font-weight:600;">Review social draft</a></p>
+        <p style="margin:0;color:#6f5c64;">Nothing will be published until an administrator approves it and publishing readiness checks pass.</p>
+      </div>
+    `,
+    meta: { draftId: String(draft._id || draft.id || ""), flow: "social-draft-review", adminUrl },
+  });
+}
+
 async function sendOrderConfirmationEmail({ order, items = [] }) {
   const orderUrl = buildOrderConfirmationUrl(order);
   const lineItemsHtml = items
@@ -336,6 +371,7 @@ async function sendQuoteRequestReceivedEmails({ quoteRequest }) {
 module.exports = {
   assertEmailConfigForProduction,
   getPublicAppUrl,
+  sendSocialDraftReviewNotification,
   sendAdminPasswordResetEmail,
   sendOrderConfirmationEmail,
   sendQuoteRequestReceivedEmails,

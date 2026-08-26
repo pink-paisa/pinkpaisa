@@ -6,8 +6,12 @@ const {
   getInstagramConnectionController,
   instagramConnectCallbackController,
   startInstagramConnectController,
+  receiveInstagramWebhookController,
+  verifyInstagramWebhookController,
 } = require("../controllers/instagramController");
 
+router.get("/webhook", verifyInstagramWebhookController);
+router.post("/webhook", receiveInstagramWebhookController);
 router.get("/admin/connection", protect, adminOnly, getInstagramConnectionController);
 router.post("/admin/connect/start", protect, adminOnly, startInstagramConnectController);
 router.get("/admin/connect/callback", instagramConnectCallbackController);

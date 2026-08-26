@@ -44,6 +44,7 @@ const AdminSettingsSchema = new mongoose.Schema(
     predictions_daily_count: { type: Number, default: 15, min: 10, max: 20 },
     predictions_generation_hour_ist: { type: Number, default: 6, min: 0, max: 23 },
     predictions_generation_minute_ist: { type: Number, default: 0, min: 0, max: 59 },
+    social_manager_settings: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

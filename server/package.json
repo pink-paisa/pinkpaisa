@@ -2,11 +2,18 @@
   "name": "pinkpaisa-server",
   "version": "1.0.0",
   "main": "server.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
     "worker:marketing": "node workers/marketingWorker.js",
     "migrate:affiliate-prices": "node scripts/migrateAffiliatePriceState.js",
+    "migrate:social-manager": "node scripts/migrate/social-media-manager-foundation.js",
+    "migrate:social-manager:fully-ai": "node scripts/migrate/social-media-manager-foundation.js",
+    "migrate:social-growth": "node scripts/migrate/social-growth-team.js",
+    "verify:social-reel-runtime": "node scripts/verify/social-reel-runtime.js",
     "test": "node --test"
   },
   "dependencies": {
@@ -23,6 +30,7 @@
     "mongoose": "^8.24.2",
     "multer": "^2.2.0",
     "nodemailer": "^9.0.3",
+    "openai": "7.5.0",
     "redis": "^6.1.0",
     "sharp": "^0.35.3"
   },

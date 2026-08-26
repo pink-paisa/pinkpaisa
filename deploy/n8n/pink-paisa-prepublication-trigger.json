@@ -1,0 +1,177 @@
+{
+  "name": "Pink Paisa - Prepublication Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1,
+              "triggerAtMinute": 15
+            }
+          ]
+        }
+      },
+      "id": "717d9239-a35c-4101-ac62-1190ce56b8d1",
+      "name": "Hourly at :15",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-660, -120]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pink-paisa-prepublication",
+        "authentication": "none",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "c1a714b8-9563-4a13-9bd4-66a18e574f2c",
+      "name": "Optional Manual Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-660, 140],
+      "webhookId": "6768ff41-c2c1-431a-b8a0-aa3dac810de8"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "43dcf337-696e-44e5-9565-72e49520e162",
+              "leftValue": "={{ String($env.N8N_TRIGGER_BEARER_TOKEN || '').length >= 32 && ($json.headers.authorization || '') === 'Bearer ' + $env.N8N_TRIGGER_BEARER_TOKEN }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "55dc687c-b90a-4d79-b2fd-24cef1c5ed2f",
+      "name": "Require Manual Bearer",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-420, 140]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e18daf34-c39a-47b1-ab46-2fcff403051b",
+              "name": "timestamp",
+              "value": "={{ Math.floor(Date.now() / 1000).toString() }}",
+              "type": "string"
+            },
+            {
+              "id": "209687f6-131c-4dfd-9575-b31ffc2eda04",
+              "name": "request_body",
+              "value": "={{ JSON.stringify({ source: 'n8n', trigger: 'prepublication_schedule', lookahead_hours: 24 }) }}",
+              "type": "string"
+            },
+            {
+              "id": "0f03be9a-a4b2-4351-821e-1aa50be4d8be",
+              "name": "idempotency_key",
+              "value": "={{ 'prepublication:' + $now.setZone('Asia/Kolkata').toFormat('yyyy-LL-dd-HH') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "889ba02b-6609-457a-8814-ddf405025c5f",
+      "name": "Build Stable Request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-140, 0]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ ['pink-paisa-social-orchestration/v1', 'POST', '/api/social-media-manager/orchestration/prepublication', 'PREPUBLICATION', $json.idempotency_key, $json.timestamp, $json.request_body].join('\\n') }}",
+        "dataPropertyName": "signature_hex",
+        "secret": "={{ $env.N8N_SOCIAL_WEBHOOK_SECRET }}",
+        "encoding": "hex"
+      },
+      "id": "9a56b65e-9c5b-47a5-a3f2-bde36b43f2c7",
+      "name": "Sign Canonical Request v1",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [100, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PINK_PAISA_BASE_URL + '/api/social-media-manager/orchestration/prepublication' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Pink-Paisa-Timestamp", "value": "={{ $json.timestamp }}" },
+            { "name": "X-Pink-Paisa-Signature", "value": "={{ 'v1=sha256=' + $json.signature_hex }}" },
+            { "name": "X-Idempotency-Key", "value": "={{ $json.idempotency_key }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.request_body }}",
+        "options": {
+          "redirect": { "redirect": { "followRedirects": false, "maxRedirects": 0 } },
+          "timeout": 60000
+        }
+      },
+      "id": "c68b6738-a70f-4f07-8538-5de5adbf5e83",
+      "name": "Run Due Prepublication",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [340, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Hourly at :15": {
+      "main": [[{ "node": "Build Stable Request", "type": "main", "index": 0 }]]
+    },
+    "Optional Manual Webhook": {
+      "main": [[{ "node": "Require Manual Bearer", "type": "main", "index": 0 }]]
+    },
+    "Require Manual Bearer": {
+      "main": [[{ "node": "Build Stable Request", "type": "main", "index": 0 }], []]
+    },
+    "Build Stable Request": {
+      "main": [[{ "node": "Sign Canonical Request v1", "type": "main", "index": 0 }]]
+    },
+    "Sign Canonical Request v1": {
+      "main": [[{ "node": "Run Due Prepublication", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "versionId": "857e7d5f-4727-42a1-8d3a-fe8648725e59",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

@@ -48,7 +48,15 @@ app.use((req, res, next) => {
 
 app.use(securityHeaders);
 app.use(cors(createCorsOptions()));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb",
+  verify: (req, _res, buffer) => {
+    const requestPath = String(req.originalUrl || req.url || "");
+    if (requestPath.startsWith("/api/instagram/webhook") || requestPath.startsWith("/api/social-media-manager/orchestration/")) {
+      req.rawBody = Buffer.from(buffer);
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
@@ -72,12 +80,6 @@ const uploadLimiter = createRateLimiter({
   max: 40,
   message: "Too many upload requests. Please wait a bit and try again.",
 });
-const instagramLimiter = createRateLimiter({
-  keyPrefix: "instagram",
-  max: 80,
-  message: "Too many Instagram requests. Please wait a bit and try again.",
-});
-
 app.use("/api/auth", authLimiter, require("./routes/auth"));
 app.use(csrfProtection);
 app.use("/api/account", require("./routes/account"));
@@ -113,7 +115,8 @@ app.use("/api/vendor-products", require("./routes/vendorProducts"));
 app.use("/api/vendor-orders", require("./routes/vendorOrders"));
 app.use("/api/marketing-campaigns", require("./routes/marketingCampaigns"));
 app.use("/api/c", require("./routes/campaignLinks"));
-app.use("/api/instagram", instagramLimiter, require("./routes/instagram"));
+app.use("/api/instagram", require("./routes/instagram"));
+app.use("/api/social-media-manager", require("./routes/socialMediaManager"));
 
 app.get("/api/health", (_req, res) => {
   const dbState = mongoose.connection.readyState;

@@ -1,0 +1,245 @@
+{
+  "name": "Pink Paisa - Metric Refresh and Failure Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      },
+      "id": "74da3e70-b8b3-4462-8cd0-f93341b092e0",
+      "name": "Every 6 Hours at :30",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-740, -140]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "pink-paisa-metric-refresh",
+        "authentication": "none",
+        "responseMode": "onReceived",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "id": "8c832d90-e0f6-44a1-9c5b-8dd0459521b4",
+      "name": "Optional Manual Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-740, 140],
+      "webhookId": "52dded45-dd0f-44dd-a34d-329f8d1022ca"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9791fc3e-2a82-4ac2-963f-b913756e1ee6",
+              "leftValue": "={{ String($env.N8N_TRIGGER_BEARER_TOKEN || '').length >= 32 && ($json.headers.authorization || '') === 'Bearer ' + $env.N8N_TRIGGER_BEARER_TOKEN }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2864fbf9-2e3d-43fa-a93f-85556dd4c204",
+      "name": "Require Manual Bearer",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-500, 140]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "95c4df1b-1afc-4df2-a061-7f7289ed14e6",
+              "name": "timestamp",
+              "value": "={{ Math.floor(Date.now() / 1000).toString() }}",
+              "type": "string"
+            },
+            {
+              "id": "af342011-c1d0-438e-b6da-6397b73a54df",
+              "name": "request_body",
+              "value": "={{ JSON.stringify({ source: 'n8n', trigger: 'metric_refresh' }) }}",
+              "type": "string"
+            },
+            {
+              "id": "1dd91ef4-1e88-4bf5-936a-9a4bc263e1ee",
+              "name": "idempotency_key",
+              "value": "={{ 'metrics:' + Math.floor(Date.now() / 21600000).toString() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "477b551d-a47b-4661-835e-d956c96d9b72",
+      "name": "Build Stable Request",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-220, 0]
+    },
+    {
+      "parameters": {
+        "action": "hmac",
+        "binaryData": false,
+        "type": "SHA256",
+        "value": "={{ ['pink-paisa-social-orchestration/v1', 'POST', '/api/social-media-manager/orchestration/metrics', 'METRICS', $json.idempotency_key, $json.timestamp, $json.request_body].join('\\n') }}",
+        "dataPropertyName": "signature_hex",
+        "secret": "={{ $env.N8N_SOCIAL_WEBHOOK_SECRET }}",
+        "encoding": "hex"
+      },
+      "id": "3ef894fb-f745-4c35-8059-0170ddb2e2d9",
+      "name": "Sign Canonical Request v1",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [20, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.PINK_PAISA_BASE_URL + '/api/social-media-manager/orchestration/metrics' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Pink-Paisa-Timestamp", "value": "={{ $json.timestamp }}" },
+            { "name": "X-Pink-Paisa-Signature", "value": "={{ 'v1=sha256=' + $json.signature_hex }}" },
+            { "name": "X-Idempotency-Key", "value": "={{ $json.idempotency_key }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.request_body }}",
+        "options": {
+          "redirect": { "redirect": { "followRedirects": false, "maxRedirects": 0 } },
+          "timeout": 120000
+        }
+      },
+      "id": "2a3ae9c5-3504-4b95-a2b0-4a1ea6a262a9",
+      "name": "Refresh First-Party Metrics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0931b09e-b90c-40e6-9f0e-f9603f0954fc",
+              "name": "alert_body",
+              "value": "={{ JSON.stringify({ source: 'n8n', workflow: 'pink-paisa-metric-refresh', severity: 'error', observed_at: new Date().toISOString(), idempotency_key: $node['Build Stable Request'].json.idempotency_key, error: String(($json.error && $json.error.message) || $json.message || 'Pink Paisa metric refresh failed').slice(0, 1000) }) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9a921981-b281-40ae-987a-1c85ec3bb789",
+      "name": "Build Failure Alert",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [500, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SOCIAL_ALERT_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.alert_body }}",
+        "options": {
+          "redirect": { "redirect": { "followRedirects": false, "maxRedirects": 0 } },
+          "timeout": 15000
+        }
+      },
+      "id": "2cb76d23-574a-4e5d-a3d2-402768e49d32",
+      "name": "Send Failure Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 120],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "errorMessage": "Pink Paisa metric refresh failed; the failure alert path ran."
+      },
+      "id": "c88ecff8-f64c-48ec-8be5-bdaf77662fa7",
+      "name": "Keep Execution Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [980, 120]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 6 Hours at :30": {
+      "main": [[{ "node": "Build Stable Request", "type": "main", "index": 0 }]]
+    },
+    "Optional Manual Webhook": {
+      "main": [[{ "node": "Require Manual Bearer", "type": "main", "index": 0 }]]
+    },
+    "Require Manual Bearer": {
+      "main": [[{ "node": "Build Stable Request", "type": "main", "index": 0 }], []]
+    },
+    "Build Stable Request": {
+      "main": [[{ "node": "Sign Canonical Request v1", "type": "main", "index": 0 }]]
+    },
+    "Sign Canonical Request v1": {
+      "main": [[{ "node": "Refresh First-Party Metrics", "type": "main", "index": 0 }]]
+    },
+    "Refresh First-Party Metrics": {
+      "main": [[], [{ "node": "Build Failure Alert", "type": "main", "index": 0 }]]
+    },
+    "Build Failure Alert": {
+      "main": [[{ "node": "Send Failure Alert", "type": "main", "index": 0 }]]
+    },
+    "Send Failure Alert": {
+      "main": [[{ "node": "Keep Execution Failed", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true
+  },
+  "versionId": "06943ad9-870e-4ba6-880c-d10ed921c64f",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

@@ -2,6 +2,7 @@ const axios = require("axios");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const InstagramConnection = require("../models/InstagramConnection");
+const SocialOAuthState = require("../models/SocialOAuthState");
 const { requireEnv } = require("../utils/authConfig");
 
 const DEFAULT_GRAPH_VERSION = process.env.INSTAGRAM_GRAPH_API_VERSION || "v23.0";
@@ -117,15 +118,37 @@ function getScopes() {
   return scopes;
 }
 
-function buildOauthState() {
+function buildOauthState({ actorId = null, nonce = crypto.randomUUID() } = {}) {
   return jwt.sign(
     {
       purpose: "instagram-connect",
       issued_at: Date.now(),
+      nonce,
+      actor_id: actorId ? String(actorId) : null,
     },
     getOauthSecret(),
     { expiresIn: "15m" }
   );
+}
+
+function stateHash(state) {
+  return crypto.createHash("sha256").update(String(state || "")).digest("hex");
+}
+
+async function consumeOauthState(state) {
+  const decoded = verifyOauthState(state);
+  if (!decoded?.nonce) throw new Error("Invalid Instagram OAuth state nonce");
+  const record = await SocialOAuthState.findOneAndUpdate(
+    { provider: "INSTAGRAM", state_hash: stateHash(state), nonce: decoded.nonce, consumed_at: null, expires_at: { $gt: new Date() } },
+    { $set: { consumed_at: new Date() } },
+    { new: true },
+  );
+  if (!record) {
+    const error = new Error("Instagram OAuth state is expired, unknown, or has already been used");
+    error.code = "instagram_oauth_state_replayed";
+    throw error;
+  }
+  return { decoded, record };
 }
 
 function verifyOauthState(state) {
@@ -229,6 +252,18 @@ async function getInstagramProfile(userAccessToken) {
   }
 }
 
+async function getGrantedInstagramPermissions(userAccessToken) {
+  const response = await axios.get(`${INSTAGRAM_GRAPH_BASE}/${getGraphVersion()}/me/permissions`, {
+    params: { access_token: userAccessToken },
+    timeout: 20000,
+  });
+  const rows = Array.isArray(response.data?.data) ? response.data.data : [];
+  return rows
+    .filter((permission) => String(permission.status || "granted").toLowerCase() === "granted")
+    .map((permission) => trimValue(permission.permission || permission.name))
+    .filter(Boolean);
+}
+
 function buildAuthUrl(stateToken) {
   assertInstagramEnv();
   const params = new URLSearchParams({
@@ -259,8 +294,17 @@ async function saveConnection(existing, updates) {
 }
 
 async function ensureConnectionTokenEncryption(connection) {
-  if (!connection || !connection.user_access_token_encrypted) return connection;
-  if (connection.token_storage_mode === "encrypted") return connection;
+  if (!connection) return connection;
+
+  const userToken = connection.user_access_token_encrypted || null;
+  const pageToken = connection.page_access_token_encrypted || null;
+  if (!userToken && !pageToken) return connection;
+
+  const isEncryptedValue = (value) => !value || String(value).startsWith("enc:");
+  if (isEncryptedValue(userToken) && isEncryptedValue(pageToken)) {
+    if (connection.token_storage_mode === "encrypted") return connection;
+    return saveConnection(connection, { token_storage_mode: "encrypted", last_error: null });
+  }
 
   const key = getEncryptionKey();
   if (!key) {
@@ -268,10 +312,12 @@ async function ensureConnectionTokenEncryption(connection) {
     return connection;
   }
 
-  const encryptedToken = encryptToken(connection.user_access_token_encrypted);
+  const encryptedUserToken = isEncryptedValue(userToken) ? userToken : encryptToken(userToken).value;
+  const encryptedPageToken = isEncryptedValue(pageToken) ? pageToken : encryptToken(pageToken).value;
   return saveConnection(connection, {
-    user_access_token_encrypted: encryptedToken.value,
-    token_storage_mode: encryptedToken.mode,
+    user_access_token_encrypted: encryptedUserToken,
+    page_access_token_encrypted: encryptedPageToken,
+    token_storage_mode: "encrypted",
     last_error: null,
   });
 }
@@ -288,8 +334,8 @@ function serialiseConnection(connection) {
 
   return {
     id: String(connection._id),
-    provider: "instagram_login",
-    login_type: connection.login_type || "instagram_business_login",
+    provider: connection.provider || "instagram_login",
+    login_type: connection.login_type || (connection.provider === "facebook_login" ? "facebook_login_for_business" : "instagram_business_login"),
     status: connection.status,
     is_connected: connection.status === "connected",
     account_type: connection.account_type || connection.metadata_json?.profile?.account_type || null,
@@ -319,18 +365,26 @@ async function getInstagramConnectionSummary() {
   return serialiseConnection(safeConnection);
 }
 
-async function createInstagramConnectStart() {
-  const state = buildOauthState();
+async function createInstagramConnectStart({ actor = null } = {}) {
+  const nonce = crypto.randomUUID();
+  const adminId = actor?._id || actor?.id || null;
+  const state = buildOauthState({ actorId: adminId, nonce });
+  await SocialOAuthState.create({
+    provider: "INSTAGRAM",
+    state_hash: stateHash(state),
+    nonce,
+    initiated_by_admin_id: adminId,
+    expires_at: new Date(Date.now() + 15 * 60 * 1000),
+  });
   return {
     auth_url: buildAuthUrl(state),
-    state,
   };
 }
 
 async function connectInstagramFromCode({ code, state }) {
   assertInstagramEnv();
   assertTokenEncryptionConfigured();
-  verifyOauthState(state);
+  await consumeOauthState(state);
 
   const shortLived = await exchangeCodeForUserToken(code);
   const longLived = await exchangeForLongLivedUserToken(shortLived.access_token).catch(() => null);
@@ -341,6 +395,7 @@ async function connectInstagramFromCode({ code, state }) {
   }
 
   const profile = await getInstagramProfile(activeToken);
+  const grantedPermissions = await getGrantedInstagramPermissions(activeToken).catch(() => null);
   const encryptedToken = encryptToken(activeToken);
   const expiresInSeconds = Number(
     longLived?.expires_in
@@ -365,7 +420,7 @@ async function connectInstagramFromCode({ code, state }) {
     user_access_token_encrypted: encryptedToken.value,
     page_access_token_encrypted: null,
     token_storage_mode: encryptedToken.mode,
-    granted_scopes: getScopes(),
+    granted_scopes: grantedPermissions || [],
     token_expires_at: tokenExpiry,
     last_connected_at: new Date(),
     last_refreshed_at: new Date(),
@@ -375,6 +430,8 @@ async function connectInstagramFromCode({ code, state }) {
       oauth_response: {
         token_source: longLived ? "long_lived" : "short_lived",
         expires_in: expiresInSeconds || null,
+        requested_scopes: getScopes(),
+        scope_verification_status: grantedPermissions ? "PROVIDER_VERIFIED" : "UNAVAILABLE",
       },
       profile: {
         app_scoped_id: profile.app_scoped_id || null,
@@ -395,8 +452,8 @@ async function disconnectInstagramConnection() {
   if (!existing) return serialiseConnection(null);
 
   const connection = await saveConnection(existing, {
-    provider: "instagram_login",
-    login_type: "instagram_business_login",
+    provider: existing.provider || "instagram_login",
+    login_type: existing.login_type || "instagram_business_login",
     status: "disconnected",
     user_access_token_encrypted: null,
     page_access_token_encrypted: null,
@@ -411,10 +468,28 @@ async function maybeRefreshConnectionToken(connection) {
   if (!connection) throw new Error("Instagram account is not connected");
 
   const encryptionSafeConnection = await ensureConnectionTokenEncryption(connection);
-  const userAccessToken = decryptToken(encryptionSafeConnection.user_access_token_encrypted, encryptionSafeConnection.token_storage_mode);
-  if (!userAccessToken) throw new Error("Instagram access token is missing. Reconnect the account.");
+  const userAccessToken = encryptionSafeConnection.user_access_token_encrypted
+    ? decryptToken(encryptionSafeConnection.user_access_token_encrypted, encryptionSafeConnection.token_storage_mode)
+    : null;
+  const pageAccessToken = encryptionSafeConnection.page_access_token_encrypted
+    ? decryptToken(encryptionSafeConnection.page_access_token_encrypted, encryptionSafeConnection.token_storage_mode)
+    : null;
 
   const expiresAt = encryptionSafeConnection.token_expires_at ? new Date(encryptionSafeConnection.token_expires_at) : null;
+  if (encryptionSafeConnection.provider === "facebook_login") {
+    if (!userAccessToken && !pageAccessToken) {
+      throw new Error("Facebook Login access token is missing. Reconnect the account through the reviewed Facebook Login flow.");
+    }
+    if (expiresAt && expiresAt.getTime() <= Date.now()) {
+      throw new Error("Facebook Login access token expired. Reconnect the account through the reviewed Facebook Login flow.");
+    }
+    return {
+      connection: encryptionSafeConnection,
+      user_access_token: userAccessToken,
+      page_access_token: pageAccessToken,
+    };
+  }
+  if (!userAccessToken) throw new Error("Instagram access token is missing. Reconnect the account.");
   const shouldAttemptRefresh = expiresAt && (expiresAt.getTime() - Date.now() <= REFRESH_WINDOW_MS);
 
   if (!shouldAttemptRefresh) {
@@ -430,6 +505,7 @@ async function maybeRefreshConnectionToken(connection) {
     const encryptedToken = encryptToken(nextToken);
     const nextExpiry = parseExpiry(refreshed?.expires_in, 60 * 24 * 60 * 60);
     const profile = await getInstagramProfile(nextToken).catch(() => null);
+    const grantedPermissions = await getGrantedInstagramPermissions(nextToken).catch(() => null);
 
     const updated = await saveConnection(encryptionSafeConnection, {
       provider: "instagram_login",
@@ -440,6 +516,7 @@ async function maybeRefreshConnectionToken(connection) {
       instagram_username: profile?.username || encryptionSafeConnection.instagram_username || null,
       instagram_name: profile?.name || encryptionSafeConnection.instagram_name || null,
       profile_picture_url: profile?.profile_picture_url || encryptionSafeConnection.profile_picture_url || null,
+      granted_scopes: grantedPermissions || encryptionSafeConnection.granted_scopes || [],
       user_access_token_encrypted: encryptedToken.value,
       token_storage_mode: encryptedToken.mode,
       token_expires_at: nextExpiry || encryptionSafeConnection.token_expires_at,
@@ -452,6 +529,8 @@ async function maybeRefreshConnectionToken(connection) {
           ...(encryptionSafeConnection.metadata_json?.oauth_response || {}),
           token_source: "long_lived",
           expires_in: Number(refreshed?.expires_in || 0) || null,
+          requested_scopes: getScopes(),
+          scope_verification_status: grantedPermissions ? "PROVIDER_VERIFIED" : "UNAVAILABLE",
         },
         profile: {
           ...(encryptionSafeConnection.metadata_json?.profile || {}),
@@ -492,6 +571,7 @@ async function getActiveInstagramConnection({ withTokens = false, refreshIfNeede
 
   let activeConnection = connection;
   let userAccessToken = null;
+  let pageAccessToken = null;
 
   if (withTokens || refreshIfNeeded) {
     const refreshed = refreshIfNeeded
@@ -504,6 +584,9 @@ async function getActiveInstagramConnection({ withTokens = false, refreshIfNeede
     activeConnection = refreshed.connection;
     userAccessToken = refreshed.user_access_token
       || decryptToken(activeConnection.user_access_token_encrypted, activeConnection.token_storage_mode);
+    pageAccessToken = refreshed.page_access_token || (activeConnection.page_access_token_encrypted
+      ? decryptToken(activeConnection.page_access_token_encrypted, activeConnection.token_storage_mode)
+      : null);
   }
 
   const summary = serialiseConnection(activeConnection);
@@ -513,7 +596,7 @@ async function getActiveInstagramConnection({ withTokens = false, refreshIfNeede
     ...summary,
     raw: activeConnection,
     user_access_token: userAccessToken,
-    page_access_token: null,
+    page_access_token: pageAccessToken,
   };
 }
 
@@ -527,8 +610,8 @@ async function markInstagramConnectionError(message) {
   const existing = await getConnectionRecord();
   if (!existing) return;
   await saveConnection(existing, {
-    provider: "instagram_login",
-    login_type: "instagram_business_login",
+    provider: existing.provider || "instagram_login",
+    login_type: existing.login_type || "instagram_business_login",
     last_error: String(message || "Instagram connection error"),
   });
 }
@@ -540,6 +623,7 @@ module.exports = {
   disconnectInstagramConnection,
   getActiveInstagramConnection,
   getGraphVersion,
+  getGrantedInstagramPermissions,
   getInstagramConnectionSummary,
   markInstagramConnectionError,
   markInstagramPublishSuccess,
