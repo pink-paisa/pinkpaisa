@@ -205,6 +205,68 @@ test("Instagram growth service performs insights and comment operations without 
   assert.equal(calls[5].method, "DELETE");
 });
 
+test("read-only Insights health probes defer missing-scope authorization to Meta", async () => {
+  const calls = [];
+  const service = createInstagramGrowthService({
+    settings: instagramLoginSettings({ scopes: [] }),
+    dependencies: {
+      env: {},
+      httpClient: {
+        async request(options) {
+          calls.push(options);
+          return {
+            status: 200,
+            data: { data: [{ name: "reach", period: "day", values: [{ value: 91 }] }] },
+          };
+        },
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.getInsights({ metrics: ["reach"] }),
+    (error) => error.code === "MISSING_PERMISSION",
+  );
+  assert.equal(calls.length, 0);
+
+  const result = await service.probeInsightsAccess({ metrics: ["reach"] });
+  assert.equal(result.data[0].name, "reach");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, "GET");
+  assert.match(calls[0].url, /\/v24\.0\/17841400000000001\/insights$/);
+  assert.equal(calls[0].headers.Authorization, "Bearer instagram-top-secret-token");
+});
+
+test("read-only Insights health probes preserve typed, redacted provider failures", async () => {
+  const service = createInstagramGrowthService({
+    settings: instagramLoginSettings({ scopes: [] }),
+    dependencies: {
+      env: {},
+      httpClient: {
+        async request() {
+          const error = new Error("instagram-top-secret-token was rejected");
+          error.response = {
+            status: 403,
+            data: { error: { code: 200, message: "Token instagram-top-secret-token lacks permission" } },
+          };
+          throw error;
+        },
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.probeInsightsAccess({ metrics: ["reach"] }),
+    (error) => {
+      assert.equal(error.code, "META_200");
+      assert.equal(error.status, 403);
+      assert.doesNotMatch(error.message, /instagram-top-secret-token/);
+      assert.match(error.message, /\[REDACTED\]/);
+      return true;
+    },
+  );
+});
+
 test("getMediaInsights compatibility wrapper maps mediaId to lifetime media metrics", async () => {
   const calls = [];
   const topLevelService = require("../services/instagramGrowthService");
@@ -363,6 +425,7 @@ test("Instagram capability export is stable for consumers", () => {
   assert.equal(matrix.capabilities.mentions.available, true);
   assert.equal(matrix.capabilities.comments.available, false);
   assert.equal(typeof topLevelService.getInsights, "function");
+  assert.equal(typeof topLevelService.probeInsightsAccess, "function");
   assert.equal(typeof topLevelService.getMediaInsights, "function");
   assert.equal(typeof topLevelService.listComments, "function");
   assert.equal(typeof topLevelService.replyToComment, "function");

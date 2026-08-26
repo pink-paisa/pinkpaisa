@@ -59,6 +59,7 @@ module.exports = {
   getHashtag: connectedResearchOperation("getHashtag"),
   getHashtagMedia: connectedResearchOperation("getHashtagMedia"),
   getInsights: connectedOperation("getInsights"),
+  probeInsightsAccess: connectedOperation("probeInsightsAccess"),
   getInstagramBusinessDiscovery: connectedResearchOperation("getInstagramBusinessDiscovery"),
   getInstagramComments: connectedOperation("getInstagramComments"),
   getInstagramHashtag: connectedResearchOperation("getInstagramHashtag"),

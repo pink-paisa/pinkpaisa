@@ -444,6 +444,125 @@ test("connection refresh API surface includes Meta research health without chang
   assert.match(refreshed.connections.instagram.warnings[0], /unavailable through Instagram Login/i);
 });
 
+test("connection refresh uses a live Insights probe when Instagram scope introspection is unavailable", async () => {
+  const persisted = [];
+  const summary = {
+    id: "instagram-connection-1",
+    provider: "instagram_login",
+    is_connected: true,
+    instagram_user_id: "17841400000000001",
+    account_type: "BUSINESS",
+    granted_scopes: [],
+    requested_scopes: ["instagram_business_basic", "instagram_business_manage_insights"],
+    scope_verification_status: "UNAVAILABLE",
+  };
+  let probeCalls = 0;
+  let legacyCalls = 0;
+
+  const refreshed = await getConnections({
+    refresh: true,
+    dependencies: {
+      env: {},
+      getSocialManagerSettings: async () => ({
+        research: { enabled: false },
+        watchlists: { hashtags: [], competitor_accounts: [] },
+      }),
+      getInstagramConnectionSummary: async () => summary,
+      getInstagramAccessToken: async () => "provider-token",
+      instagramGrowthService: {
+        async getInsights() {
+          legacyCalls += 1;
+          throw new Error("legacy scope preflight must not run");
+        },
+        async probeInsightsAccess() {
+          probeCalls += 1;
+          return { source: "instagram_graph_api", data: [{ name: "reach" }] };
+        },
+      },
+      refreshMetaResearchWatchlists: async () => ({
+        state: "NOT_CONFIGURED",
+        checked_at: "2026-08-26T10:00:00.000Z",
+        message: "No Meta research watchlist is configured.",
+        observations: [],
+        errors: [],
+      }),
+      SocialConnectionHealth: {
+        findOneAndUpdate: async (_query, update) => {
+          persisted.push(update.$set);
+          return update.$set;
+        },
+      },
+    },
+  });
+
+  const instagram = refreshed.connections.instagram;
+  assert.equal(probeCalls, 1);
+  assert.equal(legacyCalls, 0);
+  assert.equal(instagram.status, "CONNECTED");
+  assert.equal(instagram.connected, true);
+  assert.equal(instagram.capabilities.insights.available, true);
+  assert.equal(instagram.capabilities.insights.verification, "LIVE_PROVIDER_PROBE");
+  assert.deepEqual(instagram.capabilityMatrix.scopes, []);
+  assert.deepEqual(summary.granted_scopes, []);
+  const storedInstagram = persisted.find((row) => row.provider === "INSTAGRAM");
+  assert.equal(storedInstagram.status, "CONNECTED");
+  assert.equal(storedInstagram.latest_check.status, "CONNECTED");
+});
+
+test("connection refresh keeps a rejected live Insights probe visibly failed", async () => {
+  const persisted = [];
+  const providerError = Object.assign(new Error("Meta denied the Insights request"), {
+    code: "META_200",
+    status: 403,
+  });
+  const refreshed = await getConnections({
+    refresh: true,
+    dependencies: {
+      env: {},
+      getSocialManagerSettings: async () => ({
+        research: { enabled: false },
+        watchlists: { hashtags: [], competitor_accounts: [] },
+      }),
+      getInstagramConnectionSummary: async () => ({
+        id: "instagram-connection-1",
+        provider: "instagram_login",
+        is_connected: true,
+        instagram_user_id: "17841400000000001",
+        account_type: "BUSINESS",
+        granted_scopes: [],
+      }),
+      getInstagramAccessToken: async () => "provider-token",
+      instagramGrowthService: {
+        async probeInsightsAccess() { throw providerError; },
+      },
+      refreshMetaResearchWatchlists: async () => ({
+        state: "NOT_CONFIGURED",
+        checked_at: "2026-08-26T10:00:00.000Z",
+        message: "No Meta research watchlist is configured.",
+        observations: [],
+        errors: [],
+      }),
+      SocialConnectionHealth: {
+        findOneAndUpdate: async (_query, update) => {
+          persisted.push(update.$set);
+          return update.$set;
+        },
+      },
+    },
+  });
+
+  const instagram = refreshed.connections.instagram;
+  assert.equal(instagram.status, "ERROR");
+  assert.equal(instagram.connected, false);
+  assert.equal(instagram.error_code, "META_200");
+  assert.match(instagram.error, /denied the Insights request/i);
+  assert.equal(instagram.capabilities.insights.available, false);
+  const storedInstagram = persisted.find((row) => row.provider === "INSTAGRAM");
+  assert.equal(storedInstagram.status, "ERROR");
+  assert.equal(storedInstagram.latest_check.status, "ERROR");
+  assert.equal(storedInstagram.latest_check.error_code, "META_200");
+});
+
 test("connection refresh exposes an Instagram summary-store failure as ERROR instead of NOT_CONFIGURED", async () => {
   const persisted = [];
   const settings = { watchlists: { hashtags: [], competitor_accounts: [] }, research: { enabled: false } };

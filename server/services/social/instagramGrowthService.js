@@ -216,7 +216,9 @@ function capabilityFor(config, name) {
   return { matrix, capability: matrix.capabilities?.[name] };
 }
 
-function assertOperationConfigured(config, capabilityName, operation) {
+function assertOperationConfigured(config, capabilityName, operation, {
+  allowProviderAuthorizationProbe = false,
+} = {}) {
   if (!config.profile || !config.accountId) {
     throw new InstagramGrowthError("Instagram growth connector is not configured", {
       code: "NOT_CONFIGURED",
@@ -236,7 +238,7 @@ function assertOperationConfigured(config, capabilityName, operation) {
       operation,
     });
   }
-  if (!capability.available) {
+  if (!capability.available && !allowProviderAuthorizationProbe) {
     throw new InstagramGrowthError(`Instagram permissions are insufficient for ${operation}`, {
       code: "MISSING_PERMISSION",
       operation,
@@ -265,13 +267,14 @@ async function resolveAccessToken(config, dependencies, operation) {
 async function graphRequest(config, dependencies, {
   operation,
   capabilityName,
+  allowProviderAuthorizationProbe = false,
   method = "GET",
   path,
   params,
   data,
   headers = {},
 }) {
-  assertOperationConfigured(config, capabilityName, operation);
+  assertOperationConfigured(config, capabilityName, operation, { allowProviderAuthorizationProbe });
   const token = await resolveAccessToken(config, dependencies, operation);
   const client = dependencies.httpClient || axios;
   if (!client || typeof client.request !== "function") {
@@ -400,14 +403,14 @@ function createInstagramGrowthService({ settings = {}, dependencies = {} } = {})
   const config = normalizeSettings(settings, dependencies);
   const now = () => new Date((dependencies.now || (() => new Date()))());
 
-  async function getInsights({
+  async function requestInsights({
     objectId = config.accountId,
     metrics = ["reach", "profile_views"],
     period = "day",
     since = null,
     until = null,
     metricType = null,
-  } = {}) {
+  } = {}, { allowProviderAuthorizationProbe = false } = {}) {
     const id = assertGraphId(objectId, "Instagram insight object ID");
     const metricNames = parseList(metrics);
     if (!metricNames.length || metricNames.length > 20 || metricNames.some((metric) => !config.allowedInsightMetrics.has(metric))) {
@@ -429,6 +432,7 @@ function createInstagramGrowthService({ settings = {}, dependencies = {} } = {})
     const response = await graphRequest(config, dependencies, {
       operation: "insights",
       capabilityName: "insights",
+      allowProviderAuthorizationProbe,
       path: `/${encodeURIComponent(id)}/insights`,
       params,
     });
@@ -438,6 +442,17 @@ function createInstagramGrowthService({ settings = {}, dependencies = {} } = {})
       data: (response.data || []).map(normalizeInsight),
       paging: normalizePaging(response.paging),
     };
+  }
+
+  async function getInsights(options = {}) {
+    return requestInsights(options);
+  }
+
+  // Instagram Login does not consistently expose a token-permissions edge.
+  // A health probe therefore skips only the local scope-list preflight and lets
+  // Meta authorize this read-only request. Provider rejection still fails closed.
+  async function probeInsightsAccess(options = {}) {
+    return requestInsights(options, { allowProviderAuthorizationProbe: true });
   }
 
   async function listComments({
@@ -764,6 +779,7 @@ function createInstagramGrowthService({ settings = {}, dependencies = {} } = {})
       productTaggingApproved: config.productTaggingApproved,
     }),
     getInsights,
+    probeInsightsAccess,
     listComments,
     replyToComment,
     setCommentHidden,
@@ -946,6 +962,11 @@ function getInstagramInsights(options = {}) {
   return service.getInsights(operation);
 }
 
+function probeInstagramInsightsAccess(options = {}) {
+  const { service, operation } = splitOperationOptions(options);
+  return service.probeInsightsAccess(operation);
+}
+
 function getInstagramMediaInsights(options = {}) {
   const { service, operation } = splitOperationOptions(options);
   const { mediaId, objectId, ...rest } = operation;
@@ -1041,6 +1062,7 @@ module.exports = {
   deleteInstagramComment,
   getComments: getInstagramComments,
   getInsights: getInstagramInsights,
+  probeInsightsAccess: probeInstagramInsightsAccess,
   getInstagramCapabilityMatrix,
   getInstagramComments,
   getInstagramInsights,

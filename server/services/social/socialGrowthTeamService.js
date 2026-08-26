@@ -2568,6 +2568,7 @@ async function getAnalyticsSummary({ days = 90, now = new Date(), dependencies =
 async function getConnections({ refresh = false, settings = null, dependencies = {} } = {}) {
   const canonicalSettings = settings || await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
   const connectors = dependencies.connectors || require("./socialGrowthConnectors");
+  const liveVerifiedInstagramCapabilities = new Set();
   let instagramSummary = null;
   let instagramSummaryError = null;
   try {
@@ -2618,12 +2619,17 @@ async function getConnections({ refresh = false, settings = null, dependencies =
       },
       instagram: async () => {
         if (!instagramSummary?.is_connected || !instagramSummary?.instagram_user_id) return false;
-        await (dependencies.instagramGrowthService || require("../instagramGrowthService")).getInsights({
+        const instagramService = dependencies.instagramGrowthService || require("../instagramGrowthService");
+        const probeInsightsAccess = typeof instagramService.probeInsightsAccess === "function"
+          ? instagramService.probeInsightsAccess.bind(instagramService)
+          : instagramService.getInsights.bind(instagramService);
+        await probeInsightsAccess({
           objectId: instagramSummary.instagram_user_id,
           metrics: ["reach"],
           period: "day",
           dependencies,
         });
+        liveVerifiedInstagramCapabilities.add("insights");
         return true;
       },
       ga4: async () => {
@@ -2678,9 +2684,19 @@ async function getConnections({ refresh = false, settings = null, dependencies =
       connected: connection?.connected === true || state === "CONNECTED",
       capabilities: capabilitySource,
       error: connection?.error?.message || connection?.message || null,
+      error_code: connection?.error?.code || connection?.error_code || null,
       checked_at: connection?.checked ? (result?.checkedAt || new Date().toISOString()) : null,
     }];
   }));
+  if (normalizedConnections.instagram?.status === "CONNECTED") {
+    for (const capabilityName of liveVerifiedInstagramCapabilities) {
+      normalizedConnections.instagram.capabilities[capabilityName] = {
+        ...(normalizedConnections.instagram.capabilities[capabilityName] || { supported: true }),
+        available: true,
+        verification: "LIVE_PROVIDER_PROBE",
+      };
+    }
+  }
   if (instagramSummaryError) {
     normalizedConnections.instagram = {
       ...(normalizedConnections.instagram || {}),
