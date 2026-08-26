@@ -26,11 +26,10 @@ Back up MongoDB and `server/uploads` from the same maintenance point. Use the ex
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-set -a
-. ./.env
-set +a
-bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh
+DOTENV_CONFIG_PATH=./.env node -r dotenv/config -e "const {spawnSync}=require('node:child_process'); const result=spawnSync('bash',['/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1)"
 ```
+
+Do not source `.env` as a shell script. Load it with `dotenv` as above so values containing spaces or shell-significant characters are preserved literally.
 
 Record:
 

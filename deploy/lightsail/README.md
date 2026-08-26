@@ -218,11 +218,10 @@ Then run:
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-set -a
-. ./.env
-set +a
-bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh
+DOTENV_CONFIG_PATH=./.env node -r dotenv/config -e "const {spawnSync}=require('node:child_process'); const result=spawnSync('bash',['/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1)"
 ```
+
+Do not source `.env` as a shell script; use `dotenv` so values containing spaces or shell-significant characters remain literal.
 
 See `deploy/lightsail/BACKUPS.md` for cron and restore commands.
 

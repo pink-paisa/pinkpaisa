@@ -19,11 +19,10 @@ Manual backup:
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-set -a
-. ./.env
-set +a
-bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh
+DOTENV_CONFIG_PATH=./.env node -r dotenv/config -e "const {spawnSync}=require('node:child_process'); const result=spawnSync('bash',['/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1)"
 ```
+
+Do not source `.env` as a shell script. Dotenv values may legally contain spaces or shell-significant characters.
 
 Cron example:
 
@@ -32,17 +31,14 @@ crontab -e
 ```
 
 ```cron
-15 2 * * * cd /home/ubuntu/pinkpaisa/server && set -a && . ./.env && set +a && bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh >> /home/ubuntu/pinkpaisa-backups/backup.log 2>&1
+15 2 * * * cd /home/ubuntu/pinkpaisa/server && DOTENV_CONFIG_PATH=./.env /usr/bin/node -r dotenv/config -e "const {spawnSync}=require('node:child_process'); const result=spawnSync('bash',['/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/backup-all.sh'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1)" >> /home/ubuntu/pinkpaisa-backups/backup.log 2>&1
 ```
 
 Restore MongoDB from a backup:
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-set -a
-. ./.env
-set +a
-CONFIRM_RESTORE=yes bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/restore-mongodb.sh /home/ubuntu/pinkpaisa-backups/mongodb/pinkpaisa-YYYYMMDDTHHMMSSZ.archive.gz
+CONFIRM_RESTORE=yes DOTENV_CONFIG_PATH=./.env node -r dotenv/config -e "const {spawnSync}=require('node:child_process'); const result=spawnSync('bash',['/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/restore-mongodb.sh','/home/ubuntu/pinkpaisa-backups/mongodb/pinkpaisa-YYYYMMDDTHHMMSSZ.archive.gz'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1)"
 ```
 
 `backup-all.sh` also archives `server/uploads` and the private licensed-audio library. Treat the audio archive as rights-sensitive: keep it private, preserve the matching MongoDB `SocialAudioTrack` records, and never copy it into the public uploads tree.
@@ -51,11 +47,8 @@ Restore the private social audio library only after stopping the marketing worke
 
 ```bash
 cd /home/ubuntu/pinkpaisa/server
-set -a
-. ./.env
-set +a
 pm2 stop pinkpaisa-server pinkpaisa-marketing-worker
-CONFIRM_RESTORE=yes bash /home/ubuntu/pinkpaisa/deploy/lightsail/scripts/restore-social-audio.sh /home/ubuntu/pinkpaisa-backups/social-audio-library/social-audio-library-YYYYMMDDTHHMMSSZ.tar.gz
+CONFIRM_RESTORE=yes DOTENV_CONFIG_PATH=./.env node -r dotenv/config -e "const {spawnSync}=require('node:child_process'); const result=spawnSync('bash',['/home/ubuntu/pinkpaisa/deploy/lightsail/scripts/restore-social-audio.sh','/home/ubuntu/pinkpaisa-backups/social-audio-library/social-audio-library-YYYYMMDDTHHMMSSZ.tar.gz'],{stdio:'inherit',env:process.env}); process.exit(result.status ?? 1)"
 pm2 startOrReload ecosystem.config.cjs --update-env
 ```
 
