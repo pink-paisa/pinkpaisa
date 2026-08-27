@@ -46,6 +46,20 @@ function stringList(value) {
   return Array.isArray(value) ? value.map(trimText).filter(Boolean) : [];
 }
 
+function fullAiGraphicRetryDirection(request = {}) {
+  const retryNumber = Math.min(Math.max(Number(request.full_ai_retry_number || 0), 0), 2);
+  if (!retryNumber) return null;
+  const failureCode = trimText(request.full_ai_retry_failure_code).toLowerCase();
+  if (["social_carousel_original_duplicate", "social_carousel_original_near_duplicate"].includes(failureCode)) {
+    return retryNumber === 1
+      ? "Retry with a materially different full-canvas subject arrangement, focal point, icon placement and visual rhythm while preserving the same server-owned art direction and exact visible-text manifest."
+      : "Retry with the alternate composition: reverse the visual balance, change the illustrated subject action, simplify the icon family and preserve the exact visible-text manifest.";
+  }
+  return retryNumber === 1
+    ? "Retry with a cleaner hierarchy: enlarge and isolate every approved text block, increase contrast, reduce decorative elements and preserve generous mobile-safe margins."
+    : "Retry with the alternate hierarchy: use fewer larger visual panels, stronger separation around every approved text block and a substantially different icon arrangement.";
+}
+
 function slugify(value) {
   return trimText(value)
     .toLowerCase()
@@ -256,20 +270,28 @@ function buildProductionImagePrompt({ recommendation = {}, request = {}, sequenc
   const format = trimText(recommendation.format).toUpperCase();
   const productFacts = recommendation.verifiedProductFacts || recommendation.verified_product_facts || null;
   const formatContent = getContentPackage(recommendation) || {};
-  const prohibitedObjects = [...new Set([
-    ...stringList(request.prohibited_objects),
-    ...stringList(formatContent.negativeVisualInstructions || formatContent.negative_visual_instructions),
-  ])].filter((value) => visualMode !== "FULL_AI_GRAPHIC"
-    || !/\b(?:no\s+)?visible\s+text\b|\bno\s+(?:text|letters|numbers|currency\s+symbols)\b/i.test(value));
   const exactOverlayMode = visualMode === "AI_VISUAL_WITH_EXACT_OVERLAY";
   const artworkOnlyMode = visualMode === "AI_ARTWORK_ONLY";
   const artDirection = resolvePinkPaisaArtDirection(recommendation, request.art_direction || request.artDirection);
   const fullAiTextBlocks = visualMode === "FULL_AI_GRAPHIC"
     ? fullAiGraphicTextBlocksForSequence(recommendation, sequence, total)
     : [];
-  const requiredObjects = productFacts
+  const prohibitedObjectValues = [
+    ...stringList(request.prohibited_objects),
+    ...stringList(formatContent.negativeVisualInstructions || formatContent.negative_visual_instructions),
+  ];
+  const prohibitedObjects = visualMode === "FULL_AI_GRAPHIC"
+    ? []
+    : [...new Set(prohibitedObjectValues)];
+  const requiredObjectValues = productFacts
     ? stringList(request.required_objects).filter((value) => !/\b(product|package|packaging|bottle|box|journal|container)\b/i.test(value))
     : stringList(request.required_objects);
+  const requiredObjects = visualMode === "FULL_AI_GRAPHIC"
+    ? []
+    : requiredObjectValues;
+  const fullAiRetryDirection = visualMode === "FULL_AI_GRAPHIC"
+    ? fullAiGraphicRetryDirection(request)
+    : null;
   const technicalDirection = [
     `Instagram format: ${format || "SINGLE_IMAGE"}; visual ${sequence} of ${total}.`,
     `Approved art direction: ${artDirection.id} — ${artDirection.label}.`,
@@ -286,8 +308,9 @@ function buildProductionImagePrompt({ recommendation = {}, request = {}, sequenc
         : [
           "Create the complete finished Pink Paisa poster inside the generated image. There will be no post-generation text, logo, SVG, background, brand treatment, or other pixel overlay.",
           `Render every approved visible-text block exactly once, with exact spelling and punctuation, and render no other visible text: ${JSON.stringify(fullAiTextBlocks)}.`,
-          "Treat Pink Paisa as intentional baked-in brand identity. Make every text block comfortably legible on mobile and keep it inside safe margins. CTA, affiliate disclosure, financial disclaimer and hashtags belong only in the Instagram caption and must not appear in the image unless explicitly listed above.",
+          "Treat Pink Paisa as intentional baked-in brand identity. Use the meaning of the approved manifest as the sole semantic theme for topic-specific illustrations and icons. Make every text block comfortably legible on mobile and keep it inside safe margins. CTA, affiliate disclosure, financial disclaimer and hashtags belong only in the Instagram caption and must not appear in the image unless explicitly listed above.",
         ].join(" "),
+    fullAiRetryDirection,
     "No watermark, unrelated visible logo, competitor branding, fake app interface, fake financial statement, unsupported claim, price, rating, review count, discount, stock message or guaranteed outcome.",
     requiredObjects.length
       ? `Required background objects: ${requiredObjects.join("; ")}.`
@@ -305,9 +328,14 @@ function buildProductionImagePrompt({ recommendation = {}, request = {}, sequenc
       ? "Local composition will preserve the verified product's packaging, label, colour, proportions, variant and quantity; do not attempt any part of that work in the generated background."
       : null,
   ].filter(Boolean).join("\n");
-  const promptHeading = productFacts
-    ? `Use this AI-authored brief only as environmental art direction; ignore any phrase asking you to show the supplied product: ${creativePrompt}`
-    : creativePrompt;
+  const promptHeading = visualMode === "FULL_AI_GRAPHIC"
+    ? [
+      "SERVER-OWNED COMPLETE POSTER DIRECTION.",
+      "Build the poster only from the production art direction and exact visible-text manifest below. No free-form AI visual-brief wording or object list is included in this image request, so it cannot add, remove or contradict visible copy.",
+    ].join("\n")
+    : productFacts
+      ? `Use this AI-authored brief only as environmental art direction; ignore any phrase asking you to show the supplied product: ${creativePrompt}`
+      : creativePrompt;
   return `${promptHeading}\n\nProduction constraints (hard requirements):\n${technicalDirection}`.slice(0, 12000);
 }
 
@@ -1196,9 +1224,10 @@ async function generateSocialVisuals({
 
   for (let index = 0; index < generationRequests.length; index += 1) {
     const request = generationRequests[index];
+    let creativePrompt = trimText(request.prompt);
     let prompt = buildProductionImagePrompt({
       recommendation,
-      request,
+      request: { ...request, prompt: creativePrompt },
       sequence: request.sequence,
       total: requests.length,
       visualMode: normalizedVisualMode,
@@ -1527,18 +1556,46 @@ async function generateSocialVisuals({
           details: error.poster_validation || error.text_validation || error.visual_validation || error.duplicate_validation || null,
         });
         if (attempt >= maxAttempts) break;
-        const revise = dependencies.reviseImagePrompt;
         const revisionRequired = requiresPromptRevision(error);
         if (!retriable && !revisionRequired) break;
-        // Every image retry is an AI revision stage. Repeating the same prompt is
-        // neither useful nor compliant with the full-AI workflow contract.
-        if (typeof revise !== "function") break;
-        {
+        if (normalizedVisualMode === "FULL_AI_GRAPHIC") {
+          const revisedPrompt = buildProductionImagePrompt({
+            recommendation,
+            request: {
+              ...request,
+              prompt: creativePrompt,
+              full_ai_retry_number: attempt,
+              full_ai_retry_failure_code: error.code || null,
+            },
+            sequence: request.sequence,
+            total: requests.length,
+            visualMode: normalizedVisualMode,
+          });
+          if (revisedPrompt === prompt) {
+            failures.at(-1).prompt_revision = {
+              status: "FAILED",
+              message: "Server-owned FULL_AI_GRAPHIC retry did not produce a materially changed prompt",
+            };
+            break;
+          }
+          failures.at(-1).prompt_revision = {
+            status: "COMPLETED",
+            method: "server_owned_full_ai_retry",
+            revised_prompt: revisedPrompt,
+            provider_response_id: null,
+            usage: {},
+          };
+          prompt = revisedPrompt;
+        } else {
+          const revise = dependencies.reviseImagePrompt;
+          // Non-FULL_AI_GRAPHIC retries use an AI revision stage. Repeating the
+          // same production prompt is neither useful nor cost-conscious.
+          if (typeof revise !== "function") break;
           try {
             const revision = await revise({
-              originalPrompt: prompt,
-              failedAttemptFeedback: failures.at(-1),
-              failure: failures.at(-1),
+              originalPrompt: creativePrompt,
+              failedAttemptFeedback: { ...failures.at(-1), prompt: creativePrompt },
+              failure: { ...failures.at(-1), prompt: creativePrompt },
               approvedVisualBrief: recommendation.visualBrief || recommendation.visual_brief || null,
               brandConstraints: settings.brand_profile || settings.brand_tokens || null,
               productAuthenticityConstraints: recommendation.verifiedProductFacts || recommendation.verified_product_facts || null,
@@ -1570,6 +1627,7 @@ async function generateSocialVisuals({
               provider_response_id: revision?.response_id || revision?.provider_response_id || null,
               usage: revision?.usage || {},
             };
+            creativePrompt = revisedCreativePrompt;
             prompt = revisedPrompt;
           } catch (revisionError) {
             failures.at(-1).prompt_revision = {

@@ -149,7 +149,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   visual_brief: {
-    version: "social-visual-brief-v5",
+    version: "social-visual-brief-v6",
     instructions: [
       "You are Pink Paisa's creative director. Produce one production-ready, format-specific visual brief for the approved content package.",
       "The OpenAI image model, not an application template, will create the original subject, scene, composition, lighting, background, illustration, or product environment.",
@@ -157,7 +157,7 @@ const SOCIAL_PROMPTS = Object.freeze({
       "Never request a stock-like desk/laptop/coffee/plant scene, oversized floating white card, generic rounded template panel, corporate stock image, scrapbook clutter or empty finance banner.",
       "For AI_VISUAL_WITH_EXACT_OVERLAY, request original text-free artwork with integrated text-safe space for exact programmatic headline/supporting copy and logo; the safe region must feel native to the selected grid or collage, while CTA and feed disclosures belong in the caption.",
       "For AI_ARTWORK_ONLY, request full-bleed artwork with no visible text, letters, numbers, currency symbols, logo, branding, watermark, badge, label, or reserved text area; textSafeRegions must be an empty array.",
-      "For FULL_AI_GRAPHIC, permit exactly the approved short headline and reserve all other copy for the caption or branded finish.",
+      "For FULL_AI_GRAPHIC, preserve the complete server-approved ordered visible-text contract: Pink Paisa brand text, the approved headline, any approved supporting or interaction copy (or carousel body), and any required carousel sequence label. Render every supplied block exactly once and no other visible text. There is no branded finish or post-generation text/logo overlay; CTA, disclosures, financial disclaimer and hashtags remain caption-only.",
       "Every image prompt must specify subject, setting, composition, camera angle, lighting, palette, mood, Indian cultural context where relevant, safe text regions, required objects, and prohibited objects.",
       "Explicitly prohibit watermarks, unrelated logos, fake app interfaces, fake financial statements, unsupported visual claims, and unapproved visible text.",
       "For a carousel, give every slide a materially different subject, setting, or action while retaining one cohesive art direction; never repeat the same composition. For a product feature, preserve the authentic supplied product and packaging exactly.",
@@ -175,10 +175,10 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   imagePromptRevision: {
-    version: "social-image-prompt-revision-v4",
+    version: "social-image-prompt-revision-v5",
     instructions: [
       "Revise only the image prompt elements responsible for the supplied image-generation or validation failure.",
-      "Preserve the approved format, server-selected EDITORIAL_ICON_GRID or BOLD_EDITORIAL_COLLAGE direction, brand constraints, selected visual mode, and authentic-product requirements. In AI_ARTWORK_ONLY preserve full-bleed/no-overlay/no-visible-text requirements; otherwise preserve the approved integrated text-safe regions and overlay plan.",
+      "Preserve the approved format, server-selected EDITORIAL_ICON_GRID or BOLD_EDITORIAL_COLLAGE direction, brand constraints, selected visual mode, and authentic-product requirements. In AI_ARTWORK_ONLY preserve full-bleed/no-overlay/no-visible-text requirements. In FULL_AI_GRAPHIC preserve the complete server-approved ordered visible-text manifest exactly, render no additional text, and preserve the no-overlay contract; never narrow the manifest to headline-only. In AI_VISUAL_WITH_EXACT_OVERLAY preserve the approved integrated text-safe regions and verified overlay plan.",
       "Do not change approved copy or add unsupported visible claims, logos, interfaces, statements, or product details.",
       "Return no hidden reasoning or chain-of-thought.",
     ].join("\n"),

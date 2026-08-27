@@ -10,10 +10,24 @@ const {
   validateWithSchema,
 } = require("../services/social/socialSchemas");
 const {
+  SOCIAL_PROMPTS,
   buildFormatVisualBrief,
   reviseFormatContent,
   writeFormatContent,
 } = require("../services/social/openAiSocialProvider");
+
+test("FULL_AI_GRAPHIC prompts preserve the complete native text contract", () => {
+  assert.equal(SOCIAL_PROMPTS.visual_brief.version, "social-visual-brief-v6");
+  assert.match(SOCIAL_PROMPTS.visual_brief.instructions, /complete server-approved ordered visible-text contract/i);
+  assert.match(SOCIAL_PROMPTS.visual_brief.instructions, /supporting or interaction copy/i);
+  assert.match(SOCIAL_PROMPTS.visual_brief.instructions, /no branded finish or post-generation text\/logo overlay/i);
+  assert.doesNotMatch(SOCIAL_PROMPTS.visual_brief.instructions, /permit exactly the approved short headline/i);
+
+  assert.equal(SOCIAL_PROMPTS.imagePromptRevision.version, "social-image-prompt-revision-v5");
+  assert.match(SOCIAL_PROMPTS.imagePromptRevision.instructions, /preserve the complete server-approved ordered visible-text manifest exactly/i);
+  assert.match(SOCIAL_PROMPTS.imagePromptRevision.instructions, /never narrow the manifest to headline-only/i);
+  assert.match(SOCIAL_PROMPTS.imagePromptRevision.instructions, /preserve the no-overlay contract/i);
+});
 
 function validSingleImageContent() {
   return {

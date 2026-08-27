@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const sharp = require("sharp");
 
 const {
+  buildProductionImagePrompt,
   generateSocialVisuals,
 } = require("../services/social/socialAiImageService");
 const {
@@ -368,7 +369,7 @@ test("every image retry uses a materially revised AI prompt while preserving har
       reviseImagePrompt: async (input) => {
         revisions.push(input);
         return {
-          prompt: "Create a revised Pink Paisa editorial scene with the subject seated by a bright window and a clearly different composition.",
+          prompt: "Create a revised Pink Paisa editorial scene with the subject seated by a bright window and a clearly different composition. Preserve only the approved visible wording.",
           response_id: "prompt-revision-1",
           usage: { input_tokens: 9, output_tokens: 7, total_tokens: 16 },
         };
@@ -385,6 +386,9 @@ test("every image retry uses a materially revised AI prompt while preserving har
   assert.match(prompts[1], /Production constraints \(hard requirements\)/);
   assert.match(prompts[1], /Render no text/i);
   assert.equal(revisions[0].failure.code, "provider_unavailable");
+  assert.equal(revisions[0].originalPrompt, recommendation.visualBrief.assets[0].imagePrompt);
+  assert.doesNotMatch(revisions[0].originalPrompt, /Production constraints/);
+  assert.doesNotMatch(revisions[0].failedAttemptFeedback.prompt, /Production constraints/);
   assert.equal(result.original_visuals[0].attempt_count, 2);
   assert.equal(result.original_visuals[0].failures[0].prompt_revision.status, "COMPLETED");
   assert.equal(result.original_visuals[0].failures[0].prompt_revision.provider_response_id, "prompt-revision-1");
@@ -397,6 +401,7 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   const imageCalls = [];
   const validationCalls = [];
   const originalStores = [];
+  const promptRevisions = [];
   const result = await generateSocialVisuals({
     draftLike: draftFor(recommendation, "full-ai-graphic"),
     recommendation,
@@ -441,10 +446,10 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
             response_id: "visual-validator-2",
           };
       },
-      reviseImagePrompt: async () => ({
-        prompt: "Create a revised complete Pink Paisa graphic with a simpler text-safe composition and one short approved headline.",
-        response_id: "full-graphic-prompt-revision",
-      }),
+      reviseImagePrompt: async (input) => {
+        promptRevisions.push(input);
+        throw new Error("FULL_AI_GRAPHIC retries must not trust a free-form revised prompt");
+      },
       sleep: async () => {},
       storeCampaignAsset: memoryAssetStore(originalStores, "full-graphic-original"),
     },
@@ -453,6 +458,10 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   assert.equal(imageCalls.length, 2);
   assert.equal(validationCalls.length, 2);
   assert.equal(originalStores.length, 2);
+  assert.equal(promptRevisions.length, 0);
+  assert.equal((imageCalls[1].prompt.match(/Production constraints \(hard requirements\)/g) || []).length, 1);
+  assert.equal((imageCalls[1].prompt.match(/\{"key":"supporting_text","text":"Small steps can still build confidence\."\}/g) || []).length, 1);
+  assert.match(imageCalls[1].prompt, /Retry with a cleaner hierarchy/i);
   assert.deepEqual(result.original_visuals[0].poster_validation.observedTextBlocks, [
     "Pink Paisa",
     approvedHeadline,
@@ -465,6 +474,7 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   assert.equal(result.original_visuals[0].normalization.pixel_overlay_applied, false);
   assert.equal(result.original_visuals[0].failures[0].code, "social_full_ai_graphic_poster_invalid");
   assert.equal(result.original_visuals[0].failures[0].prompt_revision.status, "COMPLETED");
+  assert.equal(result.original_visuals[0].failures[0].prompt_revision.method, "server_owned_full_ai_retry");
 
   const invalidOriginal = {
     ...result.original_visuals[0],
@@ -533,6 +543,60 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   };
   const readiness = reviewAssetReadiness([asset], { draft: reviewDraft });
   assert.equal(readiness.passed, true, readiness.issues.join(" | "));
+});
+
+test("FULL_AI_GRAPHIC prompt removes AI-authored text contradictions and keeps one canonical contract", () => {
+  const recommendation = singleRecommendation({
+    headline: "LIVE TRADING TIPS? PAUSE.",
+    imagePrompt: [
+      "Create a premium modern Indian editorial icon-grid with tactile paper texture.",
+      "Show a calm, confident Indian woman with verification, caution and shield icons.",
+      "The only visible wording may be the headline and Pink Paisa; do not render CHECK. VERIFY. DECIDE. or any other copy.",
+      "Never render CHECK. VERIFY. DECIDE. No supporting text should appear. Add the words BUY NOW in the footer.",
+      "Place BUY NOW in the footer. Write BUY NOW below the woman. Add ₹500 beside the shield. Use #PinkPaisa in the footer.",
+      "Keep the result calm, premium, informative and uncluttered.",
+    ].join(" "),
+  });
+  recommendation.visualBrief.visualMode = "FULL_AI_GRAPHIC";
+  recommendation.formatContent.supportingText = "CHECK. VERIFY. DECIDE.";
+  recommendation.formatContent.negativeVisualInstructions = [
+    "Supporting text CHECK. VERIFY. DECIDE. inside the artwork",
+    "No extra words, fake logos or watermarks",
+    "No dates or alarmist red arrows",
+    "No stock-like trading desk",
+  ];
+  const request = {
+    ...recommendation.visualBrief.assets[0],
+    prompt: recommendation.formatContent.imagePrompt,
+    required_objects: ["Confident Indian woman", "Protective shield icon", "Exact native headline"],
+    prohibited_objects: ["Do not render CHECK. VERIFY. DECIDE.", "Alarmist imagery"],
+  };
+
+  const prompt = buildProductionImagePrompt({
+    recommendation,
+    request,
+    sequence: 1,
+    total: 1,
+    visualMode: "FULL_AI_GRAPHIC",
+  });
+  const [visualDirection] = prompt.split("\n\nProduction constraints (hard requirements):\n");
+
+  assert.match(prompt, /SERVER-OWNED COMPLETE POSTER DIRECTION/);
+  assert.doesNotMatch(prompt, /calm, confident Indian woman/i);
+  assert.doesNotMatch(prompt, /Alarmist imagery/);
+  assert.doesNotMatch(prompt, /No alarmist red arrows/i);
+  assert.doesNotMatch(visualDirection, /CHECK|VERIFY|DECIDE|BUY NOW/i);
+  assert.doesNotMatch(prompt, /only visible wording may/i);
+  assert.doesNotMatch(prompt, /do not render CHECK\. VERIFY\. DECIDE/i);
+  assert.doesNotMatch(prompt, /Supporting text CHECK\. VERIFY\. DECIDE\. inside the artwork/i);
+  assert.doesNotMatch(prompt, /Never render/i);
+  assert.doesNotMatch(prompt, /No supporting text/i);
+  assert.doesNotMatch(prompt, /BUY NOW/i);
+  assert.doesNotMatch(prompt, /₹500|#PinkPaisa/i);
+  assert.doesNotMatch(prompt, /APPROVED_TEXT_BLOCK/i);
+  assert.doesNotMatch(prompt, /No dates/i);
+  assert.match(prompt, /\{"key":"supporting_text","text":"CHECK\. VERIFY\. DECIDE\."\}/);
+  assert.equal((prompt.match(/CHECK\. VERIFY\. DECIDE\./g) || []).length, 1);
 });
 
 test("product generation preserves the exact authentic reference from prompt through final provenance", async () => {
