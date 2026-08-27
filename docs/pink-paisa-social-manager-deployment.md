@@ -18,7 +18,7 @@ Before the maintenance window:
 - Select exactly one Social orchestration schedule owner. Internal PM2 is the default; n8n schedules must remain inactive while the internal owner flag is true.
 - Schedule a human reviewer for the first weekly plan, first creative and first provider publication.
 
-The weekly feed maximum (default three non-Story feed posts per Asia/Kolkata week) is a business invariant enforced by the server. It is not a request-count limit. Per the administrator directive, there is no Social Media Manager or Instagram-integration request-count throttle; do not add one during deployment or reintroduce the old SMM 429 message.
+The weekly feed maximum (default five non-Story feed posts per Asia/Kolkata week) is a business invariant enforced by the server. It is not a request-count limit. Per the administrator directive, there is no Social Media Manager or Instagram-integration request-count throttle; do not add one during deployment or reintroduce the old SMM 429 message.
 
 ## 1. Back up state
 
@@ -106,7 +106,7 @@ SOCIAL_MANAGER_ENABLED=true
 SOCIAL_MANAGER_DAILY_GENERATION_ENABLED=false
 SOCIAL_WEEKLY_PLANNING_ENABLED=true
 SOCIAL_WEEKLY_CANDIDATE_COUNT=8
-SOCIAL_MAX_FEED_POSTS_PER_WEEK=3
+SOCIAL_MAX_FEED_POSTS_PER_WEEK=5
 SOCIAL_TIMEZONE=Asia/Kolkata
 
 SOCIAL_MANAGER_PUBLISHING_ENABLED=false
