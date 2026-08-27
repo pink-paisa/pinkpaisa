@@ -72,3 +72,25 @@ test("stored v2/v3 settings migrate to the five-feed cadence without invalidatin
   assert.equal(historical.maximum_feed_posts, 3);
   assert.deepEqual(historical.story_plan.toObject(), []);
 });
+
+test("persisted weekly plans can be revalidated without rewriting their fixed timezone", async () => {
+  const persisted = SocialWeeklyPlan.hydrate({
+    week_key: "social-week:2026-08-31:timezone-regression",
+    week_start: "2026-08-31",
+    week_end: "2026-09-06",
+    timezone: "Asia/Kolkata",
+    status: "QUEUED",
+    maximum_feed_posts: 5,
+    idempotency_key: "social-weekly-plan:2026-08-31:timezone-regression",
+    candidates: [],
+    selected_posts: [],
+    story_plan: [],
+    version: 1,
+  });
+
+  persisted.status = "RESEARCHING";
+  await persisted.validate();
+
+  assert.equal(persisted.timezone, "Asia/Kolkata");
+  assert.equal(persisted.isModified("timezone"), false);
+});

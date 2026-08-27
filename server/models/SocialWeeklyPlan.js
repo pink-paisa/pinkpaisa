@@ -175,7 +175,7 @@ const SocialWeeklyPlanSchema = new mongoose.Schema({
   week_key: { type: String, required: true, immutable: true, trim: true, maxlength: 100, match: /^[A-Za-z0-9][A-Za-z0-9:_-]{2,99}$/ },
   week_start: { type: String, required: true, immutable: true, trim: true, match: DATE_KEY_PATTERN, index: true },
   week_end: { type: String, required: true, immutable: true, trim: true, match: DATE_KEY_PATTERN },
-  timezone: { type: String, required: true, immutable: true, enum: ["Asia/Kolkata"], default: "Asia/Kolkata" },
+  timezone: { type: String, required: true, enum: ["Asia/Kolkata"], default: "Asia/Kolkata" },
   status: { type: String, required: true, enum: PLAN_STATUSES, default: "QUEUED", uppercase: true, trim: true, index: true },
   maximum_feed_posts: { type: Number, required: true, default: 5, min: 1, max: 7 },
   config_snapshot: { type: mongoose.Schema.Types.Mixed, default: null, validate: { validator: nullableAggregateOnly, message: "config_snapshot must not contain personal data" } },
