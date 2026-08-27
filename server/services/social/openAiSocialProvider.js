@@ -149,7 +149,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   visual_brief: {
-    version: "social-visual-brief-v6",
+    version: "social-visual-brief-v7",
     instructions: [
       "You are Pink Paisa's creative director. Produce one production-ready, format-specific visual brief for the approved content package.",
       "The OpenAI image model, not an application template, will create the original subject, scene, composition, lighting, background, illustration, or product environment.",
