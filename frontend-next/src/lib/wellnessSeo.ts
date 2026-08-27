@@ -9,7 +9,14 @@ export type WellnessFaq = {
 export type WellnessBestForSection = {
   title: string;
   description: string;
-  productMatch: (product: CatalogProduct) => boolean;
+  productMatch:
+    | {
+        kind: "includes_any";
+        values: string[];
+      }
+    | {
+        kind: "featured_or_instagram";
+      };
 };
 
 export type WellnessPageConfig = {
@@ -122,17 +129,25 @@ const buildBestForSections = (label: string, terms: string[]): WellnessBestForSe
   {
     title: `${label} routine picks`,
     description: `Products that fit a simple ${label.toLowerCase()} routine or repeat-use buying intent.`,
-    productMatch: (product) => includesAny(product, ["routine", "daily", "everyday", ...terms]),
+    productMatch: {
+      kind: "includes_any",
+      values: ["routine", "daily", "everyday", ...terms],
+    },
   },
   {
     title: "Concern-focused picks",
     description: "Options with product notes, pros, or campaign labels that point to a specific buyer concern.",
-    productMatch: (product) => includesAny(product, ["fall", "dandruff", "dry", "frizz", "dark", "spot", "acne", "repair", "natural", "hydrating", ...terms]),
+    productMatch: {
+      kind: "includes_any",
+      values: ["fall", "dandruff", "dry", "frizz", "dark", "spot", "acne", "repair", "natural", "hydrating", ...terms],
+    },
   },
   {
     title: "Featured Pink Paisa picks",
     description: "Products marked for stronger visibility or Instagram-led discovery.",
-    productMatch: (product) => Boolean(product.is_featured_affiliate || product.affiliate_is_instagram_pick),
+    productMatch: {
+      kind: "featured_or_instagram",
+    },
   },
 ];
 
@@ -211,7 +226,9 @@ export function buildInstagramWellnessConfig(): WellnessPageConfig {
       {
         title: "Featured Instagram finds",
         description: "Products marked by admin for Instagram campaigns and fast mobile browsing.",
-        productMatch: (product) => Boolean(product.affiliate_is_instagram_pick || product.is_featured_affiliate),
+        productMatch: {
+          kind: "featured_or_instagram",
+        },
       },
     ],
     howToChoose: genericHowToChoose,
@@ -231,6 +248,12 @@ export function buildWellnessConfigsFromTaxonomy(categories: ProductCategoryNode
 }
 
 export function pickSectionProducts(products: CatalogProduct[], section: WellnessBestForSection) {
-  const matches = products.filter(section.productMatch);
+  const matches = products.filter((product) => {
+    if (section.productMatch.kind === "featured_or_instagram") {
+      return Boolean(product.is_featured_affiliate || product.affiliate_is_instagram_pick);
+    }
+
+    return includesAny(product, section.productMatch.values);
+  });
   return matches.length ? matches.slice(0, 4) : products.slice(0, 4);
 }
