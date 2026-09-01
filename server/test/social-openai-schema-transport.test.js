@@ -2,8 +2,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  SOCIAL_PROMPTS,
   callStructuredResponse,
-  _private: { strictOpenAiResponseSchema },
+  _private: { buildPromptCacheKey, sha256, strictOpenAiResponseSchema },
 } = require("../services/social/openAiSocialProvider");
 const {
   AUDIENCE_INTELLIGENCE_SCHEMA,
@@ -123,6 +124,31 @@ test("OpenAI strict schema conversion strips uniqueItems recursively without mut
   );
 });
 
+test("all OpenAI prompt cache keys remain deterministic, unique, and within the 64-character API limit", () => {
+  const keys = Object.entries(SOCIAL_PROMPTS).map(([stage, prompt]) => ({
+    stage,
+    key: buildPromptCacheKey(stage, prompt.version),
+  }));
+
+  for (const { stage, key } of keys) {
+    assert.ok(key.length <= 64, `${stage} cache key must fit the OpenAI limit`);
+    assert.equal(key, buildPromptCacheKey(stage, SOCIAL_PROMPTS[stage].version));
+  }
+  assert.equal(new Set(keys.map(({ key }) => key)).size, keys.length);
+
+  const shortRawKey = `pinkpaisa-social-research-${SOCIAL_PROMPTS.research.version}`;
+  assert.equal(buildPromptCacheKey("research", SOCIAL_PROMPTS.research.version), shortRawKey);
+
+  for (const stage of ["weekly_research", "imagePromptRevision", "audience_intelligence"]) {
+    const rawKey = `pinkpaisa-social-${stage}-${SOCIAL_PROMPTS[stage].version}`;
+    const expectedSuffix = sha256(rawKey).slice(0, 12);
+    const key = buildPromptCacheKey(stage, SOCIAL_PROMPTS[stage].version);
+    assert.ok(rawKey.length > 64);
+    assert.equal(key.length, 64);
+    assert.ok(key.endsWith(`-${expectedSuffix}`));
+  }
+});
+
 test("weekly research sends an OpenAI-compatible transport schema and validates the response locally", async () => {
   const previousKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = "test-openai-key";
@@ -152,6 +178,11 @@ test("weekly research sends an OpenAI-compatible transport schema and validates 
     assert.deepEqual(result.output, output);
     assert.equal(requestBody.text.format.type, "json_schema");
     assert.equal(requestBody.text.format.strict, true);
+    assert.equal(requestBody.prompt_cache_key.length, 64);
+    assert.equal(
+      requestBody.prompt_cache_key,
+      buildPromptCacheKey("weekly_research", SOCIAL_PROMPTS.weekly_research.version),
+    );
     assert.equal(hasSchemaKeyword(requestBody.text.format.schema, "uniqueItems"), false);
     assert.equal(
       WEEKLY_RESEARCH_DIGEST_SCHEMA.properties.currentTopics.items.properties.sourceIndexes.uniqueItems,

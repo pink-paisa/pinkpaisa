@@ -29,6 +29,7 @@ const {
 const DEFAULT_OPENAI_API_BASE = "https://api.openai.com/v1";
 const DEFAULT_SOCIAL_MODEL = "gpt-5.6-luna";
 const DEFAULT_TIMEOUT_MS = 90000;
+const MAX_PROMPT_CACHE_KEY_LENGTH = 64;
 const TRANSIENT_STATUS_CODES = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 const SOCIAL_PROMPTS = Object.freeze({
@@ -290,6 +291,13 @@ function sha256(value) {
   return crypto.createHash("sha256").update(serialized).digest("hex");
 }
 
+function buildPromptCacheKey(stage, promptVersion) {
+  const rawKey = `pinkpaisa-social-${stage}-${promptVersion}`;
+  if (rawKey.length <= MAX_PROMPT_CACHE_KEY_LENGTH) return rawKey;
+  const hashSuffix = sha256(rawKey).slice(0, 12);
+  return `${rawKey.slice(0, MAX_PROMPT_CACHE_KEY_LENGTH - hashSuffix.length - 1)}-${hashSuffix}`;
+}
+
 function structuredOutputError(message, validationErrors = [], rawOutput = "") {
   const error = new Error(message);
   error.code = "structured_output_invalid";
@@ -511,7 +519,7 @@ async function callStructuredResponse({
       instructions: prompt.instructions,
       input: requestInput,
       max_output_tokens: maxOutputTokens,
-      prompt_cache_key: `pinkpaisa-social-${stage}-${prompt.version}`,
+      prompt_cache_key: buildPromptCacheKey(stage, prompt.version),
       metadata: {
         feature: "social_media_manager",
         stage,
@@ -988,6 +996,7 @@ module.exports = {
   writeFormatContent,
   writeContent,
   _private: {
+    buildPromptCacheKey,
     extractResponseText,
     extractWebSources,
     getUsage,
