@@ -664,6 +664,14 @@ function matchesType(value, type) {
   return typeof value === type;
 }
 
+function uniqueItemKey(value) {
+  if (Array.isArray(value)) return `[${value.map(uniqueItemKey).join(",")}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${uniqueItemKey(value[key])}`).join(",")}}`;
+  }
+  return `${typeof value}:${JSON.stringify(value)}`;
+}
+
 function validateJsonSchema(schema, value, path = "$", errors = []) {
   if (!schema || typeof schema !== "object") return errors;
   if (Array.isArray(schema.anyOf)) {
@@ -699,6 +707,10 @@ function validateJsonSchema(schema, value, path = "$", errors = []) {
   if (Array.isArray(value)) {
     if (schema.minItems != null && value.length < schema.minItems) errors.push(`${path} has too few items`);
     if (schema.maxItems != null && value.length > schema.maxItems) errors.push(`${path} has too many items`);
+    if (schema.uniqueItems === true) {
+      const itemKeys = value.map(uniqueItemKey);
+      if (new Set(itemKeys).size !== itemKeys.length) errors.push(`${path} must contain unique items`);
+    }
     value.forEach((item, index) => validateJsonSchema(schema.items, item, `${path}[${index}]`, errors));
   }
   if (isPlainObject(value)) {

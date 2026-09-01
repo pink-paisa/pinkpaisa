@@ -433,16 +433,20 @@ function getUsage(payload = {}) {
 }
 
 // OpenAI strict structured outputs require every declared object property to
-// appear in that object's `required` array. Our local validator deliberately
+// appear in that object's `required` array and reject some otherwise-valid JSON
+// Schema keywords, including `uniqueItems`. Our local validator deliberately
 // keeps legacy feed-overlay placement fields optional so historical payloads
-// remain readable. Send a strict transport-only clone to OpenAI while retaining
-// the compatibility schema for local validation and normalization.
+// remain readable and enforces uniqueness after the response is parsed. Send a
+// strict transport-only clone to OpenAI while retaining the complete application
+// schema for local validation and normalization.
 function strictOpenAiResponseSchema(value) {
   if (Array.isArray(value)) return value.map(strictOpenAiResponseSchema);
   if (!value || typeof value !== "object") return value;
 
   const normalized = Object.fromEntries(
-    Object.entries(value).map(([key, child]) => [key, strictOpenAiResponseSchema(child)]),
+    Object.entries(value)
+      .filter(([key]) => key !== "uniqueItems")
+      .map(([key, child]) => [key, strictOpenAiResponseSchema(child)]),
   );
   if (normalized.type === "object" && normalized.properties && typeof normalized.properties === "object") {
     normalized.required = Object.keys(normalized.properties);

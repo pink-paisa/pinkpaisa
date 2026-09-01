@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const {
   approveDraft,
   approveAndScheduleDraft,
+  getTodayRecommendation,
   requestGeneration,
   runDueSocialGeneration,
   scheduleDraft,
@@ -58,6 +59,41 @@ test("Social Manager settings discard every legacy count-based throttle", () => 
     "request_timeout_ms",
     "retry_limit",
   ]);
+});
+
+test("today readiness permits manual generation when only the legacy daily scheduler is disabled", async () => {
+  const previousOpenAiKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "test-openai-key";
+  try {
+    const result = await getTodayRecommendation({
+      now: new Date("2026-09-01T06:00:00.000Z"),
+      dependencies: {
+        getSocialManagerSettings: async () => ({
+          ...enabledSettings(),
+          daily_generation: { enabled: false, hour_ist: 8, minute_ist: 0 },
+          generation: { full_ai_generation: true },
+          research: { enabled: true, provider: "AUTO" },
+          publishing: { enabled: false, provider: "DISABLED" },
+        }),
+        getInstagramConnectionSummary: async () => ({ is_connected: false, status: "not_configured" }),
+        SocialGenerationRun: {
+          findOne: () => ({ sort: async () => null }),
+        },
+        SocialPostDraft: {
+          findOne: () => ({ sort: async () => null }),
+        },
+      },
+    });
+
+    assert.equal(result.readiness.generation_enabled, false);
+    assert.equal(result.readiness.manual_generation_enabled, true);
+    assert.equal(result.readiness.ai_configured, true);
+    assert.ok(result.readiness.warnings.some((warning) => /Automatic daily generation is disabled/i.test(warning)));
+    assert.equal(result.readiness.blockers.length, 0);
+  } finally {
+    if (previousOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = previousOpenAiKey;
+  }
 });
 
 test("requestGeneration idempotently reuses today's draft and linked run without creating anything", async () => {

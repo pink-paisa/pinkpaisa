@@ -370,6 +370,7 @@ export type SocialMetricSnapshot = {
 
 export type SocialReadiness = {
   generationEnabled: boolean;
+  manualGenerationEnabled: boolean;
   researchMode: string;
   aiConfigured: boolean;
   publishingEnabled: boolean;
@@ -813,6 +814,7 @@ export type SocialSettings = {
 
 export const EMPTY_READINESS: SocialReadiness = {
   generationEnabled: true,
+  manualGenerationEnabled: true,
   researchMode: "evergreen",
   aiConfigured: false,
   publishingEnabled: false,

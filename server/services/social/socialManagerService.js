@@ -3177,10 +3177,17 @@ async function getTodayRecommendation({ now = new Date(), dependencies = {} } = 
   const failedRelations = failedDraft ? await loadDraftRelations(failedDraft, dependencies) : null;
   const blockers = [];
   const warnings = [];
+  const aiConfigured = Boolean(process.env.OPENAI_API_KEY);
+  const fullAiGenerationEnabled = settings.generation?.full_ai_generation !== false;
+  const manualGenerationEnabled = Boolean(
+    settings.feature_enabled
+    && aiConfigured
+    && fullAiGenerationEnabled
+  );
   if (!settings.feature_enabled) blockers.push("Social Media Manager is disabled.");
-  if (!settings.daily_generation.enabled) warnings.push("Daily generation is disabled; existing drafts can still be reviewed and published.");
-  if (!process.env.OPENAI_API_KEY) blockers.push("OpenAI is not configured. Fully AI-generated strategy, copy, and original artwork cannot run.");
-  if (settings.generation?.full_ai_generation === false) blockers.push("Fully AI-generated social content is disabled in settings.");
+  if (!settings.daily_generation.enabled) warnings.push("Automatic daily generation is disabled; manual generation and existing draft review remain available.");
+  if (!aiConfigured) blockers.push("OpenAI is not configured. Fully AI-generated strategy, copy, and original artwork cannot run.");
+  if (!fullAiGenerationEnabled) blockers.push("Fully AI-generated social content is disabled in settings.");
   if (!publishingFeatureEnabled(settings)) warnings.push("Direct Instagram publishing is disabled; draft, approval, export, and scheduling remain available.");
   if (!connection.is_connected) warnings.push("Instagram is not connected; the full draft-generation and review workflow remains available.");
   return {
@@ -3191,9 +3198,12 @@ async function getTodayRecommendation({ now = new Date(), dependencies = {} } = 
     failed_draft: failedDraft ? publicDraft(failedDraft, failedRelations) : null,
     generation_run: publicRun(run),
     readiness: {
-      generation_enabled: Boolean(settings.feature_enabled && settings.daily_generation.enabled && process.env.OPENAI_API_KEY && settings.generation?.full_ai_generation !== false),
+      // Retained for older clients: this describes the legacy automatic daily scheduler.
+      generation_enabled: Boolean(settings.feature_enabled && settings.daily_generation.enabled && aiConfigured && fullAiGenerationEnabled),
+      // Manual generation is intentionally independent of the legacy daily scheduler.
+      manual_generation_enabled: manualGenerationEnabled,
       research_mode: settings.research.enabled ? settings.research.provider : "DISABLED",
-      ai_configured: Boolean(process.env.OPENAI_API_KEY),
+      ai_configured: aiConfigured,
       publishing_enabled: publishingFeatureEnabled(settings),
       instagram_connected: Boolean(connection.is_connected),
       blockers,

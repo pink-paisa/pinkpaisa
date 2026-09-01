@@ -5,12 +5,15 @@ import { SocialToday } from "./SocialToday";
 import { normalizeDraft } from "./adapters";
 import { EMPTY_READINESS } from "./types";
 
-const renderToday = (onGenerate = vi.fn()) => {
+const renderToday = (
+  onGenerate = vi.fn(),
+  readiness = { ...EMPTY_READINESS, generationEnabled: true, manualGenerationEnabled: true },
+) => {
   render(<SocialToday
     draft={null}
     previousDraft={null}
     generationRun={null}
-    readiness={{ ...EMPTY_READINESS, generationEnabled: true }}
+    readiness={readiness}
     loading={false}
     generating={false}
     busyAction=""
@@ -91,6 +94,31 @@ const renderReviewDraft = (draft: ReturnType<typeof fullAiDraft>) => render(<Soc
 />);
 
 describe("SocialToday generation controls", () => {
+  it("allows manual generation while the legacy daily scheduler is disabled", async () => {
+    const user = userEvent.setup();
+    const onGenerate = vi.fn();
+    renderToday(onGenerate, {
+      ...EMPTY_READINESS,
+      generationEnabled: false,
+      manualGenerationEnabled: true,
+    });
+
+    const generate = screen.getByRole("button", { name: /Generate Today’s Post/ });
+    expect(generate).toBeEnabled();
+    await user.click(generate);
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the dedicated manual readiness flag instead of the legacy generation flag", () => {
+    renderToday(vi.fn(), {
+      ...EMPTY_READINESS,
+      generationEnabled: true,
+      manualGenerationEnabled: false,
+    });
+
+    expect(screen.getByRole("button", { name: /Generate Today’s Post/ })).toBeDisabled();
+  });
+
   it("defaults eligible generation to the complete AI-native no-overlay mode", async () => {
     const user = userEvent.setup();
     const onGenerate = renderToday();

@@ -226,7 +226,7 @@ const Field = ({ label, hint, children }: { label: string; hint?: string; childr
 
 const GenerationControls = ({
   generating,
-  generationEnabled,
+  manualGenerationEnabled,
   formatPreference,
   objectivePreference,
   visualMode,
@@ -238,7 +238,7 @@ const GenerationControls = ({
   onGenerate,
 }: {
   generating: boolean;
-  generationEnabled: boolean;
+  manualGenerationEnabled: boolean;
   formatPreference: SocialFormatPreference;
   objectivePreference: string;
   visualMode: SocialVisualMode;
@@ -298,7 +298,7 @@ const GenerationControls = ({
           </div>
         </details>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => request("TODAY", formatPreference)} disabled={generating || !generationEnabled}>
+          <Button onClick={() => request("TODAY", formatPreference)} disabled={generating || !manualGenerationEnabled}>
             {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4" />} Generate Today’s Post
           </Button>
         </div>
@@ -1219,7 +1219,7 @@ export const SocialToday = ({
         <p className="text-xs text-muted-foreground">Last updated {draft?.updatedAt ? formatDate(draft.updatedAt, true) : "automatically"}</p>
       </div> : null}
 
-      {!reviewMode ? <GenerationControls generating={generating} generationEnabled={readiness.generationEnabled} formatPreference={formatPreference} objectivePreference={objectivePreference} visualMode={visualMode} instructions={generationInstructions} onFormatPreferenceChange={setFormatPreference} onObjectivePreferenceChange={setObjectivePreference} onVisualModeChange={setVisualMode} onInstructionsChange={setGenerationInstructions} onGenerate={onGenerate} /> : null}
+      {!reviewMode ? <GenerationControls generating={generating} manualGenerationEnabled={readiness.manualGenerationEnabled} formatPreference={formatPreference} objectivePreference={objectivePreference} visualMode={visualMode} instructions={generationInstructions} onFormatPreferenceChange={setFormatPreference} onObjectivePreferenceChange={setObjectivePreference} onVisualModeChange={setVisualMode} onInstructionsChange={setGenerationInstructions} onGenerate={onGenerate} /> : null}
 
       {loadError ? (
         <Alert variant="destructive" className="rounded-2xl">

@@ -468,8 +468,16 @@ export const normalizeGenerationRun = (value: unknown): SocialGenerationRun | nu
 
 export const normalizeReadiness = (value: unknown): SocialReadiness => {
   const readiness = object(value);
+  const legacyGenerationEnabled = boolean(
+    first(readiness, ["generation_enabled", "generationEnabled"]),
+    EMPTY_READINESS.generationEnabled,
+  );
   return {
-    generationEnabled: boolean(first(readiness, ["generation_enabled", "generationEnabled"]), EMPTY_READINESS.generationEnabled),
+    generationEnabled: legacyGenerationEnabled,
+    manualGenerationEnabled: boolean(
+      first(readiness, ["manual_generation_enabled", "manualGenerationEnabled"]),
+      legacyGenerationEnabled,
+    ),
     researchMode: string(first(readiness, ["research_mode", "researchMode"]), EMPTY_READINESS.researchMode),
     aiConfigured: boolean(first(readiness, ["ai_configured", "aiConfigured"]), EMPTY_READINESS.aiConfigured),
     publishingEnabled: boolean(first(readiness, ["publishing_enabled", "publishingEnabled"]), EMPTY_READINESS.publishingEnabled),
