@@ -219,6 +219,30 @@ describe("SocialToday generation controls", () => {
     });
   });
 
+  it("offers the safe AI-native conversion for an already scheduled eligible Story", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const draft = fullAiDraft({
+      overlay: { method: "sharp_svg_overlay", image_ai_used_for_text: false },
+    });
+    draft.status = "SCHEDULED";
+    draft.visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY";
+    draft.primary.format = "STORY";
+    draft.primary.postType = "EDUCATION";
+    draft.primary.affiliateDisclosure = "";
+    draft.primary.verifiedProductId = "";
+    draft.scheduledFor = "2099-09-10T12:30:00.000Z";
+    renderReviewDraft(draft, onAction);
+
+    await user.click(screen.getByText("Advanced · regeneration and overrides"));
+    expect(screen.getByText(/preserves its frozen weekly slot, clears the current approval and schedule/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: /Regenerate as AI-native — no overlay/i }));
+    expect(onAction).toHaveBeenCalledWith("regenerate", {
+      scope: "image",
+      visual_mode: "FULL_AI_GRAPHIC",
+    });
+  });
+
   it("bundles a ready companion Story into the parent feed approval by default", async () => {
     const user = userEvent.setup();
     const onAction = vi.fn();

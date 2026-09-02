@@ -1174,6 +1174,10 @@ export const SocialToday = ({
     && !draft.primary.affiliateDisclosure?.trim()
     && !String(draft.primary.postType || "").toUpperCase().includes("AFFILIATE"),
   );
+  const scheduledAiNativeStoryConversionAvailable = Boolean(
+    aiNativeStoryConversionAvailable
+    && String(draft?.status || "").toUpperCase() === "SCHEDULED",
+  );
   useEffect(() => {
     if (draft?.visualMode) setVisualMode(requestVisualMode(draft.visualMode));
     else setVisualMode(defaultVisualMode);
@@ -1210,6 +1214,14 @@ export const SocialToday = ({
       <Button variant="outline" onClick={reviseWithInstructions} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Revise With Instructions</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "compliance" })} disabled={Boolean(busyAction)}><FileCheck2 className="h-4 w-4" /> Run Compliance Again</Button>
       <Button variant="ghost" onClick={() => onAction("duplicate")} disabled={Boolean(busyAction)}><Copy className="h-4 w-4" /> Duplicate draft</Button>
+    </CardContent>
+  </details> : scheduledAiNativeStoryConversionAvailable ? <details className="rounded-3xl border border-border bg-card shadow-none">
+    <summary className="cursor-pointer px-6 py-5 text-sm font-semibold">Advanced · regeneration and overrides</summary>
+    <CardContent className="border-t pt-5">
+      <p className="mb-4 text-xs leading-5 text-muted-foreground">
+        Regenerating this scheduled Story preserves its frozen weekly slot, clears the current approval and schedule, and returns the replacement to review. It will not publish automatically.
+      </p>
+      <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: "FULL_AI_GRAPHIC" })} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Regenerate as AI-native — no overlay</Button>
     </CardContent>
   </details> : null;
   if (loading && !draft) {
