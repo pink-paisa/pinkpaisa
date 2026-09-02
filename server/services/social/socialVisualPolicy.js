@@ -117,7 +117,6 @@ function visualModeEligibility(visualMode, recommendation = {}, { allowManualTem
   }
 
   if (mode === "FULL_AI_GRAPHIC") {
-    if (facts.format === "STORY") reasons.push("STORY_DISCLOSURES_REQUIRE_EXACT_OVERLAY");
     if (facts.has_verified_product || facts.affiliate || facts.format === "PRODUCT_FEATURE") {
       reasons.push("AUTHENTIC_PRODUCT_REQUIRES_EXACT_OVERLAY");
     }

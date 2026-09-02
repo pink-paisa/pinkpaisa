@@ -6,13 +6,22 @@ const sharp = require("sharp");
 
 const {
   buildProductionImagePrompt,
+  callOpenAiImage,
   generateSocialVisuals,
+  validateArtworkOnlyVisual,
+  validateFullAiGraphicText,
+  _private: { fullAiGraphicTextBlocksForSequence },
 } = require("../services/social/socialAiImageService");
 const {
   renderSocialDraftAssets,
 } = require("../services/socialCreativeService");
 const {
-  _private: { reviewAssetReadiness },
+  _private: {
+    fullAiDraftManifestFromAssets,
+    imageAttemptRows,
+    imagePromptRevisionResult,
+    reviewAssetReadiness,
+  },
 } = require("../services/social/socialManagerService");
 
 function checksum(buffer) {
@@ -45,6 +54,84 @@ async function generatedImageBuffer(seed = 1) {
     },
   }).composite([{ input: overlay, top: 0, left: 0 }]).jpeg({ quality: 91 }).toBuffer();
 }
+
+test("visual validation rejects parseable incomplete and refused provider responses", async () => {
+  const passBody = JSON.stringify({
+    decision: "PASS",
+    hasVisibleText: false,
+    hasLogoOrWatermark: false,
+    observedText: null,
+    issues: [],
+  });
+  await assert.rejects(
+    () => validateArtworkOnlyVisual({
+      buffer: Buffer.from("image"),
+      dependencies: {
+        openaiClient: {
+          responses: {
+            create: async () => ({
+              id: "validation-incomplete-1",
+              status: "incomplete",
+              incomplete_details: { reason: "max_output_tokens" },
+              output_text: passBody,
+              usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
+            }),
+          },
+        },
+      },
+    }),
+    (error) => error.code === "social_artwork_only_validation_invalid"
+      && error.validation_response.response_id === "validation-incomplete-1"
+      && error.validation_response.usage.total_tokens === 16
+      && error.validation_response.provider_status === "incomplete"
+      && /^[a-f0-9]{64}$/.test(error.validation_response.output_fingerprint)
+      && error.validation_response.raw_output_retained === false,
+  );
+
+  await assert.rejects(
+    () => validateArtworkOnlyVisual({
+      buffer: Buffer.from("image"),
+      dependencies: {
+        openaiClient: {
+          responses: {
+            create: async () => ({
+              id: "validation-status-missing-1",
+              output_text: passBody,
+              usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+            }),
+          },
+        },
+      },
+    }),
+    (error) => error.code === "social_artwork_only_validation_invalid"
+      && error.validation_response.response_id === "validation-status-missing-1"
+      && error.validation_response.provider_status === null
+      && error.validation_response.raw_output_retained === false,
+  );
+
+  await assert.rejects(
+    () => validateFullAiGraphicText({
+      buffer: Buffer.from("image"),
+      approvedHeadline: "Pause. Verify. Decide.",
+      dependencies: {
+        openaiClient: {
+          responses: {
+            create: async () => ({
+              id: "validation-refusal-1",
+              status: "completed",
+              output: [{ content: [{ type: "refusal", refusal: "Unable to inspect this image" }] }],
+              usage: { input_tokens: 8, output_tokens: 2, total_tokens: 10 },
+            }),
+          },
+        },
+      },
+    }),
+    (error) => error.code === "social_full_ai_graphic_validation_invalid"
+      && error.validation_response.response_id === "validation-refusal-1"
+      && error.validation_response.usage.total_tokens === 10
+      && error.validation_response.raw_output_retained === false,
+  );
+});
 
 function memoryAssetStore(records, prefix = "social") {
   return async ({ fileName, buffer }) => {
@@ -394,6 +481,382 @@ test("every image retry uses a materially revised AI prompt while preserving har
   assert.equal(result.original_visuals[0].failures[0].prompt_revision.provider_response_id, "prompt-revision-1");
 });
 
+test("paid retry success retains attempt rows and charges image calls plus prompt revision exactly once", async () => {
+  const recommendation = singleRecommendation();
+  const priorEnvironment = {
+    image: process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE,
+    input: process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION,
+    output: process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION,
+  };
+  process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = "0.25";
+  process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION = "1";
+  process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION = "2";
+  try {
+    let calls = 0;
+    const result = await generateSocialVisuals({
+      draftLike: draftFor(recommendation, "paid-retry-success"),
+      recommendation,
+      settings: settings(2),
+      dependencies: {
+        generateOpenAiImage: async () => {
+          calls += 1;
+          return calls === 1
+            ? {
+              buffer: Buffer.from("invalid-image-bytes"),
+              response_id: "paid-image-rejected-1",
+              usage: { input_tokens: 3, output_tokens: 0, total_tokens: 3 },
+            }
+            : {
+              buffer: await generatedImageBuffer(25),
+              response_id: "paid-image-accepted-2",
+              usage: { input_tokens: 7, output_tokens: 0, total_tokens: 7 },
+            };
+        },
+        reviseImagePrompt: async () => imagePromptRevisionResult({
+          output: { prompt: "Create a materially revised Pink Paisa scene beside a bright arched window." },
+          provider: "openai",
+          model: "gpt-5.6-luna",
+          prompt_version: "social-image-prompt-revision-v2",
+          response_id: "paid-prompt-revision-1",
+          usage: { input_tokens: 1_000_000, output_tokens: 500_000, total_tokens: 1_500_000 },
+          attempt_count: 1,
+          attempts: [{
+            attempt: 1,
+            status: "SUCCEEDED",
+            response_id: "paid-prompt-revision-1",
+            usage: { input_tokens: 1_000_000, output_tokens: 500_000, total_tokens: 1_500_000 },
+            output_fingerprint: "revision-output-fingerprint",
+          }],
+          input_fingerprint: "revision-input-fingerprint",
+          output_fingerprint: "revision-output-fingerprint",
+        }),
+        sleep: async () => {},
+        storeCampaignAsset: memoryAssetStore([], "paid-retry-success"),
+      },
+    });
+
+    assert.equal(result.paid_image_call_count, 2);
+    assert.equal(result.image_estimated_cost, 0.5);
+    assert.equal(result.prompt_revision_estimated_cost, 2);
+    assert.equal(result.estimated_cost, 2.5);
+    assert.equal(result.usage.total_tokens, 1_500_010);
+    const rows = imageAttemptRows(result, recommendation, "AI_VISUAL_WITH_EXACT_OVERLAY");
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].provider_response_id, "paid-image-rejected-1");
+    assert.equal(rows[0].prompt_revision.provider_response_id, "paid-prompt-revision-1");
+    assert.equal(rows[0].prompt_revision.attempts[0].output_fingerprint, "revision-output-fingerprint");
+    assert.equal(rows[0].usage.estimated_cost, 2.25);
+    assert.equal(rows[1].provider_response_id, "paid-image-accepted-2");
+    assert.equal(rows[1].usage.estimated_cost, 0.25);
+  } finally {
+    Object.entries(priorEnvironment).forEach(([key, value]) => {
+      const environmentKey = {
+        image: "SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE",
+        input: "SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION",
+        output: "SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION",
+      }[key];
+      if (value == null) delete process.env[environmentKey];
+      else process.env[environmentKey] = value;
+    });
+  }
+});
+
+test("production rejects a missing image cost rate before any paid provider call", async () => {
+  const priorNodeEnvironment = process.env.NODE_ENV;
+  const priorRate = process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+  let imageCalls = 0;
+  process.env.NODE_ENV = "production";
+  delete process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+  try {
+    await assert.rejects(
+      generateSocialVisuals({
+        draftLike: draftFor(singleRecommendation(), "missing-production-image-rate"),
+        recommendation: singleRecommendation(),
+        settings: settings(1),
+        dependencies: {
+          generateOpenAiImage: async () => {
+            imageCalls += 1;
+            return { buffer: await generatedImageBuffer(29), response_id: "must-not-run", usage: {} };
+          },
+          storeCampaignAsset: async () => { throw new Error("must not store an unpaid-cost image"); },
+        },
+      }),
+      (error) => error.code === "social_image_cost_rate_not_configured"
+        && error.statusCode === 503
+        && error.retriable === false,
+    );
+    assert.equal(imageCalls, 0);
+  } finally {
+    if (priorNodeEnvironment == null) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = priorNodeEnvironment;
+    if (priorRate == null) delete process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+    else process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = priorRate;
+  }
+});
+
+test("a paid image that fails validation retains prompt, response, usage, and validation evidence", async () => {
+  const recommendation = singleRecommendation();
+  let stores = 0;
+  await assert.rejects(
+    generateSocialVisuals({
+      draftLike: draftFor(recommendation, "failed-paid-image-evidence"),
+      recommendation,
+      settings: settings(1),
+      dependencies: {
+        generateOpenAiImage: async () => ({
+          buffer: Buffer.from("invalid-image-bytes"),
+          response_id: "paid-image-response-invalid",
+          usage: { input_tokens: 17, output_tokens: 0, total_tokens: 17 },
+        }),
+        storeCampaignAsset: async () => {
+          stores += 1;
+          throw new Error("invalid image must not be stored");
+        },
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "social_image_generation_failed");
+      assert.equal(error.usage.total_tokens, 17);
+      assert.equal(error.image_generation.paid_attempt_count, 1);
+      assert.equal(error.image_generation.usage.total_tokens, 17);
+      assert.match(error.image_generation.prompt, /Pink Paisa/i);
+      assert.match(error.image_generation.prompt_fingerprint, /^[a-f0-9]{64}$/);
+      assert.equal(error.image_generation.failures.length, 1);
+      assert.equal(error.image_generation.failures[0].provider_response_id, "paid-image-response-invalid");
+      assert.equal(error.image_generation.failures[0].usage.total_tokens, 17);
+      assert.match(error.image_generation.failures[0].output_fingerprint, /^[a-f0-9]{64}$/);
+      assert.equal(error.image_generation.failures[0].message, "AI image generation or validation attempt failed");
+      assert.doesNotMatch(JSON.stringify(error.image_generation), /empty or too small/i);
+      return true;
+    },
+  );
+  assert.equal(stores, 0);
+});
+
+test("an invalid OpenAI image payload retains paid response metadata without raw bytes", async () => {
+  await assert.rejects(
+    callOpenAiImage({
+      model: "gpt-image-2",
+      prompt: "Create a safe Pink Paisa editorial visual.",
+      size: "1088x1360",
+      quality: "medium",
+      dependencies: {
+        openaiClient: {
+          images: {
+            generate: async () => ({
+              id: "paid-invalid-image-response",
+              usage: { input_tokens: 23, output_tokens: 0, total_tokens: 23 },
+              data: [{}],
+            }),
+          },
+        },
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, "social_image_response_invalid");
+      assert.equal(error.response_id, "paid-invalid-image-response");
+      assert.equal(error.usage.total_tokens, 23);
+      assert.match(error.output_fingerprint, /^[a-f0-9]{64}$/);
+      assert.equal(Object.hasOwn(error, "buffer"), false);
+      assert.equal(JSON.stringify(error).includes("b64_json"), false);
+      return true;
+    },
+  );
+});
+
+test("accepted visual validation usage is priced exactly once with its image call", async () => {
+  const recommendation = singleRecommendation();
+  recommendation.visualBrief.visualMode = "AI_ARTWORK_ONLY";
+  const priorEnvironment = {
+    image: process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE,
+    input: process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION,
+    output: process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION,
+  };
+  process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = "0.25";
+  process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION = "1";
+  process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION = "2";
+  try {
+    const result = await generateSocialVisuals({
+      draftLike: draftFor(recommendation, "accepted-validator-cost"),
+      recommendation,
+      visualMode: "AI_ARTWORK_ONLY",
+      settings: settings(1),
+      dependencies: {
+        generateOpenAiImage: async () => ({
+          buffer: await generatedImageBuffer(26),
+          response_id: "accepted-artwork-image",
+          usage: {},
+        }),
+        validateArtworkOnlyVisual: async () => ({
+          decision: "PASS",
+          hasVisibleText: false,
+          hasLogoOrWatermark: false,
+          observedText: null,
+          issues: [],
+          response_id: "accepted-artwork-validator",
+          usage: { input_tokens: 1_000_000, output_tokens: 500_000, total_tokens: 1_500_000 },
+        }),
+        storeCampaignAsset: memoryAssetStore([], "accepted-validator-cost"),
+      },
+    });
+
+    assert.equal(result.image_estimated_cost, 0.25);
+    assert.equal(result.validation_estimated_cost, 2);
+    assert.equal(result.prompt_revision_estimated_cost, 0);
+    assert.equal(result.estimated_cost, 2.25);
+    assert.equal(result.validation_usage.total_tokens, 1_500_000);
+    const rows = imageAttemptRows(result, recommendation, "AI_ARTWORK_ONLY");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].validation_usage.total_tokens, 1_500_000);
+    assert.equal(rows[0].usage.estimated_cost, 2.25);
+  } finally {
+    if (priorEnvironment.image == null) delete process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+    else process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = priorEnvironment.image;
+    if (priorEnvironment.input == null) delete process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION;
+    else process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION = priorEnvironment.input;
+    if (priorEnvironment.output == null) delete process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION;
+    else process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION = priorEnvironment.output;
+  }
+});
+
+test("artwork-only validation cannot pass without a traceable provider response id", async () => {
+  const recommendation = singleRecommendation();
+  recommendation.visualBrief.visualMode = "AI_ARTWORK_ONLY";
+  await assert.rejects(
+    () => generateSocialVisuals({
+      draftLike: draftFor(recommendation, "artwork-validator-response-id"),
+      recommendation,
+      visualMode: "AI_ARTWORK_ONLY",
+      settings: settings(0),
+      dependencies: {
+        generateOpenAiImage: async () => ({
+          buffer: await generatedImageBuffer(28),
+          response_id: "artwork-image-with-id",
+          usage: {},
+        }),
+        validateArtworkOnlyVisual: async () => ({
+          decision: "PASS",
+          hasVisibleText: false,
+          hasLogoOrWatermark: false,
+          observedText: null,
+          issues: [],
+          usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+        }),
+        storeCampaignAsset: async () => { throw new Error("untraceable validation must not store an image"); },
+      },
+    }),
+    (error) => error.code === "social_image_generation_failed"
+      && error.image_generation.failures.some((failure) => failure.code === "social_artwork_only_visual_invalid"),
+  );
+});
+
+test("malformed paid visual-validator output retains response evidence and validation cost without raw output", async () => {
+  const recommendation = singleRecommendation();
+  recommendation.visualBrief.visualMode = "AI_ARTWORK_ONLY";
+  const priorEnvironment = {
+    image: process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE,
+    input: process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION,
+    output: process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION,
+  };
+  process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = "0.25";
+  process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION = "1";
+  process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION = "2";
+  try {
+    await assert.rejects(
+      generateSocialVisuals({
+        draftLike: draftFor(recommendation, "malformed-validator-evidence"),
+        recommendation,
+        visualMode: "AI_ARTWORK_ONLY",
+        settings: settings(1),
+        dependencies: {
+          generateOpenAiImage: async () => ({
+            buffer: await generatedImageBuffer(27),
+            response_id: "malformed-validator-image",
+            usage: {},
+          }),
+          openaiClient: {
+            responses: {
+              create: async () => ({
+                id: "malformed-validator-response",
+                status: "completed",
+                output_text: "not-json-secret-provider-output",
+                usage: { input_tokens: 1_000_000, output_tokens: 500_000, total_tokens: 1_500_000 },
+              }),
+            },
+          },
+          storeCampaignAsset: async () => { throw new Error("invalid validator output must not store an image"); },
+        },
+      }),
+      (error) => {
+        assert.equal(error.code, "social_image_generation_failed");
+        assert.equal(error.image_generation.validation_usage.total_tokens, 1_500_000);
+        assert.equal(error.image_generation.validation_estimated_cost, 2);
+        assert.equal(error.image_generation.image_estimated_cost, 0.25);
+        assert.equal(error.image_generation.estimated_cost, 2.25);
+        const [failure] = error.image_generation.failures;
+        assert.equal(failure.details.validation.response_id, "malformed-validator-response");
+        assert.equal(failure.details.validation.usage.total_tokens, 1_500_000);
+        assert.match(failure.details.validation.output_fingerprint, /^[a-f0-9]{64}$/);
+        assert.equal(failure.details.validation.raw_output_retained, false);
+        assert.doesNotMatch(JSON.stringify(error.image_generation), /not-json-secret-provider-output/);
+        return true;
+      },
+    );
+  } finally {
+    if (priorEnvironment.image == null) delete process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+    else process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = priorEnvironment.image;
+    if (priorEnvironment.input == null) delete process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION;
+    else process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION = priorEnvironment.input;
+    if (priorEnvironment.output == null) delete process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION;
+    else process.env.SOCIAL_MANAGER_OPENAI_OUTPUT_USD_PER_MILLION = priorEnvironment.output;
+  }
+});
+
+test("a terminal carousel failure retains prior paid visuals and retries without image bytes", async () => {
+  const recommendation = carouselRecommendation(3);
+  const priorRate = process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+  process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = "0.2";
+  try {
+    let calls = 0;
+    await assert.rejects(
+      generateSocialVisuals({
+        draftLike: draftFor(recommendation, "partial-carousel-failure"),
+        recommendation,
+        settings: settings(1),
+        dependencies: {
+          generateOpenAiImage: async () => {
+            calls += 1;
+            return {
+              buffer: calls < 3 ? await generatedImageBuffer(30 + calls) : Buffer.from("invalid-image-bytes"),
+              response_id: `partial-carousel-image-${calls}`,
+              usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
+            };
+          },
+          storeCampaignAsset: memoryAssetStore([], "partial-carousel"),
+        },
+      }),
+      (error) => {
+        assert.equal(error.image_generation.completed_visuals.length, 2);
+        assert.deepEqual(
+          error.image_generation.completed_visuals.map((visual) => visual.response_id),
+          ["partial-carousel-image-1", "partial-carousel-image-2"],
+        );
+        assert.equal(error.image_generation.failures[0].provider_response_id, "partial-carousel-image-3");
+        assert.equal(error.image_generation.paid_image_call_count, 3);
+        assert.equal(error.image_generation.usage.total_tokens, 30);
+        assert.equal(error.image_generation.estimated_cost, 0.6);
+        assert.equal(error.image_generation.raw_image_bytes_retained, false);
+        const serialized = JSON.stringify(error.image_generation);
+        assert.doesNotMatch(serialized, /"buffer"|invalid-image-bytes|data:image/i);
+        return true;
+      },
+    );
+  } finally {
+    if (priorRate == null) delete process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE;
+    else process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE = priorRate;
+  }
+});
+
 test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 no-overlay bytes", async () => {
   const approvedHeadline = "Money can feel simpler";
   const recommendation = singleRecommendation({ headline: approvedHeadline });
@@ -597,6 +1060,147 @@ test("FULL_AI_GRAPHIC prompt removes AI-authored text contradictions and keeps o
   assert.doesNotMatch(prompt, /No dates/i);
   assert.match(prompt, /\{"key":"supporting_text","text":"CHECK\. VERIFY\. DECIDE\."\}/);
   assert.equal((prompt.match(/CHECK\. VERIFY\. DECIDE\./g) || []).length, 1);
+});
+
+test("FULL_AI_GRAPHIC Story prompt bakes frame copy, final CTA, disclaimer and sequence into the original image", () => {
+  const recommendation = singleRecommendation();
+  recommendation.format = "STORY";
+  recommendation.formatContent = {
+    ...recommendation.formatContent,
+    format: "STORY",
+    cta: "Visit the Wealthness Quiz.",
+    financialDisclaimer: "Educational content only. Not personalised financial advice.",
+    frames: [
+      { frameNumber: 1, copy: "Which money idea should we explain next?" },
+      { frameNumber: 2, copy: "Choose one topic and begin with a clear explanation." },
+    ],
+  };
+  recommendation.visualBrief = {
+    ...recommendation.visualBrief,
+    format: "STORY",
+    visualMode: "FULL_AI_GRAPHIC",
+    aspectRatio: "9:16",
+    assets: [1, 2].map((sequence) => ({
+      sequence,
+      role: "STORY_FRAME",
+      prompt: `Create native Story frame ${sequence}.`,
+      imagePrompt: `Create native Story frame ${sequence}.`,
+      overlayInstructions: "No post-generation overlay.",
+      requiredObjects: [],
+      prohibitedObjects: [],
+    })),
+  };
+
+  const blocks = fullAiGraphicTextBlocksForSequence(recommendation, 2, 2);
+  assert.deepEqual(blocks, [
+    { key: "brand_name", text: "Pink Paisa" },
+    { key: "story_copy", text: "Choose one topic and begin with a clear explanation." },
+    { key: "cta", text: "Visit the Wealthness Quiz." },
+    { key: "financial_disclaimer", text: "Educational content only. Not personalised financial advice." },
+    { key: "sequence_label", text: "2/2" },
+  ]);
+  const prompt = buildProductionImagePrompt({
+    recommendation,
+    request: recommendation.visualBrief.assets[1],
+    sequence: 2,
+    total: 2,
+    visualMode: "FULL_AI_GRAPHIC",
+  });
+  assert.match(prompt, /Stories publish without a caption/);
+  assert.match(prompt, /do not add any post-generation overlay/i);
+  for (const block of blocks) assert.equal(prompt.split(JSON.stringify(block)).length - 1, 1);
+});
+
+test("FULL_AI_GRAPHIC Story finals are AI-native byte passthrough with no programmatic overlay", async () => {
+  const recommendation = singleRecommendation();
+  recommendation.format = "STORY";
+  recommendation.formatContent = {
+    ...recommendation.formatContent,
+    format: "STORY",
+    cta: "Visit the Wealthness Quiz.",
+    financialDisclaimer: "Educational content only. Not personalised financial advice.",
+    frames: [
+      { frameNumber: 1, copy: "Which money idea should we explain next?" },
+      { frameNumber: 2, copy: "Choose one topic and begin with a clear explanation." },
+    ],
+  };
+  recommendation.visualBrief = {
+    ...recommendation.visualBrief,
+    format: "STORY",
+    visualMode: "FULL_AI_GRAPHIC",
+    aspectRatio: "9:16",
+    assets: [1, 2].map((sequence) => ({
+      sequence,
+      role: "STORY_FRAME",
+      prompt: `Create native Story frame ${sequence}.`,
+      imagePrompt: `Create native Story frame ${sequence}.`,
+      overlayInstructions: "No post-generation overlay.",
+      requiredObjects: [],
+      prohibitedObjects: [],
+    })),
+  };
+  const originalStores = [];
+  let imageCall = 0;
+  const generated = await generateSocialVisuals({
+    draftLike: draftFor(recommendation, "native-story"),
+    recommendation,
+    settings: settings(1),
+    visualMode: "FULL_AI_GRAPHIC",
+    dependencies: {
+      generateOpenAiImage: async () => ({
+        buffer: await generatedImageBuffer(++imageCall),
+        response_id: `native-story-image-${imageCall}`,
+        usage: {},
+      }),
+      validateFullAiGraphicPoster: async ({ expectedTextBlocks }) => ({
+        decision: "PASS",
+        exactTextMatch: true,
+        brandIdentityMatch: true,
+        mobileLegible: true,
+        safeAreaPassed: true,
+        unapprovedTextPresent: false,
+        unrelatedLogoOrWatermarkPresent: false,
+        observedTextBlocks: expectedTextBlocks.map((block) => block.text),
+        issues: [],
+        response_id: `native-story-validator-${imageCall}`,
+      }),
+      sleep: async () => {},
+      storeCampaignAsset: memoryAssetStore(originalStores, "native-story-original"),
+    },
+  });
+  const finalStores = [];
+  const rendered = await renderSocialDraftAssets(draftFor(recommendation, "native-story-final"), {
+    recommendation,
+    baseImages: generated.original_visuals,
+    visualMode: "FULL_AI_GRAPHIC",
+    sourceProvenance: "generated_without_reference",
+    usageRightsStatus: "api_permitted",
+    persist: false,
+    storeCampaignAsset: memoryAssetStore(finalStores, "native-story-final"),
+  });
+
+  assert.equal(rendered.assets.length, 2);
+  for (const [index, asset] of rendered.assets.entries()) {
+    assert.equal(asset.checksum_sha256, generated.original_visuals[index].checksum_sha256);
+    assert.equal(asset.renderer, "openai_generated_graphic_passthrough");
+    assert.equal(asset.provenance.overlay.method, "none");
+    assert.equal(asset.provenance.overlay.pixel_overlay_applied, false);
+    assert.equal(asset.provenance.caption_policy.method, "story_frame_ai_native");
+    assert.equal(asset.provenance.caption_policy.pixel_overlay_applied, false);
+    assert.equal(asset.overlay_json.text_rendering.method, "openai_image_baked_in_exact_copy");
+    assert.equal(asset.validation_checklist.find((row) => row.key === "story_frame_disclosure_policy")?.status, "PASS");
+  }
+  const reviewDraft = draftFor(recommendation, "native-story-review");
+  reviewDraft.visual_mode = "FULL_AI_GRAPHIC";
+  reviewDraft.visual_mode_resolution = {
+    requested: "FULL_AI_GRAPHIC",
+    effective: "FULL_AI_GRAPHIC",
+    eligible: true,
+    reasons: [],
+  };
+  reviewDraft.full_ai_graphic_manifest = fullAiDraftManifestFromAssets(rendered.assets);
+  const readiness = reviewAssetReadiness(rendered.assets, { draft: reviewDraft });
+  assert.equal(readiness.passed, true, readiness.issues.join(" | "));
 });
 
 test("product generation preserves the exact authentic reference from prompt through final provenance", async () => {

@@ -91,18 +91,42 @@ function isPrivateIp(address) {
     const octets = address.split(".").map(Number);
     return octets[0] === 0
       || octets[0] === 10
+      || (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127)
       || octets[0] === 127
       || (octets[0] === 169 && octets[1] === 254)
       || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+      || (octets[0] === 192 && octets[1] === 0 && octets[2] === 0)
+      || (octets[0] === 192 && octets[1] === 0 && octets[2] === 2)
       || (octets[0] === 192 && octets[1] === 168)
+      || (octets[0] === 192 && octets[1] === 88 && octets[2] === 99)
+      || (octets[0] === 198 && [18, 19].includes(octets[1]))
+      || (octets[0] === 198 && octets[1] === 51 && octets[2] === 100)
+      || (octets[0] === 203 && octets[1] === 0 && octets[2] === 113)
       || octets[0] >= 224;
   }
+  if (!net.isIPv6(address)) return true;
   const normalized = String(address).toLowerCase();
-  return normalized === "::"
-    || normalized === "::1"
-    || normalized.startsWith("fc")
-    || normalized.startsWith("fd")
-    || normalized.startsWith("fe80:");
+  const unsafeIpv6 = new net.BlockList();
+  [
+    ["::", 128],
+    ["::1", 128],
+    ["::ffff:0:0", 96],
+    ["64:ff9b::", 96],
+    ["64:ff9b:1::", 48],
+    ["100::", 64],
+    ["2001:2::", 48],
+    ["2001:10::", 28],
+    ["2001:db8::", 32],
+    ["2002::", 16],
+    ["fc00::", 7],
+    ["fec0::", 10],
+    ["fe80::", 10],
+    ["ff00::", 8],
+  ].forEach(([network, prefix]) => unsafeIpv6.addSubnet(network, prefix, "ipv6"));
+  const globalUnicastIpv6 = new net.BlockList();
+  globalUnicastIpv6.addSubnet("2000::", 3, "ipv6");
+  return unsafeIpv6.check(normalized, "ipv6")
+    || !globalUnicastIpv6.check(normalized, "ipv6");
 }
 
 async function lookupAll(hostname, lookup = dns.lookup) {
@@ -110,7 +134,7 @@ async function lookupAll(hostname, lookup = dns.lookup) {
   return Array.isArray(result) ? result : [result];
 }
 
-async function assertAllowedPublicUrl(value, {
+async function resolveAllowedPublicUrl(value, {
   allowedDomains,
   blockedDomains = [],
   lookup = dns.lookup,
@@ -133,7 +157,16 @@ async function assertAllowedPublicUrl(value, {
   if (!addresses.length || addresses.some((entry) => isPrivateIp(entry?.address))) {
     throw new SocialGrowthResearchAdapterError("Research URL resolved to a private or unsafe address", { code: "RESEARCH_URL_BLOCKED" });
   }
-  return safeUrl;
+  const selected = addresses[0];
+  return {
+    url: safeUrl,
+    address: selected.address,
+    family: Number(selected.family || net.isIP(selected.address)),
+  };
+}
+
+async function assertAllowedPublicUrl(value, options = {}) {
+  return (await resolveAllowedPublicUrl(value, options)).url;
 }
 
 function sourceDomain(url) {
@@ -553,5 +586,6 @@ module.exports = {
     isPrivateIp,
     normalizeFeed,
     normalizeSettings,
+    resolveAllowedPublicUrl,
   },
 };

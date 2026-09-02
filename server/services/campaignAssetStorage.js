@@ -84,6 +84,52 @@ async function storeCampaignAsset({ fileName, buffer }) {
   };
 }
 
+async function listGeneratedCampaignAssets({ olderThan = null, outputDir = OUTPUT_DIR } = {}) {
+  const root = path.resolve(outputDir);
+  const cutoff = olderThan == null ? null : new Date(olderThan).getTime();
+  if (cutoff != null && !Number.isFinite(cutoff)) {
+    throw new Error("Invalid generated campaign asset cutoff");
+  }
+
+  let entries;
+  try {
+    entries = await fs.promises.readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const assets = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    let fileName;
+    try {
+      fileName = safeFileName(entry.name);
+    } catch (_error) {
+      continue;
+    }
+    const filePath = path.resolve(root, fileName);
+    if (!filePath.startsWith(`${root}${path.sep}`)) continue;
+    let stat;
+    try {
+      stat = await fs.promises.lstat(filePath);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) continue;
+    if (cutoff != null && stat.mtimeMs > cutoff) continue;
+    assets.push({
+      storage_provider: "local",
+      storage_key: `${GENERATED_CAMPAIGN_ASSET_PREFIX}${fileName}`,
+      file_path: filePath,
+      file_size_bytes: Number(stat.size || 0),
+      modified_at: stat.mtime.toISOString(),
+    });
+  }
+  return assets.sort((left, right) => left.storage_key.localeCompare(right.storage_key));
+}
+
 async function deleteCampaignAsset(asset = {}) {
   if (!asset.storage_key) return false;
   if (asset.storage_provider === "local") {
@@ -101,6 +147,13 @@ module.exports = {
   createCampaignAssetVersion,
   deleteCampaignAsset,
   getGeneratedCampaignAssetReference,
+  listGeneratedCampaignAssets,
   storeCampaignAsset,
-  _private: { createCampaignAssetVersion, getGeneratedCampaignAssetReference, safeFileName, writeLocal },
+  _private: {
+    createCampaignAssetVersion,
+    getGeneratedCampaignAssetReference,
+    listGeneratedCampaignAssets,
+    safeFileName,
+    writeLocal,
+  },
 };

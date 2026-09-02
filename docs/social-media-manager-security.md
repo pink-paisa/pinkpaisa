@@ -382,7 +382,7 @@ Before every production enablement:
 - [ ] Production uses HTTPS and HSTS through Nginx.
 - [ ] CORS origins contain only intended Pink Paisa origins.
 - [ ] OpenAI model/provider and data-processing use are approved.
-- [ ] OpenAI input/output token-rate environment values match the deployed models, and provider-side budgets/alerts are enabled.
+- [ ] The required positive OpenAI per-image rate and input/output token-rate environment values match the deployed models; generation fails closed when the image rate is absent, and provider-side budgets/alerts remain enabled.
 - [ ] Research allowlist and feed list contain only reviewed domains.
 - [ ] Reviewer email list contains current authorized staff.
 - [ ] Human approval remains true.

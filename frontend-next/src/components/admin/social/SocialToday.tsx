@@ -250,7 +250,7 @@ const GenerationControls = ({
   onGenerate: SocialTodayProps["onGenerate"];
 }) => {
   const artworkEligibility = artworkOnlyEligibility({ format: formatPreference, objective: objectivePreference });
-  const exactOverlayRequired = ["PRODUCT_FEATURE", "STORY"].includes(formatPreference);
+  const exactOverlayRequired = formatPreference === "PRODUCT_FEATURE";
   const effectiveVisualMode = exactOverlayRequired || (visualMode === "AI_ARTWORK_ONLY" && !artworkEligibility.eligible)
     ? "AI_VISUAL_WITH_EXACT_OVERLAY"
     : visualMode;
@@ -731,7 +731,7 @@ const CreativePreview = ({
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded-xl bg-muted/50 p-4 text-sm leading-6">{completedCaption || "Caption copy will appear here."}</div>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{storyMode ? <><Badge variant="outline">Story on-frame policy</Badge><span>Affiliate disclosure on first frame → CTA and general disclaimer on final frame; Stories publish without a caption.</span></> : <><Badge variant="outline">Caption-only policy</Badge><span>Affiliate disclosure → Caption → CTA → Financial disclaimer → Hashtags</span><span className="ml-auto tabular-nums">{draft.captionContract?.length ?? completedCaption.length} / 2,200</span></>}</div>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">{storyMode ? <><Badge variant="outline">Story on-frame policy</Badge><span>{aiNativeFullGraphic ? "All approved Story text is rendered inside the original AI image and independently validated; no programmatic overlay is added." : "Affiliate disclosure on first frame → CTA and general disclaimer on final frame; Stories publish without a caption."}</span></> : <><Badge variant="outline">Caption-only policy</Badge><span>Affiliate disclosure → Caption → CTA → Financial disclaimer → Hashtags</span><span className="ml-auto tabular-nums">{draft.captionContract?.length ?? completedCaption.length} / 2,200</span></>}</div>
           {landingUrl ? (
             <a href={landingUrl} target="_blank" rel="noreferrer" className="flex items-start gap-2 break-all rounded-xl border border-border/60 p-3 text-xs text-primary hover:bg-accent">
               <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {landingUrl}
@@ -795,6 +795,7 @@ const ContentEditor = ({
   scheduleEditable?: boolean;
 }) => {
   const recommendation = draft.primary;
+  const aiNativeGraphic = String(draft.visualMode || "").toUpperCase() === "FULL_AI_GRAPHIC";
   const patch = (changes: Partial<SocialRecommendation>) => onChange({ ...recommendation, ...changes });
   const updateHook = (index: number, value: string) => {
     const hooks = Array.from({ length: Math.max(3, recommendation.hooks.length) }, (_, hookIndex) => recommendation.hooks[hookIndex] || "");
@@ -966,15 +967,15 @@ const ContentEditor = ({
           <Field label="Visual direction" hint="One “Label: direction” per line.">
             <Textarea rows={5} value={visualDirection} onChange={setVisualDirection} />
           </Field>
-          <Field label="Image generation prompt" hint="Describe the text-free base image. Exact written copy is overlaid separately.">
+          <Field label="Image generation prompt" hint={aiNativeGraphic ? "Describe the complete AI-native graphic. Approved text is rendered inside the original AI image; no programmatic overlay is added." : "Describe the text-free base image. Exact written copy is overlaid separately."}>
             <Textarea rows={5} value={recommendation.imageGenerationPrompt} onChange={(event) => patch({ imageGenerationPrompt: event.target.value })} />
           </Field>
           <Field label="Elements the image model must avoid" hint="One prohibited element per line.">
             <Textarea rows={4} value={recommendation.negativeVisualInstructions.join("\n")} onChange={(event) => patch({ negativeVisualInstructions: event.target.value.split("\n").map((item) => item.trim()).filter(Boolean) })} />
           </Field>
-          <Field label="Exact overlay instructions" hint="One “Placement: instruction” per line. These are applied after the AI creates the original visual.">
+          {!aiNativeGraphic ? <Field label="Exact overlay instructions" hint="One “Placement: instruction” per line. These are applied after the AI creates the original visual.">
             <Textarea rows={4} value={overlayDirection} onChange={setOverlayDirection} />
-          </Field>
+          </Field> : null}
           <Field label="Alt text"><Textarea rows={3} value={recommendation.altText} onChange={(event) => patch({ altText: event.target.value })} /></Field>
           {scheduleEditable ? <Field label="Posting date and time" hint={`${draft.timezone}. Scheduling is accepted only after approval.`}>
             <Input type="datetime-local" value={toDateTimeLocal(draft.scheduledFor)} onChange={(event) => onScheduleChange(event.target.value)} />
@@ -1165,6 +1166,14 @@ export const SocialToday = ({
   const [visualMode, setVisualMode] = useState<SocialVisualMode>(defaultVisualMode);
   const [generationInstructions, setGenerationInstructions] = useState("");
   const editableDraft = Boolean(draft && ["DRAFT", "REJECTED", "NEEDS_REVIEW", "APPROVED"].includes(String(draft.status).toUpperCase()));
+  const aiNativeStoryConversionAvailable = Boolean(
+    draft
+    && String(draft.primary.format).toUpperCase() === "STORY"
+    && String(draft.visualMode).toUpperCase() !== "FULL_AI_GRAPHIC"
+    && !draft.primary.verifiedProductId
+    && !draft.primary.affiliateDisclosure?.trim()
+    && !String(draft.primary.postType || "").toUpperCase().includes("AFFILIATE"),
+  );
   useEffect(() => {
     if (draft?.visualMode) setVisualMode(requestVisualMode(draft.visualMode));
     else setVisualMode(defaultVisualMode);
@@ -1196,6 +1205,7 @@ export const SocialToday = ({
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "strategy", instructions: generationInstructions.trim() || undefined })} disabled={Boolean(busyAction)}><Sparkles className="h-4 w-4" /> Regenerate Strategy</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "copy", instructions: generationInstructions.trim() || undefined })} disabled={Boolean(busyAction)}><MessageSquareText className="h-4 w-4" /> Regenerate Copy</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: visualMode, instructions: generationInstructions.trim() || undefined })} disabled={Boolean(busyAction)}><ImageIcon className="h-4 w-4" /> Regenerate Image</Button>
+      {aiNativeStoryConversionAvailable ? <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: "FULL_AI_GRAPHIC" })} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Regenerate as AI-native — no overlay</Button> : null}
       <Button variant="outline" onClick={changeFormatWithAi} disabled={Boolean(busyAction)}><Layers3 className="h-4 w-4" /> Change Format With AI</Button>
       <Button variant="outline" onClick={reviseWithInstructions} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Revise With Instructions</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "compliance" })} disabled={Boolean(busyAction)}><FileCheck2 className="h-4 w-4" /> Run Compliance Again</Button>

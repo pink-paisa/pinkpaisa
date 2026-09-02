@@ -893,7 +893,7 @@ test("captionless Stories approve and schedule only with required final-frame po
       dependencies,
     }),
     (error) => error.code === "social_story_frame_copy_invalid"
-      && error.issues.includes("STORY_FRAME_OVERLAY_REQUIRED"),
+      && error.issues.includes("STORY_ON_FRAME_COPY_PROVENANCE_REQUIRED"),
   );
   assert.equal(draft.status, "NEEDS_REVIEW");
   assert.equal(asset.manual_review_status, "pending");

@@ -75,6 +75,29 @@ function usageTotal(results = []) {
   }), { input_tokens: 0, output_tokens: 0, total_tokens: 0 });
 }
 
+function providerAttemptMetadata(result = {}) {
+  const attempts = safeArray(result.attempts).slice(0, 10).map((attempt, index) => ({
+    attempt: Math.max(Number(attempt?.attempt || index + 1), 1),
+    status: trimText(attempt?.status).toUpperCase() || "FAILED",
+    started_at: attempt?.started_at || null,
+    completed_at: attempt?.completed_at || null,
+    response_id: trimText(attempt?.response_id).slice(0, 300) || null,
+    usage: {
+      input_tokens: Number(attempt?.usage?.input_tokens || 0),
+      output_tokens: Number(attempt?.usage?.output_tokens || 0),
+      total_tokens: Number(attempt?.usage?.total_tokens
+        || Number(attempt?.usage?.input_tokens || 0) + Number(attempt?.usage?.output_tokens || 0)),
+    },
+    output_fingerprint: trimText(attempt?.output_fingerprint).slice(0, 128) || null,
+    error_code: trimText(attempt?.error_code).slice(0, 200) || null,
+    error_message: normalizeWhitespace(attempt?.error_message || "").slice(0, 1000) || null,
+  }));
+  return {
+    attempts,
+    raw_output_retained: false,
+  };
+}
+
 function promptRun(stage, result, metadata = {}) {
   return {
     stage,
@@ -93,6 +116,7 @@ function promptRun(stage, result, metadata = {}) {
     completed_at: result?.completed_at || null,
     output_json: result?.output ? clone(result.output) : null,
     request_metadata: metadata,
+    response_metadata: providerAttemptMetadata(result),
     status: "SUCCEEDED",
   };
 }
@@ -168,7 +192,7 @@ function weeklyCandidateAsRequiredCandidate(weeklyCandidate, internalSignals = {
     objective: trimText(weeklyCandidate.objective).toUpperCase(),
     format,
     contentPillar: trimText(weeklyCandidate.contentPillar || weeklyCandidate.content_pillar),
-    targetAudienceSegment: trimText(weeklyCandidate.audienceSegment || weeklyCandidate.audience_segment).slice(0, 240),
+    targetAudienceSegment: trimText(weeklyCandidate.audienceSegment || weeklyCandidate.audience_segment).slice(0, 300),
     businessObjective: trimText(weeklyCandidate.pinkPaisaConnection || weeklyCandidate.pink_paisa_connection).slice(0, 400),
     verifiedProductId,
     verifiedProductTitle: verifiedProduct ? trimText(verifiedProduct.title) : null,
@@ -451,7 +475,10 @@ function legacyOnPostCopy(formatContent = {}) {
   if (format === "CAROUSEL") {
     return {
       headline: formatContent.slides[0]?.headline || null,
-      supportingCopy: formatContent.narrativeArc || null,
+      // narrativeArc is canonical planning copy and may legitimately exceed
+      // the 160-character legacy supporting-copy contract. Do not truncate or
+      // duplicate it here; the complete value remains in formatContent.
+      supportingCopy: null,
       slides: formatContent.slides.map((slide) => ({
         slideNumber: slide.slideNumber,
         headline: slide.headline,
@@ -464,7 +491,10 @@ function legacyOnPostCopy(formatContent = {}) {
   }
   if (format === "STORY") {
     return {
-      headline: formatContent.frames[0]?.copy || null,
+      // Story frame copy has its own 160-character contract and must not be
+      // forced into the narrower 80-character legacy headline projection.
+      // Preserve it only in storyFrames, which is the canonical render path.
+      headline: null,
       supportingCopy: null,
       slides: [],
       storyFrames: formatContent.frames.map((frame) => ({
@@ -478,7 +508,9 @@ function legacyOnPostCopy(formatContent = {}) {
   if (["REEL", "VIDEO_FEED"].includes(format)) {
     return {
       headline: formatContent.coverHeadline,
-      supportingCopy: formatContent.audioDirection,
+      // audioDirection is production direction (up to 700 characters), not a
+      // legacy on-post supporting line. Keep it losslessly in formatContent.
+      supportingCopy: null,
       slides: [],
       storyFrames: [],
       reelScenes: formatContent.scenes.map((scene) => ({
@@ -811,6 +843,7 @@ async function runAiDecision({
   const complianceHistory = [];
   const destinations = allowedDestinationRows(internalSignals);
 
+  try {
   const marketResult = await ai.analyzeMarketContext({
     ...shared,
     context: {
@@ -947,30 +980,25 @@ async function runAiDecision({
     }
   ));
   if (requiredWeeklyCandidate) {
-    const eligibleIds = new Set(assessedCandidates
-      .filter((candidate) => candidate.server_eligible)
-      .map((candidate) => candidate.id));
-    const rankedIds = strategistRows
-      .slice()
-      .sort((left, right) => Number(right.scoreBreakdown?.total || 0) - Number(left.scoreBreakdown?.total || 0))
-      .map((row) => row.id);
-    const alternativeIds = [...new Set([
-      strategy.selectedPrimaryId,
-      ...safeArray(strategy.alternativeIds),
-      ...rankedIds,
-    ])].filter((id) => id !== requiredWeeklyCandidate.id && eligibleIds.has(id)).slice(0, 2);
-    if (alternativeIds.length !== 2) {
-      const error = new Error("The strategist did not provide two eligible alternatives to the approved weekly candidate");
-      error.code = "social_ai_selection_invalid";
-      throw error;
-    }
     strategy = {
       ...strategy,
       selectedPrimaryId: requiredWeeklyCandidate.id,
-      alternativeIds,
+      alternativeIds: [],
     };
   }
-  const selected = validateStrategistSelection(strategy, assessedCandidates);
+  // Weekly strategy approval has already frozen the primary candidate. Keep
+  // the full scorecard for audit context, but do not require or spend copy,
+  // compliance, or visual-generation calls on alternatives the administrator
+  // did not approve. Exploratory/manual generation still produces all three.
+  const selected = requiredWeeklyCandidate
+    ? [assessedCandidates.find((candidate) => candidate.id === requiredWeeklyCandidate.id)]
+    : validateStrategistSelection(strategy, assessedCandidates);
+  if (!selected[0]?.server_eligible) {
+    const error = new Error(`The approved weekly candidate is ineligible: ${selected[0]?.server_rejection_reason || "candidate not found"}`);
+    error.code = "social_ai_selection_ineligible";
+    error.issues = selected[0]?.server_rejection_reason ? [selected[0].server_rejection_reason] : [];
+    throw error;
+  }
   const selectedIds = new Set(selected.map((candidate) => candidate.id));
 
   const contentById = new Map();
@@ -1060,7 +1088,7 @@ async function runAiDecision({
     generationDate,
     timezone: TIMEZONE,
     primaryRecommendation: canonicalRecommendations[0],
-    alternativeRecommendations: canonicalRecommendations.slice(1, 3),
+    alternativeRecommendations: requiredWeeklyCandidate ? [] : canonicalRecommendations.slice(1, 3),
     rejectedIdeas,
   });
   const primaryCompliance = scanRecommendationCompliance(packageValue.primaryRecommendation, { requireSourcesForCurrentClaims: true });
@@ -1096,6 +1124,27 @@ async function runAiDecision({
     usage: usageTotal(promptResults),
     fallback_reason: null,
   };
+  } catch (error) {
+    // A terminal decision still represents real, billable provider work. Make
+    // the completed-stage provenance available to the generation-run boundary
+    // so it can be persisted before the failure is surfaced to an operator.
+    error.prompt_runs = clone(promptRuns);
+    error.completed_prompt_usage = usageTotal(promptResults);
+    if (!error.usage || !Number(error.usage.total_tokens || error.usage.input_tokens || error.usage.output_tokens)) {
+      error.usage = clone(error.completed_prompt_usage);
+    }
+    error.content_revision_attempts = clone(
+      safeArray(error.content_revision_attempts).length
+        ? error.content_revision_attempts
+        : revisionAttempts,
+    );
+    error.compliance_history = clone(
+      safeArray(error.compliance_history).length
+        ? error.compliance_history
+        : complianceHistory,
+    );
+    throw error;
+  }
 }
 
 async function generateDailyDecision({
@@ -1150,6 +1199,7 @@ module.exports = {
     legacyVisualConcept,
     prepareVerifiedCandidate,
     promptRun,
+    providerAttemptMetadata,
     providerOutput,
     recommendationForCompliance,
     serverCandidateAssessment,

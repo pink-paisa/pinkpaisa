@@ -8,6 +8,8 @@ const SocialAuditLog = require("../../models/SocialAuditLog");
 const SocialGenerationRun = require("../../models/SocialGenerationRun");
 const SocialMetricSnapshot = require("../../models/SocialMetricSnapshot");
 const SocialOAuthState = require("../../models/SocialOAuthState");
+const SocialPaidCallUsageLedger = require("../../models/SocialPaidCallUsageLedger");
+const SocialPaidOperation = require("../../models/SocialPaidOperation");
 const SocialPostDraft = require("../../models/SocialPostDraft");
 const SocialPromptVersion = require("../../models/SocialPromptVersion");
 const SocialPublication = require("../../models/SocialPublication");
@@ -42,6 +44,8 @@ const INDEX_MODELS = [
   SocialPublication,
   SocialMetricSnapshot,
   SocialOAuthState,
+  SocialPaidCallUsageLedger,
+  SocialPaidOperation,
 ];
 
 const REVISION_OUTPUT_SCHEMA = socialSchemas.REVISION_OUTPUT_SCHEMA || COMPLIANCE_OUTPUT_SCHEMA;

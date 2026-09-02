@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const { protect, adminOnly } = require("../middleware/auth");
 const socialMediaManagerRouter = require("../routes/socialMediaManager");
+const { _private: controllerPrivate } = require("../controllers/socialMediaManagerController");
 const { verifyInstagramWebhookController } = require("../controllers/instagramController");
 
 const ORCHESTRATION_ROUTES = [
@@ -55,6 +56,7 @@ const ADMIN_ROUTES = [
   ["GET", "/admin/performance"],
   ["GET", "/admin/runs/:id"],
   ["POST", "/admin/runs/:id/retry"],
+  ["POST", "/admin/runs/:id/archive-failure"],
   ["GET", "/admin/drafts/:id"],
   ["POST", "/admin/drafts/:id/audio-track"],
   ["PATCH", "/admin/drafts/:id"],
@@ -113,6 +115,25 @@ test("social media manager route module loads with the complete admin API contra
   assert.equal(typeof socialMediaManagerRouter, "function");
   assert.ok(Array.isArray(socialMediaManagerRouter.stack));
   assert.deepEqual(routerContracts(socialMediaManagerRouter), EXPECTED_SOCIAL_ROUTES);
+});
+
+test("paid creative endpoints require a bounded caller-owned idempotency key", () => {
+  assert.throws(
+    () => controllerPrivate.requiredPaidRequestKey({ headers: {} }),
+    (error) => error.statusCode === 400 && error.code === "social_paid_operation_idempotency_key_required",
+  );
+  assert.throws(
+    () => controllerPrivate.requiredPaidRequestKey({ headers: { "idempotency-key": "contains spaces" } }),
+    (error) => error.statusCode === 400 && error.code === "social_paid_operation_idempotency_key_invalid",
+  );
+  assert.throws(
+    () => controllerPrivate.requiredPaidRequestKey({ headers: { "idempotency-key": "x".repeat(301) } }),
+    (error) => error.statusCode === 400 && error.code === "social_paid_operation_idempotency_key_invalid",
+  );
+  assert.equal(
+    controllerPrivate.requiredPaidRequestKey({ headers: { "idempotency-key": "social-paid:duplicate:draft-1:request-1" } }),
+    "social-paid:duplicate:draft-1:request-1",
+  );
 });
 
 test("server mounts Social Media Manager and its Instagram integration without a request-count throttle", () => {

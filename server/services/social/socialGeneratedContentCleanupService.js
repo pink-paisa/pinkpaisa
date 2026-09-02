@@ -7,6 +7,8 @@ const SocialAsset = require("../../models/SocialAsset");
 const SocialAuditLog = require("../../models/SocialAuditLog");
 const SocialGenerationRun = require("../../models/SocialGenerationRun");
 const SocialGenerationUsageLedger = require("../../models/SocialGenerationUsageLedger");
+const SocialPaidCallUsageLedger = require("../../models/SocialPaidCallUsageLedger");
+const SocialPaidOperation = require("../../models/SocialPaidOperation");
 const SocialManualAction = require("../../models/SocialManualAction");
 const SocialPostDraft = require("../../models/SocialPostDraft");
 const SocialPublication = require("../../models/SocialPublication");
@@ -15,11 +17,14 @@ const SocialWeeklyPlan = require("../../models/SocialWeeklyPlan");
 const {
   deleteCampaignAsset,
   getGeneratedCampaignAssetReference,
+  listGeneratedCampaignAssets,
 } = require("../campaignAssetStorage");
 
 const CONFIRMATION_PHRASE = "DELETE ALL GENERATED CONTENT";
 const TOKEN_VERSION = 1;
 const TOKEN_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_ORPHAN_FILE_MIN_AGE_MS = 60 * 60 * 1000;
+const MIN_ORPHAN_FILE_AGE_MS = 5 * 60 * 1000;
 const ACTIVE_RUN_STATUSES = new Set(["PENDING", "RUNNING"]);
 const ACTIVE_WEEKLY_PLAN_STATUSES = new Set(["QUEUED", "RESEARCHING", "PLANNING"]);
 const ACTIVE_PUBLICATION_STATUSES = new Set([
@@ -113,6 +118,8 @@ function models(dependencies = {}) {
     SocialAuditLog: dependencies.SocialAuditLog || SocialAuditLog,
     SocialGenerationRun: dependencies.SocialGenerationRun || SocialGenerationRun,
     SocialGenerationUsageLedger: dependencies.SocialGenerationUsageLedger || SocialGenerationUsageLedger,
+    SocialPaidCallUsageLedger: dependencies.SocialPaidCallUsageLedger || SocialPaidCallUsageLedger,
+    SocialPaidOperation: dependencies.SocialPaidOperation || SocialPaidOperation,
     SocialManualAction: dependencies.SocialManualAction || SocialManualAction,
     SocialPostDraft: dependencies.SocialPostDraft || SocialPostDraft,
     SocialPublication: dependencies.SocialPublication || SocialPublication,
@@ -131,9 +138,22 @@ function storageKeyFromReference(value, dependencies = {}) {
 }
 
 function assetFileReferences(asset, dependencies = {}) {
+  const provenance = asset.provenance || {};
+  const baseImage = provenance.base_image || {};
   const references = [
     { storage_key: asset.storage_key, file_size_bytes: asset.file_size_bytes },
     { storage_key: asset.original_visual?.storage_key, file_size_bytes: asset.original_visual?.file_size_bytes },
+    { storage_key: asset.provider_original?.storage_key, file_size_bytes: asset.provider_original?.file_size_bytes },
+    { storage_key: asset.normalization?.output_storage_key },
+    { storage_key: provenance.provider_original?.storage_key, file_size_bytes: provenance.provider_original?.file_size_bytes },
+    { storage_key: provenance.normalization?.output_storage_key },
+    { storage_key: provenance.ai_background?.storage_key, file_size_bytes: provenance.ai_background?.file_size_bytes },
+    { storage_key: provenance.authentic_product_reference?.storage_key, file_size_bytes: provenance.authentic_product_reference?.file_size_bytes },
+    { storage_key: baseImage.storage_key, file_size_bytes: baseImage.file_size_bytes },
+    { storage_key: baseImage.provider_original?.storage_key, file_size_bytes: baseImage.provider_original?.file_size_bytes },
+    { storage_key: baseImage.normalization?.output_storage_key },
+    { storage_key: baseImage.ai_background?.storage_key, file_size_bytes: baseImage.ai_background?.file_size_bytes },
+    { storage_key: baseImage.authentic_product_reference?.storage_key, file_size_bytes: baseImage.authentic_product_reference?.file_size_bytes },
     ...(Array.isArray(asset.reference_assets) ? asset.reference_assets.map((reference) => ({
       storage_key: reference?.storage_key,
       file_size_bytes: reference?.file_size_bytes,
@@ -261,16 +281,122 @@ function terminalRunBoundary(run = {}) {
   return Number.isNaN(boundary.getTime()) ? null : boundary;
 }
 
-function splitRunAssets(run, assets = []) {
+function splitRunAssets(run, assets = [], paidCallLedgers = []) {
   const boundary = terminalRunBoundary(run);
   const runAssets = uniqueUsageAssets(assets.filter((asset) => id(asset.generation_run_id) === id(run._id)));
-  if (!boundary) return { initial: runAssets, regeneration: [] };
+  const paidCallIds = new Set(paidCallLedgers
+    .filter((entry) => id(entry.generation_run_id) === id(run._id))
+    .map((entry) => String(entry.evidence?.paid_call_id || "").trim())
+    .filter(Boolean));
   return runAssets.reduce((result, asset) => {
     const createdAt = asset.created_at ? new Date(asset.created_at) : null;
-    const postRun = createdAt && !Number.isNaN(createdAt.getTime()) && createdAt.getTime() > boundary.getTime();
-    result[postRun ? "regeneration" : "initial"].push(asset);
+    const paidRegeneration = paidCallIds.has(String(asset.provenance?.paid_call_id || "").trim());
+    const postRun = boundary
+      && createdAt
+      && !Number.isNaN(createdAt.getTime())
+      && createdAt.getTime() > boundary.getTime();
+    result[paidRegeneration || postRun ? "regeneration" : "initial"].push(asset);
     return result;
   }, { initial: [], regeneration: [] });
+}
+
+function orphanFileMinAgeMs(dependencies = {}) {
+  const configured = Number(
+    dependencies.orphanFileMinAgeMs
+      ?? process.env.SOCIAL_GENERATED_ORPHAN_MIN_AGE_MS
+      ?? DEFAULT_ORPHAN_FILE_MIN_AGE_MS,
+  );
+  if (!Number.isFinite(configured)) return DEFAULT_ORPHAN_FILE_MIN_AGE_MS;
+  return Math.max(configured, MIN_ORPHAN_FILE_AGE_MS);
+}
+
+function paidCallFileReferences(entry, dependencies = {}) {
+  const references = [];
+  const visit = (value, depth = 0) => {
+    if (!value || depth > 12) return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      if (["storage_key", "output_storage_key"].includes(key) && typeof child === "string") {
+        references.push({ storage_key: child, file_size_bytes: value.file_size_bytes });
+      } else {
+        visit(child, depth + 1);
+      }
+    }
+  };
+  visit(entry?.evidence?.completed_visuals);
+  visit(entry?.evidence?.staged_files);
+  visit(entry?.evidence?.failures);
+  return references
+    .map((reference) => ({
+      storage_key: storageKeyFromReference(reference.storage_key, dependencies),
+      file_size_bytes: Number(reference.file_size_bytes || 0),
+    }))
+    .filter((reference) => reference.storage_key);
+}
+
+function subtractUsageFloor(left = {}, right = {}) {
+  const result = normalizedUsage();
+  for (const field of USAGE_FIELDS) {
+    result[field] = Math.max(nonnegativeNumber(left?.[field]) - nonnegativeNumber(right?.[field]), 0);
+  }
+  result.estimated_cost = roundedUsd(result.estimated_cost);
+  return result;
+}
+
+function promptRevisionIdentity(revision = {}) {
+  const value = revision.provider_response_id
+    || revision.response_id
+    || revision.output_fingerprint
+    || revision.input_fingerprint
+    || "";
+  return String(value).trim();
+}
+
+function promptRevisionPositions({ assetIndex = null, slideNumber = null, attemptNumber = 1 } = {}) {
+  const positions = [];
+  const attempt = Math.max(Math.floor(nonnegativeNumber(attemptNumber || 1)), 1);
+  if (assetIndex != null && Number.isFinite(Number(assetIndex))) {
+    positions.push(`index:${Math.max(Math.floor(Number(assetIndex)), 0)}:attempt:${attempt}`);
+  }
+  if (slideNumber != null && Number.isFinite(Number(slideNumber))) {
+    positions.push(`slide:${Math.max(Math.floor(Number(slideNumber)), 1)}:attempt:${attempt}`);
+  }
+  return positions;
+}
+
+function unrepresentedPromptRevisionFailures(run = {}, attempts = [], failures = []) {
+  const representedIdentities = new Set();
+  const representedPositions = new Set();
+  for (const attempt of attempts) {
+    if (!attempt?.prompt_revision) continue;
+    const identity = promptRevisionIdentity(attempt.prompt_revision);
+    if (identity) representedIdentities.add(identity);
+    for (const position of promptRevisionPositions({
+      assetIndex: attempt.asset_index,
+      slideNumber: attempt.slide_number,
+      attemptNumber: attempt.attempt_number,
+    })) representedPositions.add(position);
+  }
+
+  const sequence = Math.max(Math.floor(nonnegativeNumber(
+    run.last_error?.details?.image_generation?.sequence || 1,
+  )), 1);
+  return failures.filter((failure, index) => {
+    const revision = failure?.prompt_revision;
+    if (revision?.status !== "COMPLETED") return false;
+    const identity = promptRevisionIdentity(revision);
+    if (identity && representedIdentities.has(identity)) return false;
+    const positions = promptRevisionPositions({
+      assetIndex: sequence - 1,
+      slideNumber: sequence,
+      attemptNumber: failure.attempt || index + 1,
+    });
+    return !positions.some((position) => representedPositions.has(position));
+  });
 }
 
 function imageAttemptEvidence(run, initialAssets, stageUsage, dependencies = {}) {
@@ -325,8 +451,11 @@ function imageAttemptEvidence(run, initialAssets, stageUsage, dependencies = {})
   );
   const attemptUsage = sumUsage(Array.from(uniqueAttempts.values()), (attempt) => attempt.usage || {});
   const initialAssetUsage = sumUsage(initialAssets, (asset) => asset.image_usage || {});
+  // New runs persist prompt-revision usage in the corresponding attempt row as
+  // well as in last_error evidence. Only add the latter when a legacy/incomplete
+  // attempt row did not already account for that paid call.
   const failedPromptRevisionUsage = sumUsage(
-    lastErrorFailures.filter((failure) => failure?.prompt_revision?.status === "COMPLETED"),
+    unrepresentedPromptRevisionFailures(run, attempts, lastErrorFailures),
     (failure) => failure.prompt_revision.usage || {},
   );
   failedPromptRevisionUsage.estimated_cost = Math.max(
@@ -370,8 +499,8 @@ function imageAttemptEvidence(run, initialAssets, stageUsage, dependencies = {})
   };
 }
 
-function regenerationEvidence(run, assets, audits) {
-  const { regeneration } = splitRunAssets(run, assets);
+function regenerationEvidence(run, assets, audits, paidCallLedgers = []) {
+  const { regeneration } = splitRunAssets(run, assets, paidCallLedgers);
   const assetGroups = new Map();
   for (const asset of regeneration) {
     const groupKey = String(asset.asset_group_id || usageAssetIdentity(asset));
@@ -414,7 +543,12 @@ function regenerationEvidence(run, assets, audits) {
   };
 }
 
-function conservativeUsageForRun(run, { assets = [], audits = [], dependencies = {} } = {}) {
+function conservativeUsageForRun(run, {
+  assets = [],
+  audits = [],
+  paidCallLedgers = [],
+  dependencies = {},
+} = {}) {
   const runUsage = normalizedUsage(run.usage || {});
   const stageUsage = sumUsage(Array.isArray(run.stage_executions) ? run.stage_executions : [], usageFromStage);
   const revisionUsage = sumUsage(
@@ -422,7 +556,11 @@ function conservativeUsageForRun(run, { assets = [], audits = [], dependencies =
     (attempt) => attempt.usage || {},
   );
   const textUsage = maxUsage(stageUsage, revisionUsage);
-  const splitAssets = splitRunAssets(run, assets);
+  const paidRegenerationRows = paidCallLedgers.filter((entry) => (
+    id(entry.generation_run_id) === id(run._id)
+      && String(entry.operation || "").toUpperCase() === "VISUAL_REGENERATION"
+  ));
+  const splitAssets = splitRunAssets(run, assets, paidRegenerationRows);
   const imageEvidence = imageAttemptEvidence(run, splitAssets.initial, stageUsage, dependencies);
   const evidenceUsage = addUsage(textUsage, imageEvidence.usage, imageEvidence.failed_prompt_revision_usage);
   const baseUsage = maxUsage(runUsage, evidenceUsage);
@@ -434,9 +572,22 @@ function conservativeUsageForRun(run, { assets = [], audits = [], dependencies =
       + imageEvidence.estimated_cost
       + imageEvidence.failed_prompt_revision_usage.estimated_cost,
   ));
-  const regeneration = regenerationEvidence(run, assets, audits);
-  const totalUsage = addUsage(baseUsage, regeneration.usage);
-  totalUsage.estimated_cost = roundedUsd(baseCost + regeneration.estimated_cost);
+  const regeneration = regenerationEvidence(run, assets, audits, paidRegenerationRows);
+  const paidRegenerationUsage = sumUsage(paidRegenerationRows, (entry) => entry.usage || {});
+  const residualRegenerationUsage = subtractUsageFloor(regeneration.usage, paidRegenerationUsage);
+  const paidRegenerationCost = roundedUsd(paidRegenerationRows.reduce(
+    (total, entry) => total + nonnegativeNumber(entry.usage?.estimated_cost),
+    0,
+  ));
+  const residualRegenerationCost = roundedUsd(Math.max(
+    regeneration.estimated_cost - paidRegenerationCost,
+    0,
+  ));
+  const totalUsage = addUsage(baseUsage, residualRegenerationUsage);
+  totalUsage.estimated_cost = roundedUsd(baseCost + residualRegenerationCost);
+  const coveredRegenerationCount = paidRegenerationRows.filter((entry) => (
+    String(entry.status || "").toUpperCase() === "SUCCEEDED"
+  )).length;
   return {
     usage: {
       ...totalUsage,
@@ -450,15 +601,17 @@ function conservativeUsageForRun(run, { assets = [], audits = [], dependencies =
       image_attempt_reported_cost: roundedUsd(imageEvidence.recorded_cost),
       image_attempt_estimated_cost: roundedUsd(imageEvidence.estimated_cost),
       base_generation_cost: baseCost,
-      visual_regeneration_audit_cost: regeneration.audit_cost,
-      visual_regeneration_asset_cost: regeneration.asset_cost,
-      visual_regeneration_cost: regeneration.estimated_cost,
+      // Paid visual calls are retained in SocialPaidCallUsageLedger. Only a
+      // residual from legacy evidence belongs in this cleanup snapshot.
+      visual_regeneration_audit_cost: Math.min(regeneration.audit_cost, residualRegenerationCost),
+      visual_regeneration_asset_cost: Math.min(regeneration.asset_cost, residualRegenerationCost),
+      visual_regeneration_cost: residualRegenerationCost,
       total_estimated_cost: totalUsage.estimated_cost,
       inferred_image_unit_cost: imageEvidence.inferred_unit_cost,
       image_attempt_count: imageEvidence.attempt_count,
       failed_image_attempt_count: imageEvidence.failed_attempt_count,
-      visual_regeneration_event_count: regeneration.audit_count,
-      visual_regeneration_asset_group_count: regeneration.asset_group_count,
+      visual_regeneration_event_count: Math.max(regeneration.audit_count - coveredRegenerationCount, 0),
+      visual_regeneration_asset_group_count: Math.max(regeneration.asset_group_count - coveredRegenerationCount, 0),
     },
   };
 }
@@ -545,9 +698,22 @@ function fingerprintScope(scope) {
   return crypto.createHash("sha256").update(JSON.stringify(ordered), "utf8").digest("hex");
 }
 
-async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
+async function buildCleanupScope({ session = null, dependencies = {}, now = new Date() } = {}) {
   const db = models(dependencies);
-  const [drafts, assets, runs, plans, publications, sources, actions, marketingAssets, auditCount, usageLedgerCount] = await Promise.all([
+  const [
+    drafts,
+    assets,
+    runs,
+    plans,
+    publications,
+    sources,
+    actions,
+    marketingAssets,
+    auditCount,
+    usageLedgerCount,
+    paidCallUsageLedgers,
+    paidOperations,
+  ] = await Promise.all([
     findMany(db.SocialPostDraft, {}, session),
     findMany(db.SocialAsset, {}, session),
     findMany(db.SocialGenerationRun, {}, session),
@@ -558,7 +724,12 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
     findMany(db.MarketingAsset, {}, session),
     countDocuments(db.SocialAuditLog, {}, session),
     countDocuments(db.SocialGenerationUsageLedger, {}, session),
+    findMany(db.SocialPaidCallUsageLedger, {}, session),
+    findMany(db.SocialPaidOperation, {}, session),
   ]);
+  const enumerateGeneratedAssets = dependencies.listGeneratedCampaignAssets || listGeneratedCampaignAssets;
+  const orphanCutoff = new Date(now.getTime() - orphanFileMinAgeMs(dependencies));
+  const storedCampaignAssets = await enumerateGeneratedAssets({ olderThan: orphanCutoff });
 
   const protectedDrafts = new Set();
   const protectedRuns = new Set();
@@ -566,6 +737,14 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
   const protectedAssets = new Set();
   const protectedSources = new Set();
   const publicationIds = new Set(publications.map((publication) => id(publication._id)));
+
+  // Dismissing a failure hides it from the operator queue; it does not waive
+  // the paid-call, prompt, validation, source, or audit evidence attached to
+  // that run. Seed archived failures into the protected graph so cleanup can
+  // never make the archive audit's retention promise untrue.
+  for (const run of runs) {
+    if (run.recovery_archived_at) add(protectedRuns, run._id);
+  }
 
   for (const publication of publications) {
     add(protectedDrafts, publication.draft_id);
@@ -592,7 +771,9 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
       }
     }
     for (const draft of drafts) {
-      if (!protectedDrafts.has(id(draft._id)) && !protectedPlans.has(id(draft.weekly_plan_id))) continue;
+      if (!protectedDrafts.has(id(draft._id))
+        && !protectedPlans.has(id(draft.weekly_plan_id))
+        && !protectedRuns.has(id(draft.generation_run_id))) continue;
       changed = add(protectedDrafts, draft._id) || changed;
       changed = add(protectedRuns, draft.generation_run_id) || changed;
       changed = add(protectedPlans, draft.weekly_plan_id) || changed;
@@ -657,6 +838,10 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
     .filter((run) => protectedRuns.has(id(run._id)))
     .flatMap((run) => runFileReferences(run, dependencies))
     .forEach((reference) => protectedStorageKeys.add(reference.storage_key));
+  paidCallUsageLedgers
+    .filter((entry) => protectedRuns.has(id(entry.generation_run_id)))
+    .flatMap((entry) => paidCallFileReferences(entry, dependencies))
+    .forEach((reference) => protectedStorageKeys.add(reference.storage_key));
   publications
     .flatMap((publication) => Array.isArray(publication.asset_urls) ? publication.asset_urls : [])
     .map((value) => storageKeyFromReference(value, dependencies))
@@ -665,6 +850,24 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
   marketingAssets
     .flatMap((asset) => marketingFileReferences(asset, dependencies))
     .forEach((storageKey) => protectedStorageKeys.add(storageKey));
+  const allReferencedStorageKeys = new Set();
+  assets
+    .flatMap((asset) => assetFileReferences(asset, dependencies))
+    .forEach((reference) => allReferencedStorageKeys.add(reference.storage_key));
+  runs
+    .flatMap((run) => runFileReferences(run, dependencies))
+    .forEach((reference) => allReferencedStorageKeys.add(reference.storage_key));
+  paidCallUsageLedgers
+    .flatMap((entry) => paidCallFileReferences(entry, dependencies))
+    .forEach((reference) => allReferencedStorageKeys.add(reference.storage_key));
+  publications
+    .flatMap((publication) => Array.isArray(publication.asset_urls) ? publication.asset_urls : [])
+    .map((value) => storageKeyFromReference(value, dependencies))
+    .filter(Boolean)
+    .forEach((storageKey) => allReferencedStorageKeys.add(storageKey));
+  marketingAssets
+    .flatMap((asset) => marketingFileReferences(asset, dependencies))
+    .forEach((storageKey) => allReferencedStorageKeys.add(storageKey));
   const fileTargetMap = new Map();
   for (const asset of assets) {
     if (!deletable.assets.includes(id(asset._id))) continue;
@@ -679,6 +882,24 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
       if (protectedStorageKeys.has(reference.storage_key) || fileTargetMap.has(reference.storage_key)) continue;
       fileTargetMap.set(reference.storage_key, { storage_provider: "local", ...reference });
     }
+  }
+  for (const entry of paidCallUsageLedgers) {
+    if (!deletable.generation_runs.includes(id(entry.generation_run_id))) continue;
+    for (const reference of paidCallFileReferences(entry, dependencies)) {
+      if (protectedStorageKeys.has(reference.storage_key) || fileTargetMap.has(reference.storage_key)) continue;
+      fileTargetMap.set(reference.storage_key, { storage_provider: "local", ...reference });
+    }
+  }
+  for (const storedAsset of Array.isArray(storedCampaignAssets) ? storedCampaignAssets : []) {
+    const storageKey = storageKeyFromReference(storedAsset?.storage_key, dependencies);
+    if (!storageKey || allReferencedStorageKeys.has(storageKey) || fileTargetMap.has(storageKey)) continue;
+    fileTargetMap.set(storageKey, {
+      storage_provider: "local",
+      storage_key: storageKey,
+      file_size_bytes: Number(storedAsset?.file_size_bytes || 0),
+      modified_at: storedAsset?.modified_at || null,
+      orphaned_unreferenced: true,
+    });
   }
 
   const blockers = [];
@@ -700,6 +921,15 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
     count: activePublications.length,
     message: `${activePublications.length} publication outcome${activePublications.length === 1 ? " is" : "s are"} still active or uncertain. Resolve it before cleanup.`,
   });
+  const activePaidOperations = paidOperations.filter((operation) => (
+    String(operation.status || "").toUpperCase() === "RUNNING"
+      && new Date(operation.lease_expires_at || 0).getTime() > now.getTime()
+  ));
+  if (activePaidOperations.length) blockers.push({
+    code: "paid_operation_in_progress",
+    count: activePaidOperations.length,
+    message: `${activePaidOperations.length} paid creative operation${activePaidOperations.length === 1 ? " is" : "s are"} still active. Wait for completion before deleting generated content.`,
+  });
   const publishingDrafts = drafts.filter((draft) => String(draft.status || "").toUpperCase() === "PUBLISHING");
   if (publishingDrafts.length) blockers.push({
     code: "draft_publishing",
@@ -715,14 +945,17 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
 
   const counts = Object.fromEntries(Object.entries(deletable).map(([key, value]) => [key, value.length]));
   const localFileTargets = Array.from(fileTargetMap.values()).sort((left, right) => left.storage_key.localeCompare(right.storage_key));
+  const orphanLocalFileCount = localFileTargets.filter((target) => target.orphaned_unreferenced).length;
+  const databaseTotalCount = Object.values(counts).reduce((total, value) => total + value, 0);
   const scope = {
     deletable,
     counts,
-    total_count: Object.values(counts).reduce((total, value) => total + value, 0),
+    total_count: databaseTotalCount + orphanLocalFileCount,
     local_file_targets: localFileTargets,
     local_files: {
       count: localFileTargets.length,
       bytes: localFileTargets.reduce((total, target) => total + target.file_size_bytes, 0),
+      orphan_count: orphanLocalFileCount,
     },
     blockers,
     preserved: {
@@ -734,15 +967,19 @@ async function buildCleanupScope({ session = null, dependencies = {} } = {}) {
       research_sources: protectedSources.size,
       audit_events: auditCount,
       generation_usage_ledgers: usageLedgerCount,
+      paid_call_usage_ledgers: paidCallUsageLedgers.length,
+      paid_operations: paidOperations.length,
     },
     exclusions: [
       "Published and in-flight Instagram publication records and their exact supporting drafts/assets",
       "Immutable audit history and performance evidence",
+      "Archived generation failures and their retained paid-call evidence",
       "Append-only AI cost usage needed for the monthly budget control",
       "Social Manager settings, prompt versions, connection health and credentials",
       "Catalog products, affiliate products, orders, customers and users",
       "Community inbox events and the rights-cleared audio library",
       "Media already published on Instagram or stored by an external provider",
+      `Unreferenced local files newer than ${Math.round(orphanFileMinAgeMs(dependencies) / 60000)} minutes, so in-flight storage writes remain untouched`,
     ],
   };
   scope.fingerprint = fingerprintScope(scope);
@@ -771,7 +1008,7 @@ function publicPreview(scope, now, dependencies = {}) {
 }
 
 async function previewGeneratedContentCleanup({ now = new Date(), dependencies = {} } = {}) {
-  const scope = await buildCleanupScope({ dependencies });
+  const scope = await buildCleanupScope({ dependencies, now });
   return publicPreview(scope, now, dependencies);
 }
 
@@ -801,6 +1038,57 @@ async function cleanupFiles(targets, dependencies = {}) {
     }
   }
   return result;
+}
+
+async function sweepOrphanedGeneratedFiles({ now = new Date(), dependencies = {} } = {}) {
+  const scope = await buildCleanupScope({ dependencies, now });
+  const unsafeBlockers = scope.blockers.filter((blocker) => (
+    blocker.code === "generation_in_progress" || blocker.code === "paid_operation_in_progress"
+  ));
+  if (unsafeBlockers.length) {
+    return {
+      skipped: "creative_work_in_progress",
+      blockers: unsafeBlockers,
+      orphan_files: 0,
+      file_cleanup: { requested: 0, deleted: 0, missing: 0, failed: 0, failures: [] },
+    };
+  }
+
+  const targets = scope.local_file_targets.filter((target) => target.orphaned_unreferenced);
+  if (!targets.length) {
+    return {
+      skipped: "no_aged_orphans",
+      blockers: [],
+      orphan_files: 0,
+      file_cleanup: { requested: 0, deleted: 0, missing: 0, failed: 0, failures: [] },
+    };
+  }
+
+  const fileCleanup = await cleanupFiles(targets, dependencies);
+  const db = models(dependencies);
+  const audit = await createOne(db.SocialAuditLog, {
+    entity_type: "CONTENT_CLEANUP",
+    entity_id: new mongoose.Types.ObjectId(),
+    action: "ORPHANED_GENERATED_FILES_CLEANED",
+    action_status: fileCleanup.failed ? "FAILED" : "SUCCEEDED",
+    actor_type: "WORKER",
+    summary: fileCleanup.failed
+      ? "The maintenance sweep found aged unreferenced generated files, but one or more files require attention."
+      : `The maintenance sweep removed ${fileCleanup.deleted} aged local file${fileCleanup.deleted === 1 ? "" : "s"} with no database or paid-ledger reference.`,
+    metadata: {
+      cutoff_age_minutes: Math.round(orphanFileMinAgeMs(dependencies) / 60000),
+      file_targets: targets,
+      file_cleanup: fileCleanup,
+      completed_at: now.toISOString(),
+    },
+  });
+  return {
+    skipped: null,
+    blockers: [],
+    orphan_files: targets.length,
+    file_cleanup: fileCleanup,
+    audit_event_id: id(audit?._id),
+  };
 }
 
 function actorId(actor) {
@@ -892,7 +1180,7 @@ async function deleteGeneratedContent({
   }
 
   const transactionResult = await runTransaction(dependencies, async (session) => {
-    const scope = await buildCleanupScope({ session, dependencies });
+    const scope = await buildCleanupScope({ session, dependencies, now });
     if (scope.fingerprint !== tokenPayload.fingerprint) {
       throw cleanupError("Generated content changed after the review. Review the deletion counts again.", "social_generated_content_cleanup_scope_changed", 409);
     }
@@ -909,12 +1197,15 @@ async function deleteGeneratedContent({
       session,
     );
     const usageRunIds = runsForUsageLedger.map((run) => run._id);
-    const [assetsForUsageLedger, auditsForUsageLedger] = await Promise.all([
+    const [assetsForUsageLedger, auditsForUsageLedger, paidCallsForUsageLedger] = await Promise.all([
       usageRunIds.length
         ? findMany(db.SocialAsset, { generation_run_id: { $in: usageRunIds } }, session)
         : [],
       usageRunIds.length
         ? findMany(db.SocialAuditLog, { generation_run_id: { $in: usageRunIds } }, session)
+        : [],
+      usageRunIds.length
+        ? findMany(db.SocialPaidCallUsageLedger, { generation_run_id: { $in: usageRunIds } }, session)
         : [],
     ]);
     const usageLedgersCreated = await createUsageLedgers(
@@ -923,7 +1214,12 @@ async function deleteGeneratedContent({
       auditKey,
       now,
       session,
-      { assets: assetsForUsageLedger, audits: auditsForUsageLedger, dependencies },
+      {
+        assets: assetsForUsageLedger,
+        audits: auditsForUsageLedger,
+        paidCallLedgers: paidCallsForUsageLedger,
+        dependencies,
+      },
     );
     const deleted = {
       manual_actions: await deleteMany(db.SocialManualAction, scope.deletable.manual_actions, session),
@@ -991,12 +1287,14 @@ module.exports = {
   CONFIRMATION_PHRASE,
   deleteGeneratedContent,
   previewGeneratedContentCleanup,
+  sweepOrphanedGeneratedFiles,
   _private: {
     buildCleanupScope,
     cleanupFiles,
     conservativeUsageForRun,
     decodeToken,
     fingerprintScope,
+    orphanFileMinAgeMs,
     signToken,
   },
 };

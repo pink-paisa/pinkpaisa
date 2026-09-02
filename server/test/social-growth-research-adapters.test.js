@@ -8,6 +8,7 @@ const {
   collectSocialGrowthResearchSignals,
   getResearchAdapterOverview,
   normalizeManualSignal,
+  _private: researchAdapterPrivate,
 } = require("../services/social/socialGrowthResearchAdapters");
 
 const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
@@ -106,6 +107,28 @@ test("GDELT SSRF validation rejects private DNS results before any HTTP request"
     (error) => error.code === "RESEARCH_URL_BLOCKED"
   );
   assert.equal(called, false);
+});
+
+test("research URL validation rejects IPv4-mapped IPv6 and non-public IPv4 ranges", async () => {
+  for (const address of [
+    "::ffff:127.0.0.1",
+    "::ffff:7f00:1",
+    "100.64.0.1",
+    "192.0.2.10",
+    "198.18.0.1",
+    "203.0.113.9",
+  ]) {
+    await assert.rejects(
+      () => researchAdapterPrivate.assertAllowedPublicUrl("https://rbi.org.in/example", {
+        allowedDomains: ["rbi.org.in"],
+        lookup: async () => [{ address, family: address.includes(":") ? 6 : 4 }],
+      }),
+      (error) => error.code === "RESEARCH_URL_BLOCKED",
+      address,
+    );
+  }
+  assert.equal(researchAdapterPrivate.isPrivateIp("93.184.216.34"), false);
+  assert.equal(researchAdapterPrivate.isPrivateIp("2001:4860:4860::8888"), false);
 });
 
 test("official RSS adapter reuses bounded feed safeguards and marks content unverified", async () => {

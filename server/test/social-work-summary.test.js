@@ -243,3 +243,135 @@ test("work-summary controller maps only the optional weekly plan query scope", (
   });
   assert.deepEqual(workSummaryQuery({ query: {} }), { weeklyPlanId: null });
 });
+
+test("work summary hides archived failures and older attempts superseded by a successful weekly retry", async () => {
+  const planId = "507f1f77bcf86cd799439080";
+  const failedId = "507f1f77bcf86cd799439081";
+  const archivedId = "507f1f77bcf86cd799439084";
+  const archivedDraftId = "507f1f77bcf86cd799439085";
+  const failure = {
+    _id: failedId,
+    weekly_plan_id: planId,
+    weekly_candidate_id: "weekly-candidate-1",
+    status: "FAILED_COMPLIANCE",
+    selected_draft_id: null,
+    failed_draft_id: null,
+    recovery_archived_at: null,
+    created_at: new Date("2026-09-01T08:00:00.000Z"),
+  };
+  const success = {
+    _id: "507f1f77bcf86cd799439082",
+    weekly_plan_id: planId,
+    weekly_candidate_id: "weekly-candidate-1",
+    status: "SUCCEEDED",
+    selected_draft_id: "507f1f77bcf86cd799439083",
+    created_at: new Date("2026-09-01T09:00:00.000Z"),
+  };
+  const archivedFailure = {
+    _id: archivedId,
+    weekly_plan_id: planId,
+    weekly_candidate_id: "weekly-candidate-2",
+    status: "FAILED_IMAGE_GENERATION",
+    selected_draft_id: null,
+    failed_draft_id: archivedDraftId,
+    recovery_archived_at: new Date("2026-09-01T09:30:00.000Z"),
+    created_at: new Date("2026-09-01T08:30:00.000Z"),
+  };
+  const runFilters = [];
+  const draftFilters = [];
+  const RunModel = {
+    async countDocuments(filter) {
+      runFilters.push(filter);
+      if (filter.status?.$in?.includes("FAILED_COMPLIANCE")) {
+        return filter._id?.$nin?.includes(failedId) && filter._id.$nin.includes(archivedId) ? 0 : 2;
+      }
+      return 0;
+    },
+    find(filter) {
+      const rows = filter.status === "SUCCEEDED"
+        ? [success]
+        : filter._id?.$nin?.includes(failedId) ? [] : [failure, archivedFailure];
+      return rowsQuery(rows);
+    },
+  };
+  const summary = await getWorkSummary({
+    weeklyPlanId: planId,
+    dependencies: {
+      SocialWeeklyPlan: countModel([0, 0]),
+      SocialPostDraft: {
+        async countDocuments(filter) {
+          draftFilters.push(filter);
+          if (filter.status === "FAILED") return filter._id?.$nin?.includes(archivedDraftId) ? 0 : 1;
+          return 0;
+        },
+        findOne() { return rowsQuery([]); },
+        find(filter) { return rowsQuery(filter._id?.$nin?.includes(archivedDraftId) ? [] : [{ _id: archivedDraftId, status: "FAILED" }]); },
+      },
+      SocialGenerationRun: RunModel,
+      SocialManualAction: countModel([0, 0]),
+      SocialCommunityItem: countModel([0, 0, 0]),
+      SocialPublication: countModel([0]),
+      SocialConnectionHealth: countModel([0]),
+    },
+  });
+
+  assert.equal(summary.content.terminal_failure, 0);
+  assert.deepEqual(summary.content.terminal_failure_items, []);
+  assert.ok(runFilters[0]._id.$nin.includes(failedId));
+  assert.ok(runFilters[0]._id.$nin.includes(archivedId));
+  assert.ok(draftFilters.find((filter) => filter.status === "FAILED")._id.$nin.includes(archivedDraftId));
+  assert.equal(runFilters[0].recovery_archived_at, null);
+  assert.equal(runFilters[0].superseded_by_generation_run_id, null);
+});
+
+test("work summary hides every older failed draft when its shared run ultimately succeeds", async () => {
+  const planId = "507f1f77bcf86cd799439090";
+  const runId = "507f1f77bcf86cd799439091";
+  const oldDraftIds = ["507f1f77bcf86cd799439092", "507f1f77bcf86cd799439093"];
+  const successfulRun = {
+    _id: runId,
+    weekly_plan_id: planId,
+    status: "SUCCEEDED",
+    selected_draft_id: "507f1f77bcf86cd799439094",
+  };
+  const failedDrafts = oldDraftIds.map((_id) => ({ _id, generation_run_id: runId, status: "FAILED" }));
+  const failedDraftFilters = [];
+  const DraftModel = {
+    async countDocuments(filter) {
+      if (filter.status === "FAILED") {
+        failedDraftFilters.push(filter);
+        return filter._id?.$nin?.length === oldDraftIds.length ? 0 : failedDrafts.length;
+      }
+      return 0;
+    },
+    findOne() { return rowsQuery([]); },
+    find(filter) {
+      if (filter.status === "FAILED" && !filter._id?.$nin) return rowsQuery(failedDrafts);
+      return rowsQuery([]);
+    },
+  };
+  const RunModel = {
+    async countDocuments() { return 0; },
+    find(filter) {
+      if (filter.status === "SUCCEEDED" || filter._id?.$in?.includes(runId)) return rowsQuery([successfulRun]);
+      return rowsQuery([]);
+    },
+  };
+
+  const summary = await getWorkSummary({
+    weeklyPlanId: planId,
+    dependencies: {
+      SocialWeeklyPlan: countModel([0, 0]),
+      SocialPostDraft: DraftModel,
+      SocialGenerationRun: RunModel,
+      SocialManualAction: countModel([0, 0]),
+      SocialCommunityItem: countModel([0, 0, 0]),
+      SocialPublication: countModel([0]),
+      SocialConnectionHealth: countModel([0]),
+    },
+  });
+
+  assert.equal(summary.content.terminal_failure, 0);
+  assert.deepEqual(summary.content.terminal_failure_items, []);
+  assert.deepEqual(failedDraftFilters[0]._id.$nin.sort(), [...oldDraftIds].sort());
+});

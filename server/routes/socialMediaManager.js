@@ -70,6 +70,7 @@ router.post("/admin/publications/:id/reconcile", controller.reconcilePublication
 router.get("/admin/performance", controller.performance);
 router.get("/admin/runs/:id", controller.getRun);
 router.post("/admin/runs/:id/retry", controller.retryRun);
+router.post("/admin/runs/:id/archive-failure", controller.archiveRunFailure);
 router.get("/admin/drafts/:id", controller.getDraft);
 router.post("/admin/drafts/:id/audio-track", audioLibrary.selectForDraft);
 router.patch("/admin/drafts/:id", controller.updateDraft);

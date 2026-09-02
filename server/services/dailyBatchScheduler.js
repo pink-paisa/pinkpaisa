@@ -17,6 +17,7 @@ const {
   processPendingSocialGenerationRuns,
   runDueSocialGeneration,
 } = require("./social/socialManagerService");
+const { sweepOrphanedGeneratedFiles } = require("./social/socialGeneratedContentCleanupService");
 const { processDueSocialPublishes } = require("./social/socialPublishingService");
 const { collectDueInstagramMetricSnapshots } = require("./social/socialMetricCollectionService");
 const { resolveDeterministicManualActions } = require("./social/socialManualActionResolutionService");
@@ -36,6 +37,10 @@ const CREATORS_API_REFRESH_INTERVAL_MS = Math.max(
   parseInt(process.env.AMAZON_CREATORS_API_REFRESH_INTERVAL_HOURS || "12", 10),
   1
 ) * 60 * 60 * 1000;
+const SOCIAL_GENERATED_ORPHAN_SWEEP_INTERVAL_MS = Math.max(
+  parseInt(process.env.SOCIAL_GENERATED_ORPHAN_SWEEP_INTERVAL_MS || `${60 * 60 * 1000}`, 10),
+  15 * 60 * 1000,
+);
 let schedulerStarted = false;
 let lastTriggeredBatchKey = null;
 let lastPayoutSweepBucket = null;
@@ -43,6 +48,7 @@ let lastAffiliateLinkSweepKey = null;
 let lastCreatorsApiRefreshBucket = null;
 let lastSocialAnalyticsBucket = null;
 let lastSocialConnectionHealthBucket = null;
+let lastSocialGeneratedOrphanSweepBucket = null;
 let lastWeeklySocialPlanningKey = null;
 let schedulerTickInFlight = false;
 const schedulerOwner = `${os.hostname()}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
@@ -302,6 +308,22 @@ async function tickScheduler() {
   await processPendingSocialGenerationRuns({ now, limit: 1 }).catch((error) => {
     logger.error({ err: error }, "social recommendation worker failed");
   });
+
+  const orphanSweepBucket = Math.floor(now.getTime() / SOCIAL_GENERATED_ORPHAN_SWEEP_INTERVAL_MS);
+  if (orphanSweepBucket !== lastSocialGeneratedOrphanSweepBucket) {
+    lastSocialGeneratedOrphanSweepBucket = orphanSweepBucket;
+    await sweepOrphanedGeneratedFiles({ now })
+      .then((result) => {
+        if (result.file_cleanup?.failed) {
+          logger.error({ result }, "aged unreferenced social media cleanup requires attention");
+        } else if (result.file_cleanup?.deleted) {
+          logger.info({ result }, "aged unreferenced social media files removed");
+        }
+      })
+      .catch((error) => {
+        logger.error({ err: error }, "aged unreferenced social media sweep failed");
+      });
+  }
 
   const socialSettings = await getSocialManagerSettings().catch((error) => {
     logger.error({ err: error }, "social manager settings unavailable for weekly planning");

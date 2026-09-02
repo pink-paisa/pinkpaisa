@@ -168,6 +168,7 @@ test("weekly research sends an OpenAI-compatible transport schema and validates 
           status: 200,
           json: async () => ({
             id: "resp-weekly-research",
+            status: "completed",
             output_text: JSON.stringify(output),
             usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30 },
           }),

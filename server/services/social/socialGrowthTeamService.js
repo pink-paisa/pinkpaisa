@@ -351,6 +351,16 @@ function asStoryCandidate(source, { candidateId, role, weekday }) {
   };
 }
 
+function storyVisualModeResolution(candidate) {
+  const { resolveSocialVisualMode } = require("./socialVisualPolicy");
+  return resolveSocialVisualMode({
+    requestedVisualMode: "FULL_AI_GRAPHIC",
+    fallbackVisualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    recommendation: candidate,
+    strict: false,
+  });
+}
+
 function buildWeeklyStoryPlan({ plan, selectedPosts, candidates }) {
   const selectedIds = new Set(selectedPosts.map((item) => String(item.candidateId || "")));
   const retained = candidates.filter((candidate) => !selectedIds.has(String(candidate.candidateId || ""))
@@ -365,6 +375,7 @@ function buildWeeklyStoryPlan({ plan, selectedPosts, candidates }) {
     const source = selected.candidate;
     const candidateId = storyCandidateId("COMPANION_STORY", source.candidateId, index);
     const bundleId = `weekly:${plan._id}:feed:${source.candidateId}`.slice(0, 240);
+    const candidate = asStoryCandidate(source, { candidateId, role: "COMPANION_STORY" });
     selected.bundleId = bundleId;
     selected.bundleRole = "PARENT_FEED";
     return {
@@ -373,16 +384,11 @@ function buildWeeklyStoryPlan({ plan, selectedPosts, candidates }) {
       slotNumber: index + 1,
       scheduledFor: selected.scheduledFor,
       selectionReason: "Companion Story for the approved feed slot; approval remains bundled with its parent creative.",
-      candidate: asStoryCandidate(source, { candidateId, role: "COMPANION_STORY" }),
+      candidate,
       parentCandidateId: source.candidateId,
       bundleId,
       bundleRole: "COMPANION_STORY",
-      visual_mode_resolution: {
-        requested: "AI_VISUAL_WITH_EXACT_OVERLAY",
-        effective: "AI_VISUAL_WITH_EXACT_OVERLAY",
-        eligible: true,
-        reasons: ["Instagram Stories require verified on-frame CTA and disclosure treatment."],
-      },
+      visual_mode_resolution: storyVisualModeResolution(candidate),
       status: "PLANNED",
       generation_run_id: null,
       draft_id: null,
@@ -393,22 +399,18 @@ function buildWeeklyStoryPlan({ plan, selectedPosts, candidates }) {
   const weekendStories = STORY_WEEKEND_SLOTS.map((slot, index) => {
     const source = retained[index];
     const candidateId = storyCandidateId("STANDALONE_STORY", source.candidateId, index + 5);
+    const candidate = asStoryCandidate(source, { candidateId, role: "STANDALONE_STORY", weekday: slot.weekday });
     return {
       candidateId,
       sourceCandidateId: source.candidateId,
       slotNumber: index + 6,
       scheduledFor: isoForIstSlot(plan.week_start, slot.weekday, slot.hour_ist, slot.minute_ist),
       selectionReason: `${slot.weekday} standalone Story from a retained candidate; separate final approval is mandatory.`,
-      candidate: asStoryCandidate(source, { candidateId, role: "STANDALONE_STORY", weekday: slot.weekday }),
+      candidate,
       parentCandidateId: null,
       bundleId: `weekly:${plan._id}:story:${slot.weekday.toLowerCase()}`.slice(0, 240),
       bundleRole: "STANDALONE_STORY",
-      visual_mode_resolution: {
-        requested: "AI_VISUAL_WITH_EXACT_OVERLAY",
-        effective: "AI_VISUAL_WITH_EXACT_OVERLAY",
-        eligible: true,
-        reasons: ["Instagram Stories require verified on-frame CTA and disclosure treatment."],
-      },
+      visual_mode_resolution: storyVisualModeResolution(candidate),
       status: "PLANNED",
       generation_run_id: null,
       draft_id: null,

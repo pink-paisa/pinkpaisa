@@ -30,6 +30,7 @@ const {
   deleteGeneratedContent,
   previewGeneratedContentCleanup,
 } = require("../services/social/socialGeneratedContentCleanupService");
+const { archiveGenerationFailure } = require("../services/social/socialFailureRecoveryService");
 
 function context(req) {
   return {
@@ -53,6 +54,24 @@ function errorResponse(error) {
 
 function sendError(res, error, fallbackStatus = 500) {
   return res.status(error.statusCode || error.status || fallbackStatus).json(errorResponse(error));
+}
+
+function requiredPaidRequestKey(req) {
+  const value = req.headers["idempotency-key"] ?? req.headers["x-idempotency-key"];
+  const key = String(Array.isArray(value) ? value[0] || "" : value || "").trim();
+  if (!key) {
+    const error = new Error("Idempotency-Key is required for paid Social Manager operations");
+    error.code = "social_paid_operation_idempotency_key_required";
+    error.statusCode = 400;
+    throw error;
+  }
+  if (key.length > 300 || !/^[\x21-\x7E]+$/.test(key)) {
+    const error = new Error("Idempotency-Key must contain 1 to 300 visible ASCII characters without spaces");
+    error.code = "social_paid_operation_idempotency_key_invalid";
+    error.statusCode = 400;
+    throw error;
+  }
+  return key;
 }
 
 async function getToday(req, res) {
@@ -114,6 +133,24 @@ async function retryRun(req, res) {
     res.status(202).json({
       message: "Social generation retry was queued",
       queued: true,
+      generation_run: publicRun(result.run),
+    });
+  } catch (error) {
+    sendError(res, error, 409);
+  }
+}
+
+async function archiveRunFailure(req, res) {
+  try {
+    const result = await archiveGenerationFailure(req.params.id, {
+      ...context(req),
+      reason: req.body?.reason || req.body?.notes || null,
+    });
+    res.json({
+      message: result.reused
+        ? "This generation failure was already dismissed"
+        : "The generation failure was dismissed from actionable recovery; its audit history remains available",
+      reused: result.reused,
       generation_run: publicRun(result.run),
     });
   } catch (error) {
@@ -247,7 +284,14 @@ async function publish(req, res) {
 
 async function duplicate(req, res) {
   try {
-    res.status(201).json({ message: "Draft duplicated as a new unapproved package", draft: await duplicateDraft(req.params.id, context(req)) });
+    const requestKey = requiredPaidRequestKey(req);
+    res.status(201).json({
+      message: "Draft duplicated as a new unapproved package",
+      draft: await duplicateDraft(req.params.id, {
+        ...context(req),
+        requestKey,
+      }),
+    });
   } catch (error) {
     sendError(res, error, 409);
   }
@@ -255,9 +299,11 @@ async function duplicate(req, res) {
 
 async function regenerate(req, res) {
   try {
+    const requestKey = requiredPaidRequestKey(req);
     const scope = req.body?.scope || "alternatives";
     const options = {
       ...context(req),
+      requestKey,
       instructions: req.body?.instructions || req.body?.admin_instructions || null,
       targetFormat: req.body?.target_format || req.body?.format || null,
     };
@@ -276,11 +322,13 @@ async function regenerate(req, res) {
 
 async function renderAssets(req, res) {
   try {
+    const requestKey = requiredPaidRequestKey(req);
     const templateMode = req.body?.template_mode === true;
     res.json({
       message: "OpenAI visual generated and the final creative was validated",
       draft: await regenerateDraftVisual(req.params.id, {
         ...context(req),
+        requestKey,
         templateMode,
         visualMode: req.body?.visual_mode || null,
         assetSequence: req.body?.asset_sequence ?? null,
@@ -371,6 +419,7 @@ async function reconcilePublication(req, res) {
 
 module.exports = {
   addMetrics,
+  archiveRunFailure,
   approve,
   approveAndSchedule,
   cleanupGeneratedContent,
@@ -395,4 +444,5 @@ module.exports = {
   submitReview,
   updateDraft,
   updateSettings,
+  _private: { requiredPaidRequestKey },
 };

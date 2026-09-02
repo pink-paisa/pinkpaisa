@@ -619,6 +619,9 @@ test("five-feed approval atomically queues all five feeds and seven human-review
     story.bundleRole === "COMPANION_STORY"
     && story.parentCandidateId === plan.selected_posts[index].candidateId
     && story.bundleId === plan.selected_posts[index].bundleId
+    && story.visual_mode_resolution.requested === "FULL_AI_GRAPHIC"
+    && story.visual_mode_resolution.effective === "FULL_AI_GRAPHIC"
+    && story.visual_mode_resolution.eligible === true
   )));
   assert.deepEqual(plan.story_plan.slice(5).map((story) => story.bundleRole), ["STANDALONE_STORY", "STANDALONE_STORY"]);
   const runs = new Map();

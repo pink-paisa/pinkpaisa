@@ -329,6 +329,7 @@ test("late audit failure rolls back the native asset swap and cleans all staged 
     findById: async () => draft,
   };
   const AssetModel = {
+    exists: async () => false,
     async insertMany(rows, options) {
       sessions.push(options.session);
       assets.push(...rows);
@@ -407,10 +408,7 @@ test("late audit failure rolls back the native asset swap and cleans all staged 
         getSocialManagerSettings: async () => ({}),
         buildSocialManagerRuntimeSettings: () => ({}),
         stageSuppliedFullAiGraphic: async () => stage,
-        cleanupStagedFullAiGraphic: async (files) => {
-          cleaned.push(...[...files].reverse().map((file) => file.storage_key));
-          return { attempted: files.length, failed: 0, failures: [] };
-        },
+        deleteCampaignAsset: async (file) => { cleaned.push(file.storage_key); return true; },
         syncWeeklyPlanFromDraft: async () => { weeklyState = "NEEDS_REVIEW"; },
         getDraftDetail: async () => { throw new Error("must not read detail after rollback"); },
       },

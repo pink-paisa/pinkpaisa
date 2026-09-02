@@ -174,15 +174,23 @@ test("new deployments default eligible creatives to native FULL_AI_GRAPHIC", () 
   }
 });
 
-test("the native default still resolves protected Stories and products to exact overlay", () => {
-  for (const protectedRecommendation of [
-    recommendation({ format: "STORY", objective: "EDUCATION" }),
-    {
-      ...recommendation({ format: "PRODUCT_FEATURE", objective: "PRODUCT_PROMOTION" }),
-      postType: "AFFILIATE",
-      verifiedProductId: "product-1",
-    },
-  ]) {
+test("the native default allows non-promotional Stories and still protects authentic product content", () => {
+  const storyResolution = resolveSocialVisualMode({
+    requestedVisualMode: "FULL_AI_GRAPHIC",
+    recommendation: recommendation({ format: "STORY", objective: "EDUCATION" }),
+  });
+  assert.equal(storyResolution.eligible, true);
+  assert.equal(storyResolution.effective, "FULL_AI_GRAPHIC");
+
+  for (const protectedRecommendation of [{
+    ...recommendation({ format: "PRODUCT_FEATURE", objective: "PRODUCT_PROMOTION" }),
+    postType: "AFFILIATE",
+    verifiedProductId: "product-1",
+  }, {
+    ...recommendation({ format: "STORY", objective: "ENGAGEMENT" }),
+    postType: "AFFILIATE",
+    affiliateDisclosure: "Affiliate disclosure: Pink Paisa may earn a commission.",
+  }]) {
     const resolution = resolveSocialVisualMode({
       requestedVisualMode: "FULL_AI_GRAPHIC",
       recommendation: protectedRecommendation,
@@ -341,6 +349,7 @@ test("artwork-only zero-text/logo failure revises the prompt and retries before 
             hasLogoOrWatermark: true,
             observedText: "SALE",
             issues: ["Visible SALE badge and wordmark"],
+            response_id: "artwork-check-retry-1",
           }
           : {
             decision: "PASS",
@@ -348,6 +357,7 @@ test("artwork-only zero-text/logo failure revises the prompt and retries before 
             hasLogoOrWatermark: false,
             observedText: null,
             issues: [],
+            response_id: "artwork-check-retry-2",
           };
       },
       reviseImagePrompt: async () => ({
@@ -392,6 +402,7 @@ test("carousel near-duplicates retry only the failing slide and retain perceptua
         hasLogoOrWatermark: false,
         observedText: null,
         issues: [],
+        response_id: "artwork-carousel-check",
       }),
       reviseImagePrompt: async ({ sequence }) => ({
         prompt: `Create a materially revised full-bleed scene for slide ${sequence} with a different subject, setting and action.`,
@@ -434,6 +445,7 @@ test("single-slide carousel regeneration generates only the requested sequence",
         hasLogoOrWatermark: false,
         observedText: null,
         issues: [],
+        response_id: "artwork-slide-check",
       }),
       storeCampaignAsset: memoryStore(stores, "carousel-slide-two"),
     },

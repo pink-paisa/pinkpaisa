@@ -1,5 +1,6 @@
 const SocialCommunityItem = require("../../models/SocialCommunityItem");
 const SocialConnectionHealth = require("../../models/SocialConnectionHealth");
+const SocialAuditLog = require("../../models/SocialAuditLog");
 const SocialGenerationRun = require("../../models/SocialGenerationRun");
 const SocialManualAction = require("../../models/SocialManualAction");
 const SocialPostDraft = require("../../models/SocialPostDraft");
@@ -13,6 +14,7 @@ const CONTENT_PRIORITY_ORDER = Object.freeze([
   "GENERATING_WAITING",
 ]);
 const FAILURE_ITEM_LIMIT = 5;
+const TERMINAL_GENERATION_STATUSES = new Set(["FAILED", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"]);
 const CONTENT_CALENDAR_PAST_DAYS = 120;
 const CONTENT_CALENDAR_FUTURE_DAYS = 180;
 
@@ -47,6 +49,158 @@ function id(value) {
 
 function shortText(value, maximum = 500) {
   return String(value || "").trim().slice(0, maximum) || null;
+}
+
+function runLineageKeys(value = {}) {
+  const request = value.generation_request || {};
+  const weeklyCandidate = request.weekly_candidate || request.weeklyCandidate || {};
+  const candidateId = value.weekly_candidate_id
+    || weeklyCandidate.candidate_id
+    || weeklyCandidate.candidateId
+    || weeklyCandidate.id;
+  const keys = [];
+  if (value.weekly_plan_id && candidateId) keys.push(`weekly:${id(value.weekly_plan_id)}:${String(candidateId)}`);
+  const requestId = request.request_id || request.requestId;
+  if (requestId) keys.push(`request:${String(requestId)}`);
+  if (!value.weekly_plan_id && candidateId && value.generation_date) {
+    keys.push(`candidate:${value.generation_date}:${String(candidateId)}`);
+  }
+  return keys;
+}
+
+function runOccurredAt(value = {}) {
+  const candidate = value.completed_at || value.finished_at || value.created_at || value.updated_at;
+  const timestamp = candidate ? new Date(candidate).getTime() : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+async function hiddenFailureContext(
+  Model,
+  scope,
+  AuditModel = null,
+  DraftModel = null,
+  draftScope = {},
+) {
+  const failedStatuses = ["FAILED", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"];
+  const failures = await findManyLean(Model, {
+    status: { $in: failedStatuses },
+    ...scope,
+  }, {
+    select: "_id weekly_plan_id weekly_candidate_id generation_date generation_request status created_at finished_at updated_at failed_draft_id recovery_archived_at superseded_by_generation_run_id",
+    limit: null,
+  });
+  const successes = await findManyLean(Model, {
+    status: "SUCCEEDED",
+    selected_draft_id: { $ne: null },
+    ...scope,
+  }, {
+    select: "_id weekly_plan_id weekly_candidate_id generation_date generation_request status selected_draft_id retry_of_generation_run_id created_at completed_at finished_at updated_at",
+    limit: null,
+  });
+  const directRetrySuccesses = new Set(
+    successes
+      .filter((row) => String(row.status || "").toUpperCase() === "SUCCEEDED" && row.retry_of_generation_run_id)
+      .map((row) => id(row.retry_of_generation_run_id)),
+  );
+  const successfulRunIds = new Set(
+    successes
+      .filter((row) => String(row.status || "").toUpperCase() === "SUCCEEDED" && row.selected_draft_id)
+      .map((row) => id(row._id || row.id)),
+  );
+  const retryAudits = AuditModel && failures.length ? await findManyLean(AuditModel, {
+    action: "GENERATION_RETRY_REQUESTED",
+    generation_run_id: { $in: failures.map((row) => row._id || row.id).filter(Boolean) },
+  }, {
+    select: "generation_run_id metadata created_at",
+    limit: null,
+  }) : [];
+  const auditConfirmedSuperseded = new Set(
+    retryAudits
+      .filter((row) => successfulRunIds.has(id(row.metadata?.retry_run_id)))
+      .map((row) => id(row.generation_run_id)),
+  );
+  const successByLineage = new Map();
+  for (const success of successes) {
+    if (String(success.status || "").toUpperCase() !== "SUCCEEDED" || !success.selected_draft_id) continue;
+    for (const key of runLineageKeys(success)) {
+      const rows = successByLineage.get(key) || [];
+      rows.push(success);
+      successByLineage.set(key, rows);
+    }
+  }
+  const hiddenFailures = failures
+    .filter((failure) => {
+      const failureId = id(failure._id || failure.id);
+      if (failure.recovery_archived_at
+        || failure.superseded_by_generation_run_id
+        || directRetrySuccesses.has(failureId)
+        || auditConfirmedSuperseded.has(failureId)) return true;
+      const failedAt = runOccurredAt(failure);
+      return runLineageKeys(failure).some((key) => (
+        (successByLineage.get(key) || []).some((success) => {
+          const succeededAt = runOccurredAt(success);
+          return succeededAt > 0 && (failedAt === 0 || succeededAt > failedAt);
+        })
+      ));
+    });
+  const hiddenRunIds = hiddenFailures.map((failure) => id(failure._id || failure.id)).filter(Boolean);
+  const hiddenRunSet = new Set(hiddenRunIds);
+  const actionableRunIds = new Set(
+    failures
+      .map((failure) => id(failure._id || failure.id))
+      .filter((runId) => runId && !hiddenRunSet.has(runId)),
+  );
+  const hiddenDraftIds = new Set(
+    hiddenFailures.map((failure) => id(failure.failed_draft_id)).filter(Boolean),
+  );
+
+  // A run keeps only its latest failed_draft_id, while every failed draft keeps
+  // its own generation_run_id. Resolve the complete draft graph so older failed
+  // attempts cannot remain actionable after the run is archived, superseded, or
+  // ultimately succeeds.
+  if (DraftModel) {
+    const failedDrafts = await findManyLean(DraftModel, {
+      status: "FAILED",
+      ...draftScope,
+    }, {
+      select: "_id generation_run_id status",
+      limit: null,
+    });
+    const linkedRunIds = Array.from(new Set(
+      failedDrafts.map((draft) => id(draft.generation_run_id)).filter(Boolean),
+    ));
+    const linkedRuns = linkedRunIds.length ? await findManyLean(Model, {
+      _id: { $in: linkedRunIds },
+    }, {
+      select: "_id status selected_draft_id recovery_archived_at superseded_by_generation_run_id",
+      limit: null,
+    }) : [];
+    const linkedRunById = new Map(linkedRuns.map((run) => [id(run._id || run.id), run]));
+    for (const draft of failedDrafts) {
+      const runId = id(draft.generation_run_id);
+      const linkedRun = linkedRunById.get(runId);
+      const linkedStatus = String(linkedRun?.status || "").toUpperCase();
+      if (hiddenRunSet.has(runId)
+        || linkedRun?.recovery_archived_at
+        || linkedRun?.superseded_by_generation_run_id
+        || (linkedRun && !TERMINAL_GENERATION_STATUSES.has(linkedStatus))) {
+        const draftId = id(draft._id || draft.id);
+        if (draftId) hiddenDraftIds.add(draftId);
+      } else if (linkedRun && TERMINAL_GENERATION_STATUSES.has(linkedStatus)) {
+        actionableRunIds.add(runId);
+      }
+    }
+  }
+
+  return {
+    run_ids: hiddenRunIds,
+    draft_ids: Array.from(hiddenDraftIds),
+    actionable_run_ids: Array.from(actionableRunIds),
+  };
+}
+
+async function supersededFailureIds(Model, scope, AuditModel = null) {
+  return (await hiddenFailureContext(Model, scope, AuditModel)).run_ids;
 }
 
 function terminalFailureItem(type, value = {}) {
@@ -119,6 +273,8 @@ function contentDestinationScopes({ weeklyPlanId, currentPlanId, window }) {
 
 async function getWorkSummary({ now = new Date(), weeklyPlanId = null, dependencies = {} } = {}) {
   const models = {
+    SocialAuditLog: dependencies.SocialAuditLog
+      || (dependencies.SocialGenerationRun ? null : SocialAuditLog),
     SocialCommunityItem: dependencies.SocialCommunityItem || SocialCommunityItem,
     SocialConnectionHealth: dependencies.SocialConnectionHealth || SocialConnectionHealth,
     SocialGenerationRun: dependencies.SocialGenerationRun || SocialGenerationRun,
@@ -138,13 +294,28 @@ async function getWorkSummary({ now = new Date(), weeklyPlanId = null, dependenc
   });
   const strategyScopeId = scopedWeeklyPlanId || currentPlanId;
   const strategyScope = strategyScopeId ? { _id: strategyScopeId } : { _id: null };
+  const hiddenFailures = await hiddenFailureContext(
+    models.SocialGenerationRun,
+    contentScopes.run,
+    models.SocialAuditLog,
+    models.SocialPostDraft,
+    contentScopes.draft,
+  );
+  const supersededRunIds = hiddenFailures.run_ids;
   const failedRunFilter = {
     status: { $in: ["FAILED", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"] },
     failed_draft_id: null,
     selected_draft_id: null,
+    recovery_archived_at: null,
+    superseded_by_generation_run_id: null,
+    ...(supersededRunIds.length ? { _id: { $nin: supersededRunIds } } : {}),
     ...contentScopes.run,
   };
-  const failedDraftFilter = { status: "FAILED", ...contentScopes.draft };
+  const failedDraftFilter = {
+    status: "FAILED",
+    ...(hiddenFailures.draft_ids.length ? { _id: { $nin: hiddenFailures.draft_ids } } : {}),
+    ...contentScopes.draft,
+  };
   const failedPublicationFilter = { status: { $in: ["FAILED", "UNCERTAIN"] } };
 
   const [
@@ -212,9 +383,16 @@ async function getWorkSummary({ now = new Date(), weeklyPlanId = null, dependenc
   const contentCount = contentNeedsReview + contentTerminalFailure + contentOpenManualActions + contentGenerationWaiting;
   const communityCount = communityNeedsReview + communityTerminalFailure + communityOpenManualActions + communityGeneratingWaiting;
   const nextReviewId = fallbackNextReview?._id || fallbackNextReview?.id || null;
+  const actionableGenerationRunIds = new Set(hiddenFailures.actionable_run_ids || []);
   const contentFailureItems = [
-    ...failedDraftItems.map((item) => terminalFailureItem("DRAFT", item)),
-    ...failedRunItems.map((item) => terminalFailureItem("GENERATION_RUN", item)),
+    ...failedDraftItems.map((item) => ({
+      ...terminalFailureItem("DRAFT", item),
+      recovery_available: actionableGenerationRunIds.has(id(item.generation_run_id)),
+    })),
+    ...failedRunItems.map((item) => ({
+      ...terminalFailureItem("GENERATION_RUN", item),
+      recovery_available: true,
+    })),
   ]
     .sort((left, right) => new Date(right.occurred_at || 0).getTime() - new Date(left.occurred_at || 0).getTime())
     .slice(0, FAILURE_ITEM_LIMIT);
@@ -285,4 +463,5 @@ module.exports = {
   CONTENT_PRIORITY_ORDER,
   FAILURE_ITEM_LIMIT,
   getWorkSummary,
+  _private: { hiddenFailureContext, runLineageKeys, supersededFailureIds },
 };

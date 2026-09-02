@@ -1090,6 +1090,7 @@ test("OpenAI structured calls retry transient responses and keep strict, non-sto
         status: 200,
         json: async () => ({
           id: "resp-social-test",
+          status: "completed",
           output_text: JSON.stringify({ signals: [], unconfirmedTopics: [] }),
           usage: { input_tokens: 12, output_tokens: 4, total_tokens: 16 },
         }),
@@ -1295,7 +1296,8 @@ test("exhausted OpenAI image attempts expose failure details and never create te
       assert.equal(error.image_generation.model, "gpt-image-2");
       assert.equal(error.image_generation.failures.length, 1);
       assert.equal(error.image_generation.failures[0].code, "provider_unavailable");
-      assert.match(error.image_generation.failures[0].message, /mock image provider unavailable/);
+      assert.equal(error.image_generation.failures[0].message, "AI image generation or validation attempt failed");
+      assert.equal(JSON.stringify(error).includes("mock image provider unavailable"), false);
       assert.equal(Object.hasOwn(error.image_generation, "fallback"), false);
       return true;
     },

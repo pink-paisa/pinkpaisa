@@ -402,6 +402,25 @@ function buildRenderItems(recommendation, socialFormat) {
 }
 
 function fullAiTextBlocksForRenderItem(item = {}, total = 1) {
+  const approvedCopy = asPlainObject(item.approved_copy);
+  const storyCopy = Number(approvedCopy.frameNumber || approvedCopy.frame_number)
+    ? nonEmptyText(approvedCopy.copy)
+    : null;
+  const componentIfDistinct = (key, value) => {
+    const text = nonEmptyText(value);
+    return text && !String(storyCopy || "").includes(text) ? [{ key, text }] : [];
+  };
+  if (storyCopy) {
+    const storyBlocks = [
+      { key: "brand_name", text: BRAND.name },
+      { key: "story_copy", text: storyCopy },
+      ...componentIfDistinct("affiliate_disclosure", approvedCopy.affiliateDisclosure),
+      ...componentIfDistinct("cta", approvedCopy.cta),
+      ...componentIfDistinct("financial_disclaimer", approvedCopy.financialDisclaimer),
+      ...(Number(total) > 1 ? [{ key: "sequence_label", text: `${Number(item.sequence || 1)}/${Number(total)}` }] : []),
+    ];
+    return storyBlocks.filter((block) => nonEmptyText(block.text));
+  }
   const blocks = [
     { key: "brand_name", text: BRAND.name },
     { key: "headline", text: nonEmptyText(item.headline) },
@@ -1086,13 +1105,37 @@ async function validateSocialAsset(assetLike, options = {}) {
     expectedCopy.cta,
     expectedCopy.financialDisclaimer,
   ].map(nonEmptyText).filter(Boolean).join("\n\n");
+  const storyVisibleText = fullAiExpectedTextBlocks.map((block) => nonEmptyText(block?.text)).filter(Boolean);
+  const storyRequiredText = [
+    expectedCopy.affiliateDisclosure,
+    expectedCopy.copy,
+    expectedCopy.cta,
+    expectedCopy.financialDisclaimer,
+  ].map(nonEmptyText).filter(Boolean);
+  const nativeStoryTextPassed = storyRequiredText.every((expected) => (
+    storyVisibleText.some((visible) => visible.includes(expected))
+  ));
+  const storyOnFrameRenderingPassed = fullAiGraphicV2
+    ? (
+      captionPolicy.method === "story_frame_ai_native"
+      && captionPolicy.pixel_overlay_applied === false
+      && asset.provenance?.overlay?.method === "none"
+      && asset.provenance?.overlay?.pixel_overlay_applied === false
+      && overlay.text_rendering?.method === "openai_image_baked_in_exact_copy"
+      && overlay.text_rendering?.pixel_overlay_applied === false
+      && nativeStoryTextPassed
+      && fullAiPosterValidationPassed(fullAiPosterValidation, fullAiExpectedTextBlocks)
+    )
+    : (
+      captionPolicy.method === "story_frame_overlay"
+      && nonEmptyText(overlay.rendered_text?.body) === nonEmptyText(storyExpectedBody)
+    );
   const storyFramePolicyPassed = !storyAsset || (
-    captionPolicy.method === "story_frame_overlay"
+    storyOnFrameRenderingPassed
     && captionPolicy.affiliate_disclosure_placement === "first_frame"
     && captionPolicy.cta_placement === "final_frame"
     && captionPolicy.financial_disclaimer_placement === "final_frame"
     && captionPolicy.instagram_caption_used === false
-    && nonEmptyText(overlay.rendered_text?.body) === nonEmptyText(storyExpectedBody)
     && (
       storySequence === 1
         ? (!captionPolicy.affiliate_disclosure_required || Boolean(nonEmptyText(expectedCopy.affiliateDisclosure)))
@@ -1234,7 +1277,7 @@ async function validateSocialAsset(assetLike, options = {}) {
     ),
     checklistItem(
       "contrast",
-      "Overlay text contrast meets the WCAG AA reference threshold",
+      "Visible text contrast meets the mobile readability threshold",
       artworkOnly || (fullAiGraphicV2 ? fullAiPosterValidation?.mobileLegible === true : minimumContrast >= 4.5) ? "PASS" : "FAIL",
       artworkOnly
         ? "Not applicable: the final image has no text overlay"
@@ -1463,8 +1506,10 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
   const originalChecksums = new Set();
   const storeAsset = options.storeCampaignAsset || options.store_campaign_asset || storeCampaignAsset;
   const results = [];
+  const stagedFiles = [];
 
-  for (let index = 0; index < renderItems.length; index += 1) {
+  try {
+    for (let index = 0; index < renderItems.length; index += 1) {
     const item = renderItems[index];
     const baseImage = await readLocalBaseImage(baseImageForSequence(options, index));
     const fullAiGraphicV2 = fullAiGraphic && Number(
@@ -1473,6 +1518,17 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       || baseImage?.provenance?.full_ai_graphic_contract_version
       || 0,
     ) === 2;
+    const assetCaptionPolicy = socialFormat === "STORY" && fullAiGraphicV2
+      ? {
+        ...captionPolicy,
+        method: "story_frame_ai_native",
+        pixel_overlay_applied: false,
+        text_rendering: "openai_image_baked_in_exact_copy",
+      }
+      : {
+        ...captionPolicy,
+        ...(socialFormat === "STORY" ? { pixel_overlay_applied: true, text_rendering: "sharp_svg_overlay" } : {}),
+      };
     const expectedFullAiTextBlocks = fullAiGraphicV2
       ? fullAiTextBlocksForRenderItem(item, renderItems.length)
       : [];
@@ -1672,7 +1728,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         decorative_elements: artworkOnly || fullAiGraphicV2 ? "none" : "sharp_svg_nontext_v1",
       },
       creative_style: artDirectionRecord,
-      caption_policy: captionPolicy,
+      caption_policy: assetCaptionPolicy,
       logo: fullAiGraphicV2
         ? { method: "openai_image_baked_in", source: null }
         : logo ? { source: logo.source, checksum_sha256: logo.checksum_sha256 } : null,
@@ -1687,6 +1743,14 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
     };
     const fileName = `${slugify(identity.draftKey)}-${version}-${canvas.aspect_ratio.replace(":", "x")}-${String(index + 1).padStart(2, "0")}.jpg`;
     const stored = await storeAsset({ fileName, buffer });
+    if (nonEmptyText(stored?.storage_key)) {
+      const stagedFile = {
+        storage_provider: String(stored?.storage_provider || "local").trim().toLowerCase(),
+        storage_key: String(stored.storage_key).trim(),
+      };
+      stagedFiles.push(stagedFile);
+      if (typeof options.onStagedFile === "function") await options.onStagedFile(stagedFile);
+    }
     const finalChecksum = sha256(buffer);
     const storedChecksum = String(stored?.checksum_sha256 || "").trim().toLowerCase();
     const finalStorageProvider = String(stored?.storage_provider || "").trim().toLowerCase();
@@ -1816,33 +1880,38 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       dimensions: { width: canvas.width, height: canvas.height },
       validation,
     }));
-  }
+    }
 
-  if (shouldPersist && options.replaceActive !== false && options.replace_active !== false) {
-    await AssetModel.updateMany(
-      { draft_key: identity.draftKey, is_active: true, asset_role: "FINAL_COMPOSED", asset_group_id: { $ne: assetGroupId } },
-      { $set: { is_active: false } },
-    );
-  }
+    if (shouldPersist && options.replaceActive !== false && options.replace_active !== false) {
+      await AssetModel.updateMany(
+        { draft_key: identity.draftKey, is_active: true, asset_role: "FINAL_COMPOSED", asset_group_id: { $ne: assetGroupId } },
+        { $set: { is_active: false } },
+      );
+    }
 
-  const manualReviewRequired = results.some((asset) => asset.manual_review_required);
-  const invalid = results.some((asset) => asset.validation_status === "invalid");
-  return {
-    asset_group_id: assetGroupId,
-    content_type: socialFormat === "CAROUSEL" ? "carousel" : socialFormat.toLowerCase(),
-    social_format: socialFormat,
-    canvas_format: canvas.canvas_format,
-    dimensions: { width: canvas.width, height: canvas.height },
-    aspect_ratio: canvas.aspect_ratio,
-    primary_asset_url: results[0]?.url || null,
-    asset_urls: results.map((asset) => asset.url),
-    assets: results,
-    validation_status: invalid ? "invalid" : manualReviewRequired ? "needs_manual_review" : "valid",
-    manual_review_required: manualReviewRequired,
-    manual_review_flags: Array.from(new Set(results.flatMap((asset) => asset.manual_review_flags || []))),
-    renderer: results[0]?.renderer || (artworkOnly ? "sharp_resize_only" : "sharp_svg_overlay"),
-    render_version: RENDER_VERSION,
-  };
+    const manualReviewRequired = results.some((asset) => asset.manual_review_required);
+    const invalid = results.some((asset) => asset.validation_status === "invalid");
+    return {
+      asset_group_id: assetGroupId,
+      content_type: socialFormat === "CAROUSEL" ? "carousel" : socialFormat.toLowerCase(),
+      social_format: socialFormat,
+      canvas_format: canvas.canvas_format,
+      dimensions: { width: canvas.width, height: canvas.height },
+      aspect_ratio: canvas.aspect_ratio,
+      primary_asset_url: results[0]?.url || null,
+      asset_urls: results.map((asset) => asset.url),
+      assets: results,
+      staged_files: stagedFiles,
+      validation_status: invalid ? "invalid" : manualReviewRequired ? "needs_manual_review" : "valid",
+      manual_review_required: manualReviewRequired,
+      manual_review_flags: Array.from(new Set(results.flatMap((asset) => asset.manual_review_flags || []))),
+      renderer: results[0]?.renderer || (artworkOnly ? "sharp_resize_only" : "sharp_svg_overlay"),
+      render_version: RENDER_VERSION,
+    };
+  } catch (error) {
+    error.staged_files = stagedFiles.map((file) => ({ ...file }));
+    throw error;
+  }
 }
 
 module.exports = {
@@ -1863,6 +1932,7 @@ module.exports = {
     isSocialFormatValue,
     selectRecommendation,
     stableStringify,
+    fullAiTextBlocksForRenderItem,
     wrapText,
   },
 };

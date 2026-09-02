@@ -24,7 +24,7 @@ const {
   _private: decisionPrivate,
 } = require("../services/social/socialDecisionEngine");
 const { normalizeOpenAiResearch } = require("../services/social/socialResearchService");
-const { validateSocialPackage } = require("../services/social/socialSchemas");
+const { validateFormatContent, validateSocialPackage } = require("../services/social/socialSchemas");
 const {
   executeGenerationRun,
   regenerateDraftPart,
@@ -613,6 +613,89 @@ test("strict social package validation accepts a complete AI-generated format-sp
   assert.ok(packageValue.rejectedIdeas.length >= 2);
 });
 
+test("strict social package validation accepts approved-primary-only weekly packages", () => {
+  const packageValue = validPackage();
+  packageValue.alternativeRecommendations = [];
+  assert.equal(validateSocialPackage(packageValue), packageValue);
+});
+
+test("complex-format legacy copy views do not truncate canonical planning content", () => {
+  const narrativeArc = "A complete carousel narrative arc. ".repeat(14).trim();
+  const audioDirection = "A complete reel production and audio direction. ".repeat(14).trim();
+  const carousel = {
+    format: "CAROUSEL",
+    narrativeArc,
+    slides: [{
+      slideNumber: 1,
+      headline: "Know the full picture",
+      body: "Keep the complete approved slide body.",
+      overlayInstructions: "Use the approved layout.",
+    }],
+  };
+  const reel = {
+    format: "REEL",
+    coverHeadline: "Pause and verify",
+    audioDirection,
+    scenes: [{
+      sceneNumber: 1,
+      durationSeconds: 5,
+      voiceover: "Keep the complete approved voiceover.",
+      onScreenText: "Pause first",
+      visualInstruction: "Show a calm verification moment.",
+    }],
+  };
+  const storyCopy = "Choose one verified next step before acting, then check the source, the complete context, the possible cost, and the risk before you decide.";
+  const story = {
+    format: "STORY",
+    frames: [{
+      frameNumber: 1,
+      copy: storyCopy,
+      overlayInstructions: "Keep the full frame copy inside safe margins.",
+    }],
+  };
+
+  const carouselLegacy = decisionPrivate.legacyOnPostCopy(carousel);
+  const reelLegacy = decisionPrivate.legacyOnPostCopy(reel);
+  const storyLegacy = decisionPrivate.legacyOnPostCopy(story);
+
+  assert.equal(carouselLegacy.supportingCopy, null);
+  assert.equal(carouselLegacy.slides[0].body, carousel.slides[0].body);
+  assert.equal(carousel.narrativeArc, narrativeArc);
+  assert.equal(reelLegacy.supportingCopy, null);
+  assert.equal(reelLegacy.reelScenes[0].voiceover, reel.scenes[0].voiceover);
+  assert.equal(reel.audioDirection, audioDirection);
+  const baseContent = validPackage().primaryRecommendation.formatContent;
+  const validatedReel = validateFormatContent("REEL", {
+    id: baseContent.id,
+    format: "REEL",
+    postType: baseContent.postType,
+    objective: baseContent.objective,
+    contentPillar: baseContent.contentPillar,
+    targetAudience: baseContent.targetAudience,
+    whyToday: baseContent.whyToday,
+    formatReason: baseContent.formatReason,
+    hookOptions: baseContent.hookOptions,
+    caption: baseContent.caption,
+    cta: baseContent.cta,
+    hashtags: baseContent.hashtags,
+    altText: baseContent.altText,
+    recommendedLandingPage: baseContent.recommendedLandingPage,
+    sourceIndexes: baseContent.sourceIndexes,
+    financialDisclaimer: baseContent.financialDisclaimer,
+    affiliateDisclosure: baseContent.affiliateDisclosure,
+    durationSeconds: 5,
+    coverHeadline: reel.coverHeadline,
+    audioDirection,
+    scenes: reel.scenes,
+    coverImagePrompt: "Create an original vertical Pink Paisa cover image.",
+    overlayInstructions: baseContent.overlayInstructions,
+  });
+  assert.equal(validatedReel.audioDirection, audioDirection);
+  assert.equal(storyLegacy.supportingCopy, null);
+  assert.equal(storyLegacy.headline, null);
+  assert.equal(storyLegacy.storyFrames[0].copy, storyCopy);
+});
+
 test("final package accepts the full visual-brief image prompt contract", () => {
   const packageValue = validPackage();
   const longPrompt = `Create original Pink Paisa artwork. ${"Detailed visual direction. ".repeat(145)}`.slice(0, 3600);
@@ -630,7 +713,7 @@ test("strict social package validation rejects unknown fields and invalid packag
 
   const tooFewAlternatives = clone(validPackage());
   tooFewAlternatives.alternativeRecommendations.pop();
-  assert.throws(() => validateSocialPackage(tooFewAlternatives), /alternativeRecommendations has too few items/);
+  assert.throws(() => validateSocialPackage(tooFewAlternatives), /must contain either zero or exactly two items/);
 });
 
 test("strict social package validation enforces timezone, format-specific copy, and unique hashtags", () => {
@@ -1149,6 +1232,24 @@ test("AI-selected single-image output survives a bounded compliance revision and
 
 test("approved weekly candidate identity remains the generated primary strategy and destination", async () => {
   const fixture = aiPipelineFixture({ complianceMode: "PASS" });
+  const exactAudienceSnapshot = "Indian women who want a calm weekly money routine, practical language, inclusive examples, and enough context to act confidently without assumptions about income, employment, family structure, investing experience, debt, health, or personal circumstances. ".repeat(2).slice(0, 300);
+  assert.equal(exactAudienceSnapshot.length, 300);
+  const paidCreativeCalls = { copy: [], compliance: [], visual: [] };
+  const originalWriteFormatContent = fixture.providers.writeFormatContent;
+  fixture.providers.writeFormatContent = async (input) => {
+    paidCreativeCalls.copy.push(input.context.selected_candidate.id);
+    return originalWriteFormatContent(input);
+  };
+  const originalReviewSingleCompliance = fixture.providers.reviewSingleCompliance;
+  fixture.providers.reviewSingleCompliance = async (input) => {
+    paidCreativeCalls.compliance.push(input.context.candidate.id);
+    return originalReviewSingleCompliance(input);
+  };
+  const originalBuildFormatVisualBrief = fixture.providers.buildFormatVisualBrief;
+  fixture.providers.buildFormatVisualBrief = async (input) => {
+    paidCreativeCalls.visual.push(input.context.candidate.id);
+    return originalBuildFormatVisualBrief(input);
+  };
   const duplicateAlternative = {
     ...clone(fixture.candidates[0]),
     id: "duplicate-buffer-alternative",
@@ -1173,7 +1274,7 @@ test("approved weekly candidate identity remains the generated primary strategy 
     objective: "EDUCATION",
     primaryKpi: "SAVES",
     secondaryKpi: "SHARES",
-    audienceSegment: "Indian women who want a calm weekly money routine",
+    audienceSegment: exactAudienceSnapshot,
     contentPillar: "Money Education",
     format: "SINGLE_IMAGE",
     whyThisWeek: "Audience questions support one calm, repeatable money check-in this week.",
@@ -1212,10 +1313,15 @@ test("approved weekly candidate identity remains the generated primary strategy 
   assert.equal(result.package.primaryRecommendation.targetAudienceSegment, weeklyCandidate.audienceSegment);
   assert.equal(result.package.primaryRecommendation.format, weeklyCandidate.format);
   assert.equal(result.package.primaryRecommendation.recommendedLandingPage, weeklyCandidate.recommendedLandingPage);
+  assert.equal(result.package.alternativeRecommendations.length, 0);
   assert.equal(result.candidate_count, 6);
   assert.equal(result.scored_candidates.some((candidate) => candidate.id === duplicateAlternative.id), false);
-  assert.deepEqual(result.alternative_ids, ["buffer", "guilt"]);
+  assert.deepEqual(result.alternative_ids, []);
+  assert.deepEqual(paidCreativeCalls.copy, [result.selected_primary_id]);
+  assert.deepEqual(paidCreativeCalls.compliance, [result.selected_primary_id]);
+  assert.deepEqual(paidCreativeCalls.visual, [result.selected_primary_id]);
   assert.equal(result.scored_candidates.every((candidate) => candidate.format === "SINGLE_IMAGE"), true);
+  assert.equal(validateSocialPackage(result.package), result.package);
   assert.doesNotThrow(() => socialManagerPrivate.assertWeeklyRecommendationIdentity(
     result.package.primaryRecommendation,
     weeklyCandidate,
@@ -1254,6 +1360,10 @@ test("exhausted AI compliance revisions fail transparently without an evergreen 
       assert.equal(error.code, "social_compliance_exhausted");
       assert.match(error.message, /revisions were exhausted/i);
       assert.deepEqual(error.compliance_history.map((entry) => entry.decision), ["REVISE", "REVISE"]);
+      assert.ok(error.prompt_runs.some((run) => run.stage === "single_compliance"));
+      assert.ok(error.prompt_runs.some((run) => run.stage === "revision"));
+      assert.ok(error.usage.total_tokens > 0);
+      assert.equal(error.content_revision_attempts.length, 1);
       assert.equal(Object.hasOwn(error, "package"), false);
       return true;
     },
@@ -1306,6 +1416,89 @@ function generationExecutionDependencies({ generateDailyDecision: decision, gene
   };
 }
 
+test("research provider boundary is durably marked before a response can be checkpointed", async () => {
+  const run = generationRunFixture("run-research-started-crash");
+  run.max_attempts = 3;
+  const crash = new Error("worker disappeared during research provider call");
+  let observed = null;
+  const dependencies = generationExecutionDependencies({
+    generateDailyDecision: async () => { throw new Error("decision must not run"); },
+    generateSocialVisuals: async () => { throw new Error("image must not run"); },
+    draftWrites: [],
+  });
+  dependencies.collectExternalResearch = async () => {
+    observed = clone(run.provider_call_checkpoints);
+    throw crash;
+  };
+
+  await assert.rejects(executeGenerationRun(run, { dependencies }), (error) => error === crash);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].stage, "RESEARCHING");
+  assert.equal(observed[0].status, "STARTED");
+  assert.match(observed[0].input_fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(run.status, "FAILED");
+  assert.equal(run.provider_call_checkpoints[0].status, "UNCERTAIN");
+  assert.equal(run.last_error.is_retriable, false);
+  assert.equal(run.last_error.details.provider_call_uncertain, true);
+});
+
+test("decision provider boundary is durably marked after research and before decision output", async () => {
+  const run = generationRunFixture("run-decision-started-crash");
+  run.max_attempts = 3;
+  const crash = new Error("worker disappeared during decision provider call");
+  let observed = null;
+  const dependencies = generationExecutionDependencies({
+    generateDailyDecision: async () => {
+      observed = clone(run.provider_call_checkpoints);
+      throw crash;
+    },
+    generateSocialVisuals: async () => { throw new Error("image must not run"); },
+    draftWrites: [],
+  });
+
+  await assert.rejects(executeGenerationRun(run, { dependencies }), (error) => error === crash);
+  assert.equal(observed.length, 2);
+  assert.equal(observed[0].stage, "RESEARCHING");
+  assert.equal(observed[0].status, "COMPLETED");
+  assert.equal(observed[1].stage, "ANALYZING_MARKET");
+  assert.equal(observed[1].status, "STARTED");
+  assert.equal(run.status, "FAILED");
+  assert.equal(run.provider_call_checkpoints[1].status, "UNCERTAIN");
+  assert.equal(run.last_error.is_retriable, false);
+});
+
+test("image and validator boundary is durably marked before any image response evidence", async () => {
+  const run = generationRunFixture("run-image-started-crash");
+  run.max_attempts = 3;
+  const crash = new Error("worker disappeared during image provider call");
+  crash.code = "social_image_generation_failed";
+  let observed = null;
+  const dependencies = generationExecutionDependencies({
+    generateDailyDecision: async () => ({
+      package: validPackage(),
+      mode: "FULL_AI",
+      prompt_runs: [],
+      usage: {},
+      compliance: { passed: true },
+    }),
+    generateSocialVisuals: async () => {
+      observed = clone(run.provider_call_checkpoints);
+      throw crash;
+    },
+    draftWrites: [],
+  });
+
+  await assert.rejects(executeGenerationRun(run, { dependencies }), (error) => error === crash);
+  assert.equal(observed.length, 3);
+  assert.equal(observed[0].status, "COMPLETED");
+  assert.equal(observed[1].status, "COMPLETED");
+  assert.equal(observed[2].stage, "GENERATING_IMAGES");
+  assert.equal(observed[2].status, "STARTED");
+  assert.equal(run.status, "FAILED_IMAGE_GENERATION");
+  assert.equal(run.provider_call_checkpoints[2].status, "UNCERTAIN");
+  assert.equal(run.last_error.is_retriable, false);
+});
+
 test("exhausted compliance marks the run FAILED_COMPLIANCE and creates no completed draft", async () => {
   const run = generationRunFixture("run-compliance-failure");
   const draftWrites = [];
@@ -1331,16 +1524,139 @@ test("exhausted compliance marks the run FAILED_COMPLIANCE and creates no comple
   assert.equal(draftWrites.length, 0);
 });
 
+test("failed paid structured calls retain prompt, usage, and validation evidence without raw output", async () => {
+  const run = generationRunFixture("run-structured-evidence-failure");
+  run.usage = { input_tokens: 10, output_tokens: 5, total_tokens: 15, estimated_cost: 0.01 };
+  run.stage_executions = [{
+    stage: "RESEARCHING",
+    status: "FAILED",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    provider_response_id: "prior-failed-response",
+    input_tokens: 10,
+    output_tokens: 5,
+    total_tokens: 15,
+    error_code: "http_503",
+  }];
+  const draftWrites = [];
+  const audits = [];
+  const structuredError = new Error("Social format_copy output failed strict validation");
+  Object.assign(structuredError, {
+    code: "structured_output_invalid",
+    social_stage: "format_copy",
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    prompt_version: "social-format-copy-v5",
+    response_id: "resp-invalid-format-copy",
+    attempt_count: 1,
+    started_at: "2026-08-22T08:00:05.000Z",
+    completed_at: "2026-08-22T08:00:06.000Z",
+    input_fingerprint: "input-format-copy",
+    raw_output: "{\"supportingCopy\":\"incomplete",
+    validation_errors: ["$.supportingCopy is incomplete"],
+    usage: { input_tokens: 100, output_tokens: 25, total_tokens: 125 },
+    attempts: [{
+      attempt: 1,
+      status: "FAILED",
+      started_at: "2026-08-22T08:00:05.000Z",
+      completed_at: "2026-08-22T08:00:06.000Z",
+      response_id: "resp-invalid-format-copy",
+      usage: { input_tokens: 100, output_tokens: 25, total_tokens: 125 },
+      output_fingerprint: "output-format-copy",
+      error_code: "structured_output_invalid",
+      error_message: "Strict validation failed",
+    }],
+    prompt_runs: [{
+      stage: "market_analysis",
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      prompt_version: "social-market-analysis-v3",
+      response_id: "resp-market-analysis",
+      input_fingerprint: "input-market-analysis",
+      output_fingerprint: "output-market-analysis",
+      usage: { input_tokens: 200, output_tokens: 50, total_tokens: 250 },
+      attempt_count: 1,
+      status: "SUCCEEDED",
+    }],
+  });
+  let promptCounter = 0;
+  const dependencies = generationExecutionDependencies({
+    generateDailyDecision: async () => { throw structuredError; },
+    generateSocialVisuals: async () => { throw new Error("must not generate an image after invalid structured copy"); },
+    draftWrites,
+  });
+  dependencies.SocialPromptVersion = {
+    buildPromptHash: SocialPromptVersion.buildPromptHash.bind(SocialPromptVersion),
+    exists: async () => true,
+    findOneAndUpdate: async (_query, update) => ({
+      _id: `prompt-${++promptCounter}`,
+      ...update.$setOnInsert,
+    }),
+  };
+  dependencies.SocialAuditLog = {
+    create: async (value) => {
+      audits.push(value);
+      return value;
+    },
+  };
+
+  await assert.rejects(
+    executeGenerationRun(run, { dependencies }),
+    (error) => error === structuredError,
+  );
+
+  assert.equal(run.status, "FAILED");
+  assert.equal(run.usage.input_tokens, 310);
+  assert.equal(run.usage.output_tokens, 80);
+  assert.equal(run.usage.total_tokens, 390);
+  assert.equal(run.stage_executions.length, 3);
+  assert.equal(run.stage_executions[0].provider_response_id, "prior-failed-response");
+  assert.equal(run.stage_executions[1].status, "COMPLETED");
+  assert.equal(run.stage_executions[2].status, "FAILED");
+  assert.deepEqual(
+    run.stage_executions[2].response_metadata.validation_errors,
+    ["$.supportingCopy failed local validation"],
+  );
+  assert.equal(JSON.stringify(run).includes("is incomplete"), false);
+  assert.equal(run.stage_executions[2].response_metadata.raw_output_retained, false);
+  assert.equal(Object.hasOwn(run.stage_executions[2].response_metadata, "raw_output"), false);
+  assert.equal(run.last_error.details.provider_call.prompt_version, "social-format-copy-v5");
+  assert.equal(run.last_error.details.provider_call.raw_output_retained, false);
+  assert.equal(run.last_error.details.provider_call.usage.total_tokens, 125);
+  assert.match(run.last_error.details.provider_call.output_fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(draftWrites.length, 0);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].prompt_version_ids.length, 2);
+  assert.equal(audits[0].metadata.usage.total_tokens, 390);
+  assert.equal(audits[0].metadata.validation_error_count, 1);
+  assert.equal(audits[0].metadata.raw_provider_output_retained, false);
+});
+
 test("exhausted image generation is transparent and never creates or selects a draft", async () => {
   const run = generationRunFixture("run-image-failure");
   const draftWrites = [];
   const imageError = new Error("OpenAI image generation failed after mocked attempts");
   imageError.code = "social_image_generation_failed";
+  imageError.usage = { input_tokens: 40, output_tokens: 0, total_tokens: 40 };
+  imageError.estimated_cost = 0.4;
   imageError.image_generation = {
     sequence: 1,
     model: "gpt-image-2",
     prompt: "A mocked Pink Paisa production prompt",
-    failures: [{ attempt: 1, code: "provider_unavailable", message: "mocked provider unavailable", retriable: false }],
+    usage: imageError.usage,
+    image_usage: imageError.usage,
+    estimated_cost: 0.4,
+    failures: [{
+      attempt: 1,
+      code: "provider_unavailable",
+      message: "mocked provider unavailable",
+      retriable: false,
+      provider_response_id: "paid-mocked-image-1",
+      image_call_billable: true,
+      image_usage: imageError.usage,
+      usage: imageError.usage,
+      estimated_cost: 0.4,
+    }],
   };
   const dependencies = generationExecutionDependencies({
     generateDailyDecision: async () => ({
@@ -1363,7 +1679,12 @@ test("exhausted image generation is transparent and never creates or selects a d
   assert.equal(run.selected_draft_id, null);
   assert.equal(run.failed_draft_id, undefined);
   assert.equal(run.last_error.stage, "GENERATING_IMAGES");
-  assert.deepEqual(run.last_error.details.image_generation, imageError.image_generation);
+  assert.equal(run.last_error.details.image_generation.model, "gpt-image-2");
+  assert.equal(run.last_error.details.image_generation.failures[0].code, "provider_unavailable");
+  assert.equal(run.last_error.details.image_generation.raw_image_bytes_retained, false);
+  assert.equal(run.image_generation_attempts[0].provider_response_id, "paid-mocked-image-1");
+  assert.equal(run.usage.total_tokens, 40);
+  assert.equal(run.usage.estimated_cost, 0.4);
   assert.equal(draftWrites.length, 0);
 });
 
@@ -2919,6 +3240,265 @@ test("single-slide carousel regeneration merges one new original with retained s
   assert.ok(updateFilters.some((filter) => filter.slide_number?.$in?.[0] === 2));
 });
 
+test("visual regeneration removes an unreferenced final file when composition fails before returning", async () => {
+  const packageValue = validPackage();
+  const draft = {
+    _id: "draft-regeneration-file-compensation",
+    generation_run_id: "run-regeneration-file-compensation",
+    generation_date: "2026-09-02",
+    idempotency_key: "draft-regeneration-file-compensation-v1",
+    revision: 1,
+    status: "DRAFT",
+    publication_id: null,
+    visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    current_package: packageValue,
+    save: async function save() { return this; },
+  };
+  const finalStorageKey = "uploads/generated/campaigns/uncommitted-final.jpg";
+  const deleted = [];
+  const audits = [];
+  const dependencies = {
+    getSocialManagerSettings: async () => ({
+      generation: { default_visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY" },
+      models: { image_provider: "openai", image_model: "gpt-image-2" },
+    }),
+    buildSocialManagerRuntimeSettings: (settings) => settings,
+    generateSocialVisuals: async () => ({
+      status: "SUCCEEDED",
+      provider: "openai",
+      model: "gpt-image-2",
+      image_count: 1,
+      estimated_cost: 0.2,
+      original_visuals: [{
+        sequence: 1,
+        buffer: Buffer.from("regenerated-original"),
+        url: "/uploads/generated/campaigns/regenerated-original.jpg",
+        storage_provider: "local",
+        storage_key: "uploads/generated/campaigns/regenerated-original.jpg",
+        checksum_sha256: "a".repeat(64),
+        mime_type: "image/jpeg",
+        file_size_bytes: 100,
+        width: 1080,
+        height: 1350,
+        source_provenance: "generated_without_reference",
+        usage_rights_status: "api_permitted",
+        provider: "openai",
+        model: "gpt-image-2",
+        prompt: "A safe Pink Paisa visual",
+        response_id: "paid-regeneration-response",
+        attempt_count: 1,
+        status: "VALIDATED",
+      }],
+    }),
+    renderSocialDraftAssets: async () => {
+      const error = new Error("asset persistence failed after final storage");
+      error.code = "asset_persistence_failed";
+      error.staged_files = [{ storage_provider: "local", storage_key: finalStorageKey }];
+      throw error;
+    },
+    deleteCampaignAsset: async (file) => { deleted.push(file.storage_key); return true; },
+    SocialPostDraft: { findById: async () => draft },
+    SocialAsset: {
+      exists: async () => false,
+      find: () => leanQuery([]),
+      updateMany: async () => ({ modifiedCount: 0 }),
+    },
+    SocialGenerationRun: { aggregate: async () => [] },
+    SocialAuditLog: {
+      create: async (record) => { audits.push(record); return record; },
+      find: () => leanQuery([]),
+    },
+  };
+
+  await assert.rejects(
+    regenerateDraftVisual(draft._id, { dependencies }),
+    (error) => error.code === "asset_persistence_failed",
+  );
+  assert.deepEqual(deleted, [finalStorageKey]);
+  assert.equal(audits.at(-1).metadata.final_asset_cleanup.removed, 1);
+  assert.equal(audits.at(-1).metadata.final_asset_cleanup.failed, 0);
+});
+
+test("visual regeneration preserves sanitized provider evidence on the paid receipt when the usage ledger is unavailable", async () => {
+  const draft = {
+    _id: "draft-regeneration-ledger-fallback",
+    generation_run_id: "run-regeneration-ledger-fallback",
+    generation_date: "2026-09-02",
+    idempotency_key: "draft-regeneration-ledger-fallback-v1",
+    revision: 1,
+    status: "DRAFT",
+    publication_id: null,
+    visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    current_package: validPackage(),
+    save: async function save() { return this; },
+  };
+  const operation = { _id: "paid-operation-ledger-fallback", status: "RUNNING" };
+  const deleted = [];
+  const audits = [];
+  let renderCalls = 0;
+  const stagedFiles = [
+    { storage_provider: "local", storage_key: "uploads/generated/campaigns/provider-original-ledger-fallback.png" },
+    { storage_provider: "local", storage_key: "uploads/generated/campaigns/normalized-ledger-fallback.jpg" },
+  ];
+  const dependencies = {
+    getSocialManagerSettings: async () => ({
+      generation: { default_visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY" },
+      models: { image_provider: "openai", image_model: "gpt-image-2" },
+    }),
+    buildSocialManagerRuntimeSettings: (settings) => settings,
+    enforceMonthlyBudget: async () => null,
+    generateSocialVisuals: async () => ({
+      status: "SUCCEEDED",
+      provider: "openai",
+      model: "gpt-image-2",
+      image_count: 1,
+      paid_image_call_count: 1,
+      usage: { input_tokens: 11, output_tokens: 7, total_tokens: 18 },
+      estimated_cost: 0.2,
+      cost_currency: "USD",
+      original_visuals: [{
+        sequence: 1,
+        buffer: Buffer.from("provider-bytes-must-not-enter-receipt"),
+        url: "/uploads/generated/campaigns/normalized-ledger-fallback.jpg",
+        storage_provider: "local",
+        storage_key: stagedFiles[1].storage_key,
+        checksum_sha256: "a".repeat(64),
+        mime_type: "image/jpeg",
+        file_size_bytes: 100,
+        width: 1080,
+        height: 1350,
+        source_provenance: "generated_without_reference",
+        usage_rights_status: "api_permitted",
+        provider: "openai",
+        model: "gpt-image-2",
+        prompt: "A safe Pink Paisa visual",
+        response_id: "paid-ledger-fallback-response",
+        attempt_count: 1,
+        paid_image_call_count: 1,
+        image_usage: { total_tokens: 18 },
+        estimated_cost: 0.2,
+        status: "VALIDATED",
+        staged_files: stagedFiles,
+      }],
+    }),
+    renderSocialDraftAssets: async () => { renderCalls += 1; throw new Error("must not compose after ledger failure"); },
+    deleteCampaignAsset: async (file) => { deleted.push(file.storage_key); return true; },
+    SocialPostDraft: { findById: async () => draft },
+    SocialAsset: { exists: async () => false, find: () => leanQuery([]), updateMany: async () => ({ modifiedCount: 0 }) },
+    SocialGenerationRun: { aggregate: async () => [] },
+    SocialPaidOperation: {
+      create: async (row) => { Object.assign(operation, row); return operation; },
+      updateOne: async () => ({ modifiedCount: 1 }),
+      findOneAndUpdate: async (_filter, update) => { Object.assign(operation, update.$set); return operation; },
+      findOne: async () => operation,
+    },
+    SocialPaidCallUsageLedger: {
+      create: async () => { const error = new Error("ledger unavailable"); error.code = "ledger_unavailable"; throw error; },
+    },
+    SocialAuditLog: {
+      create: async (record) => { audits.push(record); return record; },
+      find: () => leanQuery([]),
+    },
+  };
+
+  await assert.rejects(
+    regenerateDraftVisual(draft._id, { requestKey: "ledger-fallback", dependencies }),
+    (error) => error.code === "ledger_unavailable",
+  );
+  assert.equal(renderCalls, 0);
+  assert.equal(operation.status, "FAILED");
+  assert.equal(operation.recovery_evidence.kind, "PAID_IMAGE_USAGE_LEDGER_FALLBACK");
+  assert.equal(operation.recovery_evidence.provider_evidence.completed_visuals[0].response_id, "paid-ledger-fallback-response");
+  assert.equal(operation.recovery_evidence.provider_evidence.estimated_cost, 0.2);
+  assert.match(operation.error.evidence_fingerprint, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(JSON.stringify(operation.recovery_evidence), /provider-bytes-must-not-enter-receipt|"buffer"/i);
+  assert.deepEqual(deleted.sort(), stagedFiles.map((file) => file.storage_key).sort());
+  assert.ok(audits.some((audit) => audit.action === "AI_IMAGE_USAGE_LEDGER_FALLBACK_RECORDED"));
+});
+
+test("visual regeneration preserves a staged file when an uncertain transaction actually committed its asset row", async () => {
+  const packageValue = validPackage();
+  const draft = {
+    _id: "draft-regeneration-uncertain-commit",
+    generation_run_id: "run-regeneration-uncertain-commit",
+    generation_date: "2026-09-02",
+    idempotency_key: "draft-regeneration-uncertain-commit-v1",
+    revision: 1,
+    status: "DRAFT",
+    publication_id: null,
+    visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    current_package: packageValue,
+    save: async function save() { return this; },
+  };
+  const finalStorageKey = "uploads/generated/campaigns/committed-final.jpg";
+  let deleteCalls = 0;
+  const audits = [];
+  const dependencies = {
+    getSocialManagerSettings: async () => ({
+      generation: { default_visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY" },
+      models: { image_provider: "openai", image_model: "gpt-image-2" },
+    }),
+    buildSocialManagerRuntimeSettings: (settings) => settings,
+    generateSocialVisuals: async () => ({
+      status: "SUCCEEDED",
+      provider: "openai",
+      model: "gpt-image-2",
+      image_count: 1,
+      estimated_cost: 0.2,
+      original_visuals: [{
+        sequence: 1,
+        buffer: Buffer.from("regenerated-original"),
+        url: "/uploads/generated/campaigns/regenerated-original.jpg",
+        storage_provider: "local",
+        storage_key: "uploads/generated/campaigns/regenerated-original.jpg",
+        checksum_sha256: "b".repeat(64),
+        mime_type: "image/jpeg",
+        file_size_bytes: 100,
+        width: 1080,
+        height: 1350,
+        source_provenance: "generated_without_reference",
+        usage_rights_status: "api_permitted",
+        provider: "openai",
+        model: "gpt-image-2",
+        prompt: "A safe Pink Paisa visual",
+        response_id: "paid-regeneration-uncertain-response",
+        attempt_count: 1,
+        status: "VALIDATED",
+      }],
+    }),
+    renderSocialDraftAssets: async () => {
+      const error = new Error("unknown transaction commit result");
+      error.code = "UnknownTransactionCommitResult";
+      error.staged_files = [{ storage_provider: "local", storage_key: finalStorageKey }];
+      throw error;
+    },
+    deleteCampaignAsset: async () => { deleteCalls += 1; return true; },
+    SocialPostDraft: { findById: async () => draft },
+    SocialAsset: {
+      exists: async (filter) => (
+        filter.is_active === true
+        && filter.deleted_at === null
+        && filter.$or.some((clause) => Object.values(clause).includes(finalStorageKey))
+      ),
+      find: () => leanQuery([]),
+      updateMany: async () => ({ modifiedCount: 0 }),
+    },
+    SocialGenerationRun: { aggregate: async () => [] },
+    SocialAuditLog: {
+      create: async (record) => { audits.push(record); return record; },
+      find: () => leanQuery([]),
+    },
+  };
+
+  await assert.rejects(
+    regenerateDraftVisual(draft._id, { dependencies }),
+    (error) => error.code === "UnknownTransactionCommitResult",
+  );
+  assert.equal(deleteCalls, 0);
+  assert.equal(audits.at(-1).metadata.final_asset_cleanup.preserved_committed, 1);
+  assert.deepEqual(audits.at(-1).metadata.final_asset_cleanup.preserved_storage_keys, [finalStorageKey]);
+});
+
 test("Social Media Manager rejects the legacy template-only regeneration mode", async () => {
   const draft = {
     _id: "draft-template-mode-disabled",
@@ -3113,4 +3693,59 @@ test("reviewer email failures create a linked manual action and failed notificat
   assert.match(actions[0].instructions.join(" "), /Approval Queue/);
   assert.equal(audits[0].action, "REVIEW_NOTIFICATION_FAILED");
   assert.equal(audits[0].action_status, "FAILED");
+});
+
+test("Mongo transactions retry an indeterminate commit without replaying media side effects", async () => {
+  let workCalls = 0;
+  let commitCalls = 0;
+  let abortCalls = 0;
+  let endCalls = 0;
+  const session = {
+    async startTransaction() {},
+    async commitTransaction() {
+      commitCalls += 1;
+      if (commitCalls === 1) {
+        const error = new Error("commit result unknown");
+        error.hasErrorLabel = (label) => label === "UnknownTransactionCommitResult";
+        throw error;
+      }
+    },
+    inTransaction: () => true,
+    async abortTransaction() { abortCalls += 1; },
+    async endSession() { endCalls += 1; },
+  };
+
+  const result = await socialManagerPrivate.runInMongoTransaction(
+    { startSession: async () => session },
+    async () => {
+      workCalls += 1;
+      return "committed";
+    },
+  );
+
+  assert.equal(result, "committed");
+  assert.equal(workCalls, 1);
+  assert.equal(commitCalls, 2);
+  assert.equal(abortCalls, 0);
+  assert.equal(endCalls, 1);
+});
+
+test("fallback transaction sessions block callback replay before repeating side effects", async () => {
+  let workCalls = 0;
+  const session = {
+    async withTransaction(callback) {
+      await callback();
+      await callback();
+    },
+    async endSession() {},
+  };
+
+  await assert.rejects(
+    socialManagerPrivate.runInMongoTransaction(
+      { startSession: async () => session },
+      async () => { workCalls += 1; },
+    ),
+    (error) => error.code === "social_transaction_replay_blocked",
+  );
+  assert.equal(workCalls, 1);
 });

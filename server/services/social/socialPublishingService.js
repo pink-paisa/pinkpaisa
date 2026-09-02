@@ -106,6 +106,24 @@ function instagramContentType(format) {
   return null;
 }
 
+function storyOnFrameProvenancePassed(asset = {}) {
+  const policy = asset.provenance?.caption_policy || {};
+  if (policy.method === "story_frame_overlay") return true;
+  const nativePoster = asset.provenance?.base_image?.poster_validation || {};
+  return policy.method === "story_frame_ai_native"
+    && policy.pixel_overlay_applied === false
+    && policy.text_rendering === "openai_image_baked_in_exact_copy"
+    && trimText(asset.visual_mode).toUpperCase() === "FULL_AI_GRAPHIC"
+    && Number(asset.provenance?.full_ai_graphic_contract_version || 0) === 2
+    && asset.provenance?.overlay?.method === "none"
+    && asset.provenance?.overlay?.pixel_overlay_applied === false
+    && asset.provenance?.final_pixel_contract?.pixel_overlay_applied === false
+    && nativePoster.decision === "PASS"
+    && nativePoster.exactTextMatch === true
+    && nativePoster.unapprovedTextPresent === false
+    && nativePoster.unrelatedLogoOrWatermarkPresent === false;
+}
+
 function publicationModelContentType(format) {
   if (format === "CAROUSEL") return "CAROUSEL";
   if (format === "REEL") return "REEL";
@@ -222,10 +240,10 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
       },
     });
   }
-  if (contentType === "story" && publicationAssets.some((asset) => asset.provenance?.caption_policy?.method !== "story_frame_overlay")) {
+  if (contentType === "story" && publicationAssets.some((asset) => !storyOnFrameProvenancePassed(asset))) {
     blockers.push({
-      code: "story_disclosure_overlay_invalid",
-      message: "Stories do not publish a caption; every Story asset must retain the approved first-frame/final-frame disclosure policy in its provenance.",
+      code: "story_on_frame_copy_invalid",
+      message: "Stories do not publish a caption; every Story asset must retain validated first-frame/final-frame on-image copy provenance.",
     });
   }
   try {

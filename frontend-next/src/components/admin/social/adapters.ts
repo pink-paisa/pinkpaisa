@@ -409,6 +409,11 @@ export const normalizeGenerationRun = (value: unknown): SocialGenerationRun | nu
     retryCount: number(first(run, ["retry_count", "retryCount"])) ?? 0,
     maxAttempts: number(first(run, ["max_attempts", "maxAttempts"])) ?? 0,
     nextRetryAt: dateString(first(run, ["next_retry_at", "nextRetryAt"])),
+    retryOfGenerationRunId: string(first(run, ["retry_of_generation_run_id", "retryOfGenerationRunId"])),
+    supersededByGenerationRunId: string(first(run, ["superseded_by_generation_run_id", "supersededByGenerationRunId"])),
+    supersededAt: dateString(first(run, ["superseded_at", "supersededAt"])),
+    recoveryArchivedAt: dateString(first(run, ["recovery_archived_at", "recoveryArchivedAt"])),
+    recoveryArchiveReason: string(first(run, ["recovery_archive_reason", "recoveryArchiveReason"])),
     queuedAt: dateString(first(run, ["queued_at", "queuedAt"])),
     startedAt: dateString(first(run, ["started_at", "startedAt"])),
     completedAt: dateString(first(run, ["completed_at", "completedAt", "finished_at", "finishedAt"])),
@@ -1113,6 +1118,7 @@ export const normalizeWorkSummary = (value: unknown): SocialWorkSummary => {
       code: string(first(item, ["code", "error_code", "errorCode"])),
       message: string(first(item, ["message", "error_message", "errorMessage"])),
       occurredAt: dateString(first(item, ["occurred_at", "occurredAt", "updated_at", "updatedAt"])),
+      recoveryAvailable: boolean(first(item, ["recovery_available", "recoveryAvailable"]), false),
     };
   };
   return {

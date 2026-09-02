@@ -98,6 +98,7 @@ SOCIAL_REQUIRE_APPROVAL=true
 SOCIAL_MAX_CONTENT_REVISIONS=3
 SOCIAL_MAX_IMAGE_RETRIES=3
 SOCIAL_DEFAULT_VISUAL_MODE=FULL_AI_GRAPHIC
+SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE=0.20
 SOCIAL_PRODUCT_IMAGE_ALLOWED_HOSTS=media.pinkpaisa.in,m.media-amazon.com,images-na.ssl-images-amazon.com,images-eu.ssl-images-amazon.com
 SOCIAL_PRODUCT_IMAGE_MAX_BYTES=12582912
 SOCIAL_PRODUCT_IMAGE_MAX_PIXELS=30000000
@@ -117,11 +118,11 @@ SOCIAL_AUTO_DM=false
 SOCIAL_AUTO_HIDE_SPAM=false
 ```
 
-Use the current reviewed model names from `server/.env.example`. Provider/model availability must be verified in the deployed OpenAI project; changing a string in `.env` does not grant model access. Configure current token/image prices and provider budgets before relying on the in-app cost estimate.
+Use the current reviewed model names from `server/.env.example`. Provider/model availability must be verified in the deployed OpenAI project; changing a string in `.env` does not grant model access. Configure current token/image prices and provider budgets before relying on the in-app cost estimate. The image rate must be positive in production or generation fails before contacting the paid provider. `0.20` is a conservative reviewed example for the configured portrait output through high quality; reconfirm it against the active model, dimensions, quality and official provider pricing before every deployment.
 
 Keep the product-image host list narrow and reviewed. Product creative generation fetches only the authoritative image URL on the active production Product record, disables redirects, pins a public DNS result for the request, validates MIME/magic signature/size/pixels/checksum, and stores the exact source bytes. OpenAI receives only a text-free, product-free background prompt; a mismatch or unsafe image fails the run visibly.
 
-The foundation migration preserves a recognized persisted visual default. On an existing environment, verify the authenticated Social Manager settings response after migration and deliberately save `FULL_AI_GRAPHIC` if the administrator-saved value is still exact-overlay. Do not update unrelated settings or bypass the visible fallback: Stories and authentic product/affiliate creatives must continue resolving to exact overlay.
+The foundation migration preserves a recognized persisted visual default. On an existing environment, verify the authenticated Social Manager settings response after migration and deliberately save `FULL_AI_GRAPHIC` if the administrator-saved value is still exact-overlay. Do not update unrelated settings or bypass the visible fallback: authentic product/affiliate creatives must continue resolving to exact overlay, while eligible Stories use the independently validated AI-native on-frame-copy contract.
 
 Version 3 deliberately makes the weekly plan the only automatic content-production stream. Its defaults and v2-to-v3 migration set daily automatic generation false; manual Studio generation remains available and an administrator may later re-enable the daily schedule as an explicit operating-model decision. Environment `false` values are deployment kill switches. Persisted Social Manager settings also have to allow a feature before it operates. Keep all publish/send automation false during the controlled rollout.
 

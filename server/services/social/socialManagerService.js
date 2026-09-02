@@ -10,6 +10,8 @@ const SocialGenerationRun = require("../../models/SocialGenerationRun");
 const SocialGenerationUsageLedger = require("../../models/SocialGenerationUsageLedger");
 const SocialManualAction = require("../../models/SocialManualAction");
 const SocialMetricSnapshot = require("../../models/SocialMetricSnapshot");
+const SocialPaidCallUsageLedger = require("../../models/SocialPaidCallUsageLedger");
+const SocialPaidOperation = require("../../models/SocialPaidOperation");
 const SocialPostDraft = require("../../models/SocialPostDraft");
 const SocialPromptVersion = require("../../models/SocialPromptVersion");
 const SocialPublication = require("../../models/SocialPublication");
@@ -25,6 +27,7 @@ const {
 const { getInstagramConnectionSummary } = require("../instagramConnectionService");
 const {
   createCampaignAssetVersion,
+  deleteCampaignAsset,
   getGeneratedCampaignAssetReference,
   storeCampaignAsset,
 } = require("../campaignAssetStorage");
@@ -36,6 +39,7 @@ const {
 const {
   cleanupStagedFullAiGraphic,
   generateSocialVisuals,
+  sanitizeImageGenerationEvidence,
   stageSuppliedFullAiGraphic,
 } = require("./socialAiImageService");
 const openAiSocialProvider = require("./openAiSocialProvider");
@@ -57,7 +61,10 @@ const {
   },
 } = require("./socialDecisionEngine");
 const { collectInternalSignals } = require("./socialInternalSignals");
-const { collectExternalResearch } = require("./socialResearchService");
+const {
+  buildWeeklyCandidateResearchFocus,
+  collectExternalResearch,
+} = require("./socialResearchService");
 const { assembleReel, buildManualActions, buildSrt } = require("./socialReelAssemblyService");
 const { resolveUsableAudioTrack } = require("./socialAudioLibraryService");
 const { publicManualAction } = require("./socialManualActionService");
@@ -80,6 +87,7 @@ const { buildSocialCaptionContract, isAffiliateRecommendation } = require("./soc
 const { resolveSocialVisualMode } = require("./socialVisualPolicy");
 
 const GENERATION_LEASE_MS = 15 * 60 * 1000;
+const PAID_OPERATION_LEASE_MS = 2 * 60 * 60 * 1000;
 const GENERATION_WORKER_OWNER = `${os.hostname()}:${process.pid}:social:${crypto.randomUUID().slice(0, 8)}`;
 const STAGE_MAP = Object.freeze({
   research: "MARKET_RESEARCH",
@@ -221,6 +229,11 @@ function bindModelToMongoSession(Model, session) {
   });
 }
 
+function transactionCommitIsIndeterminate(error) {
+  return Boolean(error?.transaction_commit_indeterminate)
+    || (typeof error?.hasErrorLabel === "function" && error.hasErrorLabel("UnknownTransactionCommitResult"));
+}
+
 async function createWithSession(Model, record, session) {
   if (!session) return Model.create(record);
   const created = await Model.create([record], { session });
@@ -236,14 +249,321 @@ async function runInMongoTransaction(dependencies, work) {
   if (!startSession) return work(null);
   const session = await startSession();
   try {
+    // `withTransaction` is allowed to invoke its callback more than once after
+    // a transient transaction error. Some Social Manager mutations stage files
+    // through Sharp/FFmpeg inside the callback, and those storage writes cannot
+    // participate in MongoDB rollback. Use the driver's lower-level transaction
+    // API so the mutation body runs exactly once; retry only an indeterminate
+    // commit, which is safe and does not repeat external side effects.
+    if (typeof session.startTransaction === "function" && typeof session.commitTransaction === "function") {
+      await session.startTransaction();
+      try {
+        const result = await work(session);
+        let commitAttempt = 0;
+        while (true) {
+          commitAttempt += 1;
+          try {
+            await session.commitTransaction();
+            return result;
+          } catch (error) {
+            const commitResultUnknown = typeof error?.hasErrorLabel === "function"
+              && error.hasErrorLabel("UnknownTransactionCommitResult");
+            if (!commitResultUnknown) throw error;
+            if (commitAttempt >= 5) {
+              error.transaction_commit_indeterminate = true;
+              throw error;
+            }
+          }
+        }
+      } catch (error) {
+        const transactionActive = typeof session.inTransaction !== "function" || session.inTransaction();
+        if (transactionActive && typeof session.abortTransaction === "function") {
+          await session.abortTransaction().catch(() => null);
+        }
+        throw error;
+      }
+    }
+    if (typeof session.withTransaction !== "function") {
+      throw new Error("Mongo session does not support transactions");
+    }
+    let callbackInvoked = false;
     let result;
     await session.withTransaction(async () => {
+      if (callbackInvoked) {
+        const error = new Error("MongoDB attempted to replay a transaction containing external media side effects");
+        error.code = "social_transaction_replay_blocked";
+        throw error;
+      }
+      callbackInvoked = true;
       result = await work(session);
+      return result;
     });
     return result;
   } finally {
     await session.endSession();
   }
+}
+
+async function storageKeyHasCommittedAssetReference(AssetModel, storageKey) {
+  if (!AssetModel) throw new Error("SocialAsset model is required to verify a staged file");
+  const filter = {
+    is_active: true,
+    deleted_at: null,
+    $or: [
+      { storage_key: storageKey },
+      { "original_visual.storage_key": storageKey },
+      { "provider_original.storage_key": storageKey },
+      { "normalization.output_storage_key": storageKey },
+      { "reference_assets.storage_key": storageKey },
+      { "provenance.provider_original.storage_key": storageKey },
+      { "provenance.normalization.output_storage_key": storageKey },
+      { "provenance.ai_background.storage_key": storageKey },
+      { "provenance.authentic_product_reference.storage_key": storageKey },
+      { "provenance.base_image.storage_key": storageKey },
+      { "provenance.base_image.provider_original.storage_key": storageKey },
+      { "provenance.base_image.normalization.output_storage_key": storageKey },
+      { "provenance.base_image.ai_background.storage_key": storageKey },
+      { "provenance.base_image.authentic_product_reference.storage_key": storageKey },
+    ],
+  };
+  if (typeof AssetModel.exists === "function") return Boolean(await AssetModel.exists(filter));
+  if (typeof AssetModel.findOne === "function") {
+    const query = AssetModel.findOne(filter);
+    const value = typeof query?.lean === "function" ? await query.lean() : await query;
+    return Boolean(value);
+  }
+  throw new Error("SocialAsset model cannot verify whether a staged file was committed");
+}
+
+async function cleanupUncommittedFinalFiles(files = [], { AssetModel = SocialAsset, dependencies = {} } = {}) {
+  const remove = dependencies.deleteCampaignAsset || deleteCampaignAsset;
+  const unique = [];
+  const seen = new Set();
+  for (const file of [...files].reverse()) {
+    const storageKey = trimText(file?.storage_key || file?.storageKey);
+    if (!storageKey || seen.has(storageKey)) continue;
+    seen.add(storageKey);
+    unique.push({
+      storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+      storage_key: storageKey,
+    });
+  }
+  const failures = [];
+  const preserved = [];
+  let removed = 0;
+  for (const file of unique) {
+    try {
+      // A transaction error can represent UnknownTransactionCommitResult. Read
+      // outside the ended session and never delete media referenced by a row
+      // that may in fact have committed.
+      if (await storageKeyHasCommittedAssetReference(AssetModel, file.storage_key)) {
+        preserved.push(file.storage_key);
+        continue;
+      }
+      const deleted = await remove(file);
+      if (deleted === false) throw new Error("storage provider did not delete the uncommitted file");
+      removed += 1;
+    } catch (error) {
+      failures.push({
+        storage_key: file.storage_key,
+        code: error?.code || null,
+        message: normalizeWhitespace(error?.message || "staged file cleanup failed").slice(0, 500),
+      });
+    }
+  }
+  return {
+    attempted: unique.length,
+    removed,
+    preserved_committed: preserved.length,
+    preserved_storage_keys: preserved,
+    failed: failures.length,
+    failures,
+  };
+}
+
+function paidOperationKey(operation, draftId, requestKey) {
+  const token = trimText(requestKey) || crypto.randomUUID();
+  if (token.length > 300) {
+    const error = new Error("Idempotency-Key must be 300 characters or fewer");
+    error.code = "social_idempotency_key_too_long";
+    error.statusCode = 400;
+    throw error;
+  }
+  return `social-paid-operation:${operation}:${draftId}:${sha256(token)}`;
+}
+
+async function claimPaidOperation({
+  operation,
+  draft,
+  requestKey = null,
+  requestPayload = {},
+  actor = null,
+  requestId = null,
+  dependencies = {},
+} = {}) {
+  const OperationModel = dependencies.SocialPaidOperation
+    || (dependencies.SocialPostDraft || dependencies.SocialGenerationRun ? null : SocialPaidOperation);
+  const key = paidOperationKey(operation, draft._id, requestKey);
+  const fingerprint = sha256({ operation, source_draft_id: String(draft._id), request: requestPayload });
+  if (!OperationModel) return { tracked: false, reused: false, key, fingerprint, row: null };
+  const startedAt = new Date();
+  try {
+    const row = await OperationModel.create({
+      idempotency_key: key,
+      operation,
+      source_draft_id: draft._id,
+      request_fingerprint: fingerprint,
+      status: "RUNNING",
+      actor_admin_id: actorId(actor),
+      request_id: trimText(requestId).slice(0, 200) || null,
+      started_at: startedAt,
+      last_heartbeat_at: startedAt,
+      lease_expires_at: new Date(startedAt.getTime() + PAID_OPERATION_LEASE_MS),
+    });
+    return { tracked: true, reused: false, key, fingerprint, row };
+  } catch (error) {
+    if (error?.code !== 11000 || typeof OperationModel.findOne !== "function") throw error;
+    const row = await OperationModel.findOne({ idempotency_key: key });
+    if (!row || row.request_fingerprint !== fingerprint) {
+      const conflict = new Error("Idempotency-Key was already used for a different paid Social Manager request");
+      conflict.code = "social_paid_operation_idempotency_conflict";
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    if (row.status === "SUCCEEDED") return { tracked: true, reused: true, key, fingerprint, row };
+    if (["RUNNING", "FAILED"].includes(row.status)) {
+      const AuditModel = dependencies.SocialAuditLog
+        || (dependencies.SocialPostDraft || dependencies.SocialGenerationRun ? null : SocialAuditLog);
+      if (AuditModel && typeof AuditModel.findOne === "function") {
+        const query = AuditModel.findOne({
+          "metadata.paid_operation_key": key,
+          action: { $in: [
+            "AI_IMAGE_REGENERATED",
+            "DUPLICATED_AS_NEW_DRAFT",
+            "REGENERATED_STRATEGY",
+            "REGENERATED_ALTERNATIVES",
+            "REGENERATED_COPY",
+            "REGENERATED_HOOKS",
+            "REGENERATED_CAPTION",
+            "REGENERATED_FORMAT",
+            "REGENERATED_REVISION",
+            "REGENERATED_COMPLIANCE",
+            "REGENERATED_VISUAL",
+          ] },
+        });
+        const successAudit = typeof query?.sort === "function"
+          ? await query.sort({ created_at: -1 })
+          : await query;
+        if (successAudit) {
+          const resultDraftId = successAudit.draft_id || row.source_draft_id;
+          if (typeof OperationModel.findOneAndUpdate === "function") {
+            const reconciled = await OperationModel.findOneAndUpdate(
+              { _id: row._id, status: { $in: ["RUNNING", "FAILED"] } },
+              { $set: { status: "SUCCEEDED", result_draft_id: resultDraftId, finished_at: new Date() } },
+              { new: true },
+            );
+            const receipt = reconciled || row;
+            receipt.status = "SUCCEEDED";
+            receipt.result_draft_id = resultDraftId;
+            receipt.finished_at = new Date();
+            return { tracked: true, reused: true, key, fingerprint, row: receipt };
+          }
+        }
+      }
+      const leaseExpiry = new Date(row.lease_expires_at || new Date(row.started_at).getTime() + PAID_OPERATION_LEASE_MS);
+      if (row.status === "RUNNING" && !Number.isNaN(leaseExpiry.getTime()) && leaseExpiry.getTime() <= Date.now()) {
+        // Do not terminalize stale paid work here. The periodic reconciler
+        // atomically preserves provider evidence, updates linked state, emits
+        // the immutable terminal audit, and performs guarded file cleanup.
+        const stale = new Error("This paid request has an uncertain stale outcome and requires reconciliation; do not retry it with a new key until usage evidence is reviewed");
+        stale.code = "social_paid_operation_reconciliation_required";
+        stale.statusCode = 409;
+        throw stale;
+      }
+      if (row.status === "FAILED" && row.error?.code === "social_paid_operation_reconciliation_required") {
+        const stale = new Error("This paid request has an uncertain outcome and requires reconciliation; do not retry it with a new key until usage evidence is reviewed");
+        stale.code = "social_paid_operation_reconciliation_required";
+        stale.statusCode = 409;
+        throw stale;
+      }
+    }
+    const conflict = new Error(row.status === "RUNNING"
+      ? "This paid Social Manager request is already running or awaiting reconciliation"
+      : "This Idempotency-Key belongs to a failed paid request; use a new key for an explicit retry");
+    conflict.code = row.status === "RUNNING"
+      ? "social_paid_operation_in_progress"
+      : "social_paid_operation_failed";
+    conflict.statusCode = 409;
+    conflict.operation_status = row.status;
+    throw conflict;
+  }
+}
+
+async function heartbeatPaidOperation(claim, { dependencies = {} } = {}) {
+  if (!claim?.tracked || !claim.row) return;
+  const OperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  if (typeof OperationModel.updateOne !== "function") return;
+  const now = new Date();
+  await OperationModel.updateOne(
+    { _id: claim.row._id, status: "RUNNING" },
+    { $set: {
+      last_heartbeat_at: now,
+      lease_expires_at: new Date(now.getTime() + PAID_OPERATION_LEASE_MS),
+    } },
+  );
+}
+
+async function finishPaidOperation(claim, {
+  status,
+  resultDraftId = null,
+  generationRunId = null,
+  error = null,
+  recoveryEvidence = null,
+  dependencies = {},
+} = {}) {
+  if (!claim?.tracked || !claim.row) return null;
+  const OperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  const filter = { _id: claim.row._id, status: "RUNNING" };
+  const update = {
+    $set: {
+      status,
+      result_draft_id: resultDraftId,
+      generation_run_id: generationRunId,
+      finished_at: new Date(),
+      error: status === "FAILED" ? {
+        code: trimText(error?.code).slice(0, 200) || "social_paid_operation_failed",
+        message: "The paid Social Manager operation failed; use its stored audit and provider evidence for recovery.",
+        evidence_fingerprint: trimText(error?.output_fingerprint).slice(0, 128)
+          || (recoveryEvidence ? sha256(recoveryEvidence) : null),
+      } : { code: null, message: null, evidence_fingerprint: null },
+      recovery_evidence: status === "FAILED" && recoveryEvidence ? clone(recoveryEvidence) : null,
+    },
+  };
+  if (typeof OperationModel.findOneAndUpdate === "function") {
+    let lastError;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const result = await OperationModel.findOneAndUpdate(filter, update, { new: true });
+        if (result || claim.row.status === status) return result;
+        const current = typeof OperationModel.findOne === "function"
+          ? await OperationModel.findOne({ _id: claim.row._id })
+          : null;
+        if (current?.status === status) return current;
+        throw Object.assign(new Error("Paid-operation receipt did not transition from RUNNING"), {
+          code: "social_paid_operation_receipt_not_finalized",
+        });
+      } catch (errorValue) {
+        lastError = errorValue;
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 50));
+      }
+    }
+    throw lastError;
+  }
+  if (typeof OperationModel.updateOne === "function") {
+    await OperationModel.updateOne(filter, update);
+    return null;
+  }
+  return null;
 }
 
 function sha256(value) {
@@ -327,6 +647,179 @@ function estimateOpenAiCostUsd(usage = {}) {
     Number(usage.input_tokens || 0) * inputRate / 1_000_000
     + Number(usage.output_tokens || 0) * outputRate / 1_000_000
   ).toFixed(6));
+}
+
+function mergeGenerationUsage(...values) {
+  return values.flat().filter(Boolean).reduce((total, usage) => ({
+    input_tokens: total.input_tokens + Number(usage.input_tokens || 0),
+    output_tokens: total.output_tokens + Number(usage.output_tokens || 0),
+    total_tokens: total.total_tokens + Number(
+      usage.total_tokens
+      || (Number(usage.input_tokens || 0) + Number(usage.output_tokens || 0)),
+    ),
+    input_image_tokens: total.input_image_tokens + Number(usage.input_image_tokens || 0),
+    output_image_tokens: total.output_image_tokens + Number(usage.output_image_tokens || 0),
+  }), {
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    input_image_tokens: 0,
+    output_image_tokens: 0,
+  });
+}
+
+function sanitizedProviderAttempts(attempts = []) {
+  return safeArray(attempts).slice(0, 10).map((attempt, index) => ({
+    attempt: Math.max(Number(attempt?.attempt || index + 1), 1),
+    status: trimText(attempt?.status).toUpperCase() || "FAILED",
+    started_at: attempt?.started_at || null,
+    completed_at: attempt?.completed_at || null,
+    response_id: trimText(attempt?.response_id).slice(0, 300) || null,
+    usage: mergeGenerationUsage(attempt?.usage || {}),
+    output_fingerprint: trimText(attempt?.output_fingerprint).slice(0, 128) || null,
+    error_code: trimText(attempt?.error_code).slice(0, 200) || null,
+    error_message: attempt?.error_code ? "OpenAI provider attempt failed" : null,
+  }));
+}
+
+function safeValidationEvidence(values = []) {
+  return safeArray(values)
+    .map((value) => normalizeWhitespace(value))
+    .filter(Boolean)
+    .map((value) => {
+      const path = value.match(/(?:^|\s)(\$(?:\.[A-Za-z0-9_-]+|\[\d+\])*)/)?.[1] || "$";
+      return `${path} failed local validation`;
+    })
+    .filter((value, index, all) => all.indexOf(value) === index)
+    .slice(0, 20);
+}
+
+function safeDurableErrorMessage(error, fallback = "The Social Manager operation failed") {
+  const code = trimText(error?.code).toLowerCase();
+  if (code === "structured_output_invalid") return "AI output failed the required structured-output contract";
+  if (code.includes("compliance")) return "AI content could not pass the required compliance checks";
+  if (code.includes("image") || error?.image_generation) return "AI image generation or validation failed";
+  if (error?.provider || error?.response_id || error?.social_stage || safeArray(error?.attempts).length) {
+    return "The AI provider operation failed; sanitized usage and validation evidence was retained";
+  }
+  return normalizeWhitespace(fallback).slice(0, 1000) || "The Social Manager operation failed";
+}
+
+function imagePromptRevisionResult(response = {}) {
+  const value = asObject(response) || {};
+  const output = asObject(value.output) || {};
+  const attempts = sanitizedProviderAttempts(value.attempts || output.attempts);
+  const responseId = trimText(
+    value.response_id
+    || value.provider_response_id
+    || output.response_id
+    || output.provider_response_id
+    || attempts.at(-1)?.response_id,
+  ).slice(0, 300) || null;
+  return {
+    ...output,
+    provider: trimText(value.provider || output.provider).toLowerCase() || null,
+    model: trimText(value.model || output.model) || null,
+    prompt_version: trimText(value.prompt_version || output.prompt_version).slice(0, 200) || null,
+    response_id: responseId,
+    provider_response_id: responseId,
+    usage: mergeGenerationUsage(value.usage || output.usage || {}),
+    attempt_count: Math.max(Number(value.attempt_count || output.attempt_count || attempts.length || (responseId ? 1 : 0)), 0),
+    attempts,
+    started_at: value.started_at || output.started_at || null,
+    completed_at: value.completed_at || output.completed_at || null,
+    input_fingerprint: trimText(value.input_fingerprint || output.input_fingerprint).slice(0, 128) || null,
+    output_fingerprint: trimText(value.output_fingerprint || output.output_fingerprint).slice(0, 128) || null,
+    validation_errors: safeValidationEvidence(value.validation_errors || output.validation_errors),
+    raw_output_retained: false,
+  };
+}
+
+function failedProviderPromptRun(error) {
+  const stage = trimText(error?.social_stage).toLowerCase();
+  if (!stage || !STAGE_MAP[stage] || !trimText(error?.prompt_version)) return null;
+  const attempts = sanitizedProviderAttempts(error.attempts);
+  const suppliedUsage = mergeGenerationUsage(error.usage || {});
+  const usage = suppliedUsage.total_tokens
+    || suppliedUsage.input_tokens
+    || suppliedUsage.output_tokens
+    ? suppliedUsage
+    : mergeGenerationUsage(attempts.map((attempt) => attempt.usage));
+  return {
+    stage,
+    provider: trimText(error.provider || "openai").toLowerCase() || "openai",
+    model: trimText(error.model) || null,
+    prompt_version: trimText(error.prompt_version),
+    response_id: trimText(error.response_id).slice(0, 300) || null,
+    provider_response_id: trimText(error.response_id).slice(0, 300) || null,
+    usage,
+    attempt_count: Math.max(Number(error.attempt_count || attempts.length || 1), 1),
+    retry_number: Math.max(Number(error.retry_number || 0), 0),
+    started_at: error.started_at || null,
+    completed_at: error.completed_at || new Date(),
+    input_fingerprint: trimText(error.input_fingerprint).slice(0, 128) || null,
+    output_fingerprint: trimText(error.output_fingerprint).slice(0, 128)
+      || (trimText(error.raw_output) ? sha256(error.raw_output) : null),
+    output_json: null,
+    response_metadata: {
+      validation_errors: safeValidationEvidence(error.validation_errors),
+      attempts,
+      raw_output_retained: false,
+    },
+    status: "FAILED",
+    error_code: trimText(error.code || "social_generation_failed").slice(0, 200),
+    error_message: safeDurableErrorMessage(error),
+  };
+}
+
+function sanitizedPromptResponseMetadata(value = {}) {
+  const metadata = asObject(value.response_metadata) || {};
+  return {
+    attempts: sanitizedProviderAttempts(metadata.attempts || value.attempts),
+    validation_errors: safeValidationEvidence(metadata.validation_errors || value.validation_errors),
+    fallback_used: metadata.fallback_used === true,
+    fallback_provider: trimText(metadata.fallback_provider).slice(0, 100) || null,
+    raw_output_retained: false,
+  };
+}
+
+function researchPromptRuns(research = {}) {
+  research = asObject(research) || {};
+  const explicitRuns = safeArray(research.prompt_runs).filter((row) => trimText(row?.prompt_version));
+  const sourceRuns = explicitRuns.length
+    ? explicitRuns
+    : trimText(research.prompt_version)
+      ? [{
+        ...research,
+        stage: "research",
+        status: "SUCCEEDED",
+      }]
+      : [];
+  return sourceRuns.map((row) => {
+    const attemptCount = Math.max(Number(row.attempt_count || safeArray(row.attempts).length || 1), 1);
+    const responseId = trimText(row.provider_response_id || row.response_id).slice(0, 300) || null;
+    return {
+      stage: "research",
+      provider: trimText(row.provider || "openai").toLowerCase() || "openai",
+      model: trimText(row.model) || null,
+      prompt_version: trimText(row.prompt_version),
+      response_id: responseId,
+      provider_response_id: responseId,
+      input_fingerprint: trimText(row.input_fingerprint).slice(0, 128) || null,
+      output_fingerprint: trimText(row.output_fingerprint).slice(0, 128) || null,
+      usage: mergeGenerationUsage(row.usage || {}),
+      attempt_count: attemptCount,
+      retry_number: Math.max(Number(row.retry_number ?? attemptCount - 1), 0),
+      started_at: row.started_at || null,
+      completed_at: row.completed_at || null,
+      output_json: null,
+      request_metadata: null,
+      response_metadata: sanitizedPromptResponseMetadata(row),
+      status: trimText(row.status).toUpperCase() || "SUCCEEDED",
+      error_code: trimText(row.error_code).slice(0, 200) || null,
+      error_message: normalizeWhitespace(row.error_message || "").slice(0, 4000) || null,
+    };
+  });
 }
 
 function clone(value) {
@@ -489,6 +982,11 @@ function publicRun(run) {
     finished_at: value.finished_at || null,
     selected_draft_id: value.selected_draft_id ? String(value.selected_draft_id) : null,
     failed_draft_id: value.failed_draft_id ? String(value.failed_draft_id) : null,
+    retry_of_generation_run_id: value.retry_of_generation_run_id ? String(value.retry_of_generation_run_id) : null,
+    superseded_by_generation_run_id: value.superseded_by_generation_run_id ? String(value.superseded_by_generation_run_id) : null,
+    superseded_at: value.superseded_at || null,
+    recovery_archived_at: value.recovery_archived_at || null,
+    recovery_archive_reason: value.recovery_archive_reason || null,
     attempt_count: value.attempt_count || 0,
     retry_count: value.retry_count || 0,
     max_attempts: value.max_attempts || 0,
@@ -508,6 +1006,7 @@ function publicRun(run) {
       attempts: value.image_generation_attempts || [],
     },
     stage_executions: value.stage_executions || [],
+    provider_call_checkpoints: value.provider_call_checkpoints || [],
     usage: value.usage || {},
     last_error: value.last_error || null,
   };
@@ -787,11 +1286,12 @@ function retainedProviderOriginalPassed(asset = {}) {
     && trimText(normalization.output_checksum_sha256).toLowerCase() === normalizedChecksum;
 }
 
-function buildCaptionPolicyProvenance(recommendation = {}) {
+function buildCaptionPolicyProvenance(recommendation = {}, visualMode = null) {
   const contract = buildSocialCaptionContract(recommendation);
   const story = trimText(recommendation.format).toUpperCase() === "STORY";
+  const aiNativeStory = story && trimText(visualMode).toUpperCase() === "FULL_AI_GRAPHIC";
   return {
-    method: story ? "story_frame_overlay" : "instagram_caption_only",
+    method: story ? (aiNativeStory ? "story_frame_ai_native" : "story_frame_overlay") : "instagram_caption_only",
     component_order: contract.component_order,
     cta_placement: story ? "final_frame" : "caption_only",
     affiliate_disclosure_placement: story ? "first_frame" : "caption_only",
@@ -803,6 +1303,10 @@ function buildCaptionPolicyProvenance(recommendation = {}) {
     caption_checksum_sha256: story ? null : contract.checksum_sha256,
     caption_contract_valid: contract.valid,
     caption_contract_violations: contract.violations,
+    ...(story ? {
+      pixel_overlay_applied: !aiNativeStory,
+      text_rendering: aiNativeStory ? "openai_image_baked_in_exact_copy" : "sharp_svg_overlay",
+    } : {}),
   };
 }
 
@@ -817,8 +1321,16 @@ function captionPolicyPassed(asset = {}, expectedFormat, recommendation = {}) {
     && policy.affiliate_disclosure_required === Boolean(contract.components.affiliate_disclosure)
     && policy.financial_disclaimer_required === Boolean(contract.components.financial_disclaimer);
   if (expectedFormat === "STORY") {
+    const nativeStory = trimText(asset.visual_mode).toUpperCase() === "FULL_AI_GRAPHIC"
+      && Number(asset.provenance?.full_ai_graphic_contract_version || 0) === 2
+      && asset.provenance?.overlay?.method === "none"
+      && asset.provenance?.overlay?.pixel_overlay_applied === false;
     return common
-      && policy.method === "story_frame_overlay"
+      && policy.method === (nativeStory ? "story_frame_ai_native" : "story_frame_overlay")
+      && (!nativeStory || (
+        policy.pixel_overlay_applied === false
+        && policy.text_rendering === "openai_image_baked_in_exact_copy"
+      ))
       && policy.affiliate_disclosure_placement === "first_frame"
       && policy.cta_placement === "final_frame"
       && policy.financial_disclaimer_placement === "final_frame"
@@ -1319,6 +1831,7 @@ function sourceType(value) {
 }
 
 function freshnessForHours(hours) {
+  if (hours === null || hours === undefined || hours === "") return "UNKNOWN";
   const numeric = Number(hours);
   if (!Number.isFinite(numeric)) return "UNKNOWN";
   if (numeric <= 48) return "CURRENT";
@@ -1344,7 +1857,11 @@ async function persistResearchSources({ run, research, dependencies = {} }) {
     } catch (_error) {
       continue;
     }
-    const freshnessHours = Number(source.freshness_hours);
+    const freshnessHours = source.freshness_hours === null
+      || source.freshness_hours === undefined
+      || source.freshness_hours === ""
+      ? null
+      : Number(source.freshness_hours);
     const injectionFlags = Array.isArray(source.prompt_injection_flags) ? source.prompt_injection_flags : [];
     const sourceKey = trimText(source.source_key) || null;
     const idempotencyKey = `social-source:${run._id}:${sha256(`${parsed.toString()}:${source.claim_supported || source.excerpt || index}`)}`;
@@ -1449,16 +1966,21 @@ async function ensurePromptVersions({ promptRuns = [], actor = null, dependencie
   return documents;
 }
 
+function promptExecutionStatus(value) {
+  const status = trimText(value).toUpperCase();
+  return ["FAILED", "RUNNING", "QUEUED", "SKIPPED"].includes(status) ? status : "COMPLETED";
+}
+
 function stageExecutions(promptVersionRows = []) {
   return promptVersionRows.map(({ promptRun, document }) => ({
     stage: RUN_STAGE_MAP[String(promptRun.stage || "").toLowerCase()] || "ASSEMBLING_RESULT",
-    status: "COMPLETED",
+    status: promptExecutionStatus(promptRun.status),
     provider: promptRun.provider,
     model: promptRun.model,
-    prompt_version_id: document._id,
-    prompt_semantic_version: document.semantic_version,
-    runtime_prompt_version: document.runtime_prompt_version,
-    system_instructions_version: promptRun.system_instructions_version || document.runtime_prompt_version,
+    prompt_version_id: document?._id || null,
+    prompt_semantic_version: document?.semantic_version || null,
+    runtime_prompt_version: document?.runtime_prompt_version || promptRun.prompt_version || null,
+    system_instructions_version: promptRun.system_instructions_version || document?.runtime_prompt_version || promptRun.prompt_version || null,
     input_fingerprint: promptRun.input_fingerprint || null,
     output_fingerprint: promptRun.output_fingerprint || null,
     provider_response_id: promptRun.provider_response_id || promptRun.response_id || null,
@@ -1473,7 +1995,36 @@ function stageExecutions(promptVersionRows = []) {
     response_metadata: promptRun.response_metadata || null,
     started_at: promptRun.started_at || new Date(),
     finished_at: promptRun.completed_at || new Date(),
+    error_code: promptRun.error_code || null,
+    error_message: promptRun.error_message || null,
   }));
+}
+
+function mergeStageExecutionHistory(...collections) {
+  const merged = [];
+  const indexed = new Map();
+  collections.flat().filter(Boolean).forEach((execution) => {
+    const stableIdentity = execution.provider_response_id
+      || execution.input_fingerprint
+      || execution.output_fingerprint;
+    if (!stableIdentity) {
+      merged.push(execution);
+      return;
+    }
+    const key = [
+      execution.stage,
+      execution.status,
+      stableIdentity,
+      execution.error_code || "no-error",
+    ].join(":");
+    if (indexed.has(key)) {
+      merged[indexed.get(key)] = execution;
+      return;
+    }
+    indexed.set(key, merged.length);
+    merged.push(execution);
+  });
+  return merged;
 }
 
 function candidateSummaries(decision) {
@@ -1519,7 +2070,7 @@ function assertWeeklyRecommendationIdentity(recommendation, candidate) {
 
 async function enforceMonthlyBudget({ settings, now, models }) {
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const [runBudgetRows, retainedBudgetRows] = await Promise.all([
+  const [runBudgetRows, retainedBudgetRows, paidCallBudgetRows] = await Promise.all([
     models.SocialGenerationRun.aggregate([
       { $match: { created_at: { $gte: monthStart } } },
       { $group: { _id: null, usd: { $sum: "$usage.estimated_cost" } } },
@@ -1530,9 +2081,17 @@ async function enforceMonthlyBudget({ settings, now, models }) {
         { $group: { _id: null, usd: { $sum: "$usage.estimated_cost" } } },
       ])
       : [],
+    models.SocialPaidCallUsageLedger && typeof models.SocialPaidCallUsageLedger.aggregate === "function"
+      ? models.SocialPaidCallUsageLedger.aggregate([
+        { $match: { incurred_at: { $gte: monthStart } } },
+        { $group: { _id: null, usd: { $sum: "$usage.estimated_cost" } } },
+      ])
+      : [],
   ]);
   const inrPerUsd = Math.max(Number(process.env.SOCIAL_MANAGER_INR_PER_USD || 90), 1);
-  const estimatedUsd = Number(runBudgetRows[0]?.usd || 0) + Number(retainedBudgetRows[0]?.usd || 0);
+  const estimatedUsd = Number(runBudgetRows[0]?.usd || 0)
+    + Number(retainedBudgetRows[0]?.usd || 0)
+    + Number(paidCallBudgetRows[0]?.usd || 0);
   const estimatedInr = estimatedUsd * inrPerUsd;
   if (Number(settings.cost_controls?.monthly_budget_inr || 0) > 0 && estimatedInr >= Number(settings.cost_controls.monthly_budget_inr)) {
     const error = new Error("The configured monthly social AI budget threshold has been reached");
@@ -1925,17 +2484,19 @@ async function assembleReelCreative({
     throw error;
   }
   const outputPath = outputReference.filePath || outputReference.file_path;
-  const burnSubtitles = visualMode !== "FULL_AI_GRAPHIC";
-  let selectedAudio = null;
-  if (draft.audio_track_id) {
-    try {
-      selectedAudio = await (dependencies.resolveUsableAudioTrack || resolveUsableAudioTrack)(draft.audio_track_id, { dependencies });
-    } catch (error) {
-      await persistReelAudioRightsManualAction({ draft, run, actor, error, dependencies });
-      throw error;
+  const stagedReelFiles = [{ storage_provider: "local", storage_key: storageKey }];
+  try {
+    const burnSubtitles = visualMode !== "FULL_AI_GRAPHIC";
+    let selectedAudio = null;
+    if (draft.audio_track_id) {
+      try {
+        selectedAudio = await (dependencies.resolveUsableAudioTrack || resolveUsableAudioTrack)(draft.audio_track_id, { dependencies });
+      } catch (error) {
+        await persistReelAudioRightsManualAction({ draft, run, actor, error, dependencies });
+        throw error;
+      }
     }
-  }
-  const assembled = await (dependencies.assembleReel || assembleReel)({
+    const assembled = await (dependencies.assembleReel || assembleReel)({
     framePaths,
     scenes,
     outputPath,
@@ -1963,7 +2524,11 @@ async function assembleReelCreative({
     throw error;
   }
   const subtitleBuffer = Buffer.from(subtitleText, "utf8");
-  const storedSubtitle = await (dependencies.storeCampaignAsset || storeCampaignAsset)({
+    stagedReelFiles.push({
+      storage_provider: "local",
+      storage_key: `uploads/generated/campaigns/${subtitleFileName}`,
+    });
+    const storedSubtitle = await (dependencies.storeCampaignAsset || storeCampaignAsset)({
     fileName: subtitleFileName,
     buffer: subtitleBuffer,
   });
@@ -2120,8 +2685,8 @@ async function assembleReelCreative({
     actor,
     dependencies,
   });
-  const allAssets = [...safeArray(creativeResult.assets), videoAsset, subtitleAsset];
-  return {
+    const allAssets = [...safeArray(creativeResult.assets), videoAsset, subtitleAsset];
+    return {
     ...creativeResult,
     assets: allAssets,
     asset_urls: [...safeArray(creativeResult.asset_urls), record.url, subtitleRecord.url],
@@ -2136,63 +2701,142 @@ async function assembleReelCreative({
     reel_video_asset: videoAsset,
     reel_subtitle_asset: subtitleAsset,
     manual_action: manualActions[0] || null,
-    manual_actions: manualActions,
+      manual_actions: manualActions,
+      staged_files: [...safeArray(creativeResult.staged_files), ...stagedReelFiles],
+    };
+  } catch (error) {
+    error.staged_files = [
+      ...safeArray(error.staged_files),
+      ...safeArray(creativeResult.staged_files),
+      ...stagedReelFiles,
+    ];
+    throw error;
+  }
+}
+
+function imageAttemptUsage(usage = {}, estimatedCost = 0, costCurrency = "USD") {
+  return {
+    ...mergeGenerationUsage(usage),
+    estimated_cost: Math.max(Number(estimatedCost || 0), 0),
+    cost_currency: trimText(costCurrency || "USD").toUpperCase() || "USD",
   };
 }
 
-function imageAttemptRows(imageResult, recommendation, visualMode) {
-  const format = recommendation.format;
-  const rows = [];
-  imageResult.original_visuals.forEach((visual, assetIndex) => {
-    safeArray(visual.failures).forEach((failure) => rows.push({
-      attempt_number: Math.max(Number(failure.attempt || 1), 1),
-      asset_index: assetIndex,
-      slide_number: Number(visual.sequence || assetIndex + 1),
+function imageReferenceAssets(visual = {}) {
+  return visual.reference_image_url ? [{
+    type: "PRODUCT",
+    url: visual.reference_image_url,
+    checksum_sha256: visual.reference_image_checksum_sha256 || null,
+    database_record_verified: visual.authentic_product_reference?.database_record_verified === true,
+  }] : [];
+}
+
+function failedAttemptRowsForVisual({
+  visual = {},
+  failures = [],
+  format,
+  visualMode,
+  provider,
+  model,
+  fallbackMessage = "Image generation failed",
+}) {
+  const sequence = Math.max(Number(visual.sequence || 1), 1);
+  return safeArray(failures).map((failure, index) => {
+    const promptRevision = failure.prompt_revision || null;
+    const estimatedCost = Number(failure.estimated_cost || 0)
+      + Number(promptRevision?.estimated_cost || 0);
+    return {
+      attempt_number: Math.max(Number(failure.attempt || index + 1), 1),
+      asset_index: sequence - 1,
+      slide_number: sequence,
       format,
       visual_mode: visualMode,
       status: "FAILED",
-      provider: visual.provider || imageResult.provider,
-      model: visual.model || imageResult.model,
-      image_prompt: visual.prompt,
-      provider_response_id: null,
+      provider: trimText(visual.provider || provider || "openai").toLowerCase() || "openai",
+      model: trimText(visual.model || model) || "unknown",
+      image_prompt: trimText(failure.prompt || visual.prompt).slice(0, 12000),
+      prompt_fingerprint: trimText(failure.prompt_fingerprint).slice(0, 128) || null,
+      output_fingerprint: trimText(failure.output_fingerprint).slice(0, 128) || null,
+      provider_response_id: trimText(failure.provider_response_id).slice(0, 300) || null,
       original_asset_url: null,
-      reference_assets: visual.reference_image_url ? [{
-        type: "PRODUCT",
-        url: visual.reference_image_url,
-        checksum_sha256: visual.reference_image_checksum_sha256 || null,
-        database_record_verified: visual.authentic_product_reference?.database_record_verified === true,
-      }] : [],
-      validation_results: null,
-      usage: {},
-      started_at: null,
-      completed_at: new Date(),
-      failure_reason: trimText(failure.message).slice(0, 4000),
+      reference_assets: imageReferenceAssets(visual),
+      validation_results: failure.details || null,
+      image_usage: imageAttemptUsage(failure.image_usage || {}),
+      validation_usage: imageAttemptUsage(failure.validation_usage || {}),
+      prompt_revision: promptRevision,
+      usage: imageAttemptUsage(
+        mergeGenerationUsage(failure.usage || {}, promptRevision?.usage || {}),
+        estimatedCost,
+      ),
+      started_at: failure.started_at || null,
+      completed_at: failure.completed_at || new Date(),
+      failure_reason: normalizeWhitespace(failure.message || fallbackMessage).slice(0, 4000),
+    };
+  });
+}
+
+function imageAttemptRows(imageResult, recommendation, visualMode) {
+  const format = trimText(recommendation?.format).toUpperCase();
+  if (!format) return [];
+  const sanitized = sanitizeImageGenerationEvidence({
+    provider: imageResult?.provider,
+    model: imageResult?.model,
+    completed_visuals: safeArray(imageResult?.original_visuals).length
+      ? safeArray(imageResult.original_visuals)
+      : safeArray(imageResult?.completed_visuals),
+  });
+  const rows = [];
+  sanitized.completed_visuals.forEach((visual) => {
+    rows.push(...failedAttemptRowsForVisual({
+      visual,
+      failures: visual.failures,
+      format,
+      visualMode,
+      provider: sanitized.provider,
+      model: sanitized.model,
     }));
+    const sequence = Math.max(Number(visual.sequence || 1), 1);
     rows.push({
       attempt_number: Math.max(Number(visual.attempt_count || 1), 1),
-      asset_index: assetIndex,
-      slide_number: Number(visual.sequence || assetIndex + 1),
+      asset_index: sequence - 1,
+      slide_number: sequence,
       format,
       visual_mode: visualMode,
       status: "VALIDATED",
-      provider: visual.provider || imageResult.provider,
-      model: visual.model || imageResult.model,
+      provider: visual.provider || sanitized.provider,
+      model: visual.model || sanitized.model || "unknown",
       image_prompt: visual.prompt,
+      prompt_fingerprint: visual.prompt_fingerprint || null,
+      output_fingerprint: visual.output_fingerprint || null,
       provider_response_id: visual.response_id || null,
+      revised_prompt_from_attempt: Number(visual.attempt_count || 1) > 1
+        ? Number(visual.attempt_count) - 1
+        : null,
       original_asset_url: visual.url,
       original_storage_key: visual.storage_key,
       original_checksum_sha256: visual.checksum_sha256,
       original_mime_type: visual.mime_type || "image/jpeg",
       original_width: visual.width,
       original_height: visual.height,
-      reference_assets: visual.reference_image_url ? [{
-        type: "PRODUCT",
-        url: visual.reference_image_url,
-        checksum_sha256: visual.reference_image_checksum_sha256 || null,
-        database_record_verified: visual.authentic_product_reference?.database_record_verified === true,
-      }] : [],
-      validation_results: { passed: true, normalized_for_instagram: true, aspect_ratio: visual.aspect_ratio },
-      usage: visual.usage || {},
+      reference_assets: imageReferenceAssets(visual),
+      validation_results: {
+        passed: true,
+        normalized_for_instagram: true,
+        aspect_ratio: visual.aspect_ratio,
+        text_validation: visual.text_validation || null,
+        poster_validation: visual.poster_validation || null,
+        artwork_validation: visual.artwork_validation || null,
+      },
+      image_usage: imageAttemptUsage(visual.accepted_image_usage || visual.image_usage || {}),
+      validation_usage: imageAttemptUsage(visual.accepted_validation_usage || {}),
+      prompt_revision: null,
+      usage: imageAttemptUsage(
+        mergeGenerationUsage(
+          visual.accepted_image_usage || visual.image_usage || {},
+          visual.accepted_validation_usage || {},
+        ),
+        visual.accepted_estimated_cost || 0,
+      ),
       started_at: null,
       completed_at: new Date(),
       failure_reason: null,
@@ -2201,7 +2845,243 @@ function imageAttemptRows(imageResult, recommendation, visualMode) {
   return rows;
 }
 
-async function persistOriginalAiVisualAssets({ draft, run, imageResult, recommendation, visualMode, AssetModel, replaceSequences = null }) {
+function completedImageGenerationEvidence(imageResult) {
+  if (!imageResult || typeof imageResult !== "object") return null;
+  return sanitizeImageGenerationEvidence({
+    ...imageResult,
+    completed_visuals: safeArray(imageResult.original_visuals).length
+      ? imageResult.original_visuals
+      : imageResult.completed_visuals,
+  });
+}
+
+function failedImageGenerationEvidence(error) {
+  if (!error) return null;
+  if (error.image_generation) return sanitizeImageGenerationEvidence(error.image_generation);
+  const usage = mergeGenerationUsage(error.usage || {});
+  const billable = Boolean(error.response_id || error.output_fingerprint)
+    || Object.values(usage).some(Boolean)
+    || Number(error.estimated_cost || 0) > 0;
+  if (!billable) return null;
+  return sanitizeImageGenerationEvidence({
+    sequence: 1,
+    provider: error.provider || "openai",
+    model: error.model || null,
+    prompt: error.prompt || "",
+    usage,
+    image_usage: usage,
+    estimated_cost: error.estimated_cost,
+    failures: [{
+      attempt: Math.max(Number(error.attempt_count || 1), 1),
+      code: error.code || "social_image_generation_failed",
+      message: error.message,
+      prompt: error.prompt || "",
+      provider_response_id: error.response_id || null,
+      output_fingerprint: error.output_fingerprint || null,
+      image_call_billable: true,
+      image_usage: usage,
+      usage,
+      estimated_cost: error.estimated_cost,
+    }],
+  });
+}
+
+function imageEvidenceHasBillableWork(evidence) {
+  if (!evidence) return false;
+  return Number(evidence.paid_image_call_count || evidence.paid_attempt_count || 0) > 0
+    || Number(evidence.estimated_cost || 0) > 0
+    || safeArray(evidence.completed_visuals).length > 0
+    || safeArray(evidence.failures).length > 0
+    || Object.values(mergeGenerationUsage(evidence.usage || {})).some(Boolean);
+}
+
+function mergeImageAttemptHistory(...collections) {
+  const merged = [];
+  const indexes = new Map();
+  collections.flat().filter(Boolean).forEach((row) => {
+    const key = [
+      row.status || "UNKNOWN",
+      Number(row.slide_number || row.asset_index || 0),
+      Number(row.attempt_number || 0),
+      row.provider_response_id || row.output_fingerprint || row.prompt_fingerprint || "no-provider-id",
+      row.failure_reason || "no-failure",
+    ].join(":");
+    if (indexes.has(key)) {
+      merged[indexes.get(key)] = row;
+      return;
+    }
+    indexes.set(key, merged.length);
+    merged.push(row);
+  });
+  return merged;
+}
+
+async function persistPaidImageCallUsage({
+  callId,
+  draft,
+  operation,
+  status,
+  evidence,
+  requestId = null,
+  dependencies = {},
+} = {}) {
+  if (!imageEvidenceHasBillableWork(evidence)) return null;
+  const LedgerModel = dependencies.SocialPaidCallUsageLedger
+    || (dependencies.SocialGenerationRun || dependencies.SocialPostDraft ? null : SocialPaidCallUsageLedger);
+  if (!LedgerModel) return null;
+  const idempotencyKey = `social-paid-call:${operation}:${draft._id}:${callId}`.slice(0, 300);
+  const row = {
+    idempotency_key: idempotencyKey,
+    generation_run_id: draft.generation_run_id,
+    draft_id: draft._id,
+    operation,
+    status,
+    provider: evidence.provider || "openai",
+    model: evidence.model || null,
+    incurred_at: new Date(),
+    usage: {
+      ...mergeGenerationUsage(evidence.usage || {}),
+      estimated_cost: Math.max(Number(evidence.estimated_cost || 0), 0),
+      cost_currency: trimText(evidence.cost_currency || "USD").toUpperCase() || "USD",
+    },
+    evidence: {
+      ...clone(evidence),
+      paid_call_id: callId,
+      raw_image_bytes_retained: false,
+    },
+    request_id: trimText(requestId).slice(0, 200) || null,
+    recorded_at: new Date(),
+  };
+  try {
+    return await LedgerModel.create(row);
+  } catch (error) {
+    if (error?.code !== 11000 || typeof LedgerModel.findOne !== "function") throw error;
+    return LedgerModel.findOne({ idempotency_key: idempotencyKey });
+  }
+}
+
+function sanitizePaidPromptRunEvidence(promptRun = {}) {
+  return {
+    stage: trimText(promptRun.stage).slice(0, 120) || null,
+    provider: trimText(promptRun.provider).toLowerCase().slice(0, 120) || null,
+    model: trimText(promptRun.model).slice(0, 200) || null,
+    prompt_version: trimText(promptRun.prompt_version).slice(0, 200) || null,
+    provider_response_id: trimText(promptRun.provider_response_id || promptRun.response_id).slice(0, 300) || null,
+    input_fingerprint: trimText(promptRun.input_fingerprint).slice(0, 128) || null,
+    output_fingerprint: trimText(promptRun.output_fingerprint).slice(0, 128) || null,
+    usage: mergeGenerationUsage(promptRun.usage || {}),
+    status: trimText(promptRun.status).toUpperCase().slice(0, 40) || "SUCCEEDED",
+    attempt_count: Math.max(Number(promptRun.attempt_count || 1), 1),
+    validation_errors: safeArray(promptRun.response_metadata?.validation_errors || promptRun.validation_errors)
+      .map((value) => normalizeWhitespace(value).slice(0, 1000))
+      .filter(Boolean)
+      .slice(0, 20),
+    raw_output_retained: false,
+  };
+}
+
+async function persistPaidTextCallUsage({
+  callId,
+  draft,
+  status,
+  promptRuns = [],
+  error = null,
+  requestId = null,
+  dependencies = {},
+} = {}) {
+  const terminal = error ? failedProviderPromptRun(error) : null;
+  const sanitizedRuns = [...safeArray(promptRuns), ...(terminal ? [terminal] : [])]
+    .map(sanitizePaidPromptRunEvidence)
+    .filter((run) => run.provider_response_id || Object.values(run.usage || {}).some((value) => Number(value) > 0));
+  const runs = [...new Map(sanitizedRuns.map((run, index) => {
+    const identity = run.provider_response_id
+      ? `response:${run.provider_response_id}`
+      : run.output_fingerprint
+        ? `output:${run.output_fingerprint}:${run.input_fingerprint || ""}`
+        : `row:${index}`;
+    return [identity, run];
+  })).values()];
+  if (!runs.length) return null;
+  const LedgerModel = dependencies.SocialPaidCallUsageLedger
+    || (dependencies.SocialGenerationRun || dependencies.SocialPostDraft ? null : SocialPaidCallUsageLedger);
+  if (!LedgerModel) return null;
+  const usage = mergeGenerationUsage(runs.map((run) => run.usage || {}));
+  const estimatedCost = Number(runs.reduce(
+    (total, run) => total + estimateOpenAiCostUsd(run.usage || {}),
+    0,
+  ).toFixed(6));
+  const last = runs.at(-1) || {};
+  const idempotencyKey = `social-paid-call:PARTIAL_REGENERATION:${draft._id}:${callId}`.slice(0, 300);
+  const row = {
+    idempotency_key: idempotencyKey,
+    generation_run_id: draft.generation_run_id,
+    draft_id: draft._id,
+    operation: "PARTIAL_REGENERATION",
+    status,
+    provider: last.provider || "openai",
+    model: last.model || null,
+    incurred_at: new Date(),
+    usage: {
+      ...usage,
+      estimated_cost: estimatedCost,
+      cost_currency: "USD",
+    },
+    evidence: {
+      prompt_runs: runs,
+      failure_code: status === "FAILED" ? trimText(error?.code).slice(0, 200) || "social_partial_regeneration_failed" : null,
+      paid_call_id: callId,
+      raw_output_retained: false,
+    },
+    request_id: trimText(requestId).slice(0, 200) || null,
+    recorded_at: new Date(),
+  };
+  try {
+    return await LedgerModel.create(row);
+  } catch (ledgerError) {
+    if (ledgerError?.code !== 11000 || typeof LedgerModel.findOne !== "function") throw ledgerError;
+    return LedgerModel.findOne({ idempotency_key: idempotencyKey });
+  }
+}
+
+function failedImageAttemptRows(error, recommendation, visualMode, sanitizedEvidence = null) {
+  const evidence = sanitizedEvidence || sanitizeImageGenerationEvidence(error?.image_generation || {});
+  const format = trimText(recommendation?.format).toUpperCase();
+  if (!format) return [];
+  const completedRows = imageAttemptRows({
+    provider: evidence.provider,
+    model: evidence.model,
+    original_visuals: evidence.completed_visuals,
+  }, recommendation, visualMode);
+  const terminalVisual = {
+    sequence: Math.max(Number(evidence.sequence || 1), 1),
+    provider: evidence.provider,
+    model: evidence.model,
+    prompt: evidence.prompt,
+  };
+  return [
+    ...completedRows,
+    ...failedAttemptRowsForVisual({
+      visual: terminalVisual,
+      failures: evidence.failures,
+      format,
+      visualMode,
+      provider: evidence.provider,
+      model: evidence.model,
+      fallbackMessage: error?.message,
+    }),
+  ];
+}
+
+async function persistOriginalAiVisualAssets({
+  draft,
+  run,
+  imageResult,
+  recommendation,
+  visualMode,
+  AssetModel,
+  replaceSequences = null,
+  paidCallId = null,
+}) {
   const shape = originalAssetShape(recommendation.format);
   const timestamp = Date.now();
   const assetGroupId = `ai-original-${run._id}-${timestamp}`;
@@ -2310,6 +3190,7 @@ async function persistOriginalAiVisualAssets({ draft, run, imageResult, recommen
       artwork_validation: visual.artwork_validation || null,
       provider_original: visual.provider_original || null,
       normalization: visual.normalization || null,
+      paid_call_id: trimText(paidCallId) || null,
     },
     source_provenance: visual.source_provenance,
     usage_rights_status: visual.usage_rights_status,
@@ -2358,6 +3239,8 @@ async function requestGeneration({
     SocialGenerationRun: dependencies.SocialGenerationRun || SocialGenerationRun,
     SocialGenerationUsageLedger: dependencies.SocialGenerationUsageLedger
       || (dependencies.SocialGenerationRun ? null : SocialGenerationUsageLedger),
+    SocialPaidCallUsageLedger: dependencies.SocialPaidCallUsageLedger
+      || (dependencies.SocialGenerationRun ? null : SocialPaidCallUsageLedger),
     SocialPostDraft: dependencies.SocialPostDraft || SocialPostDraft,
   };
   const session = dependencies.mongoSession || null;
@@ -2470,6 +3353,10 @@ async function requestGeneration({
     return { run, draft: null, reused: false };
   } catch (error) {
     if (error?.code === 11000) {
+      // A duplicate-key error aborts a Mongo transaction. Querying through the
+      // same session would always fail, so transactional callers must resolve
+      // the idempotent winner only after their transaction has unwound.
+      if (session) throw error;
       const run = await applyMongoSession(models.SocialGenerationRun.findOne({ idempotency_key: idempotencyKey }), session);
       const draft = run?.selected_draft_id
         ? await applyMongoSession(models.SocialPostDraft.findById(run.selected_draft_id), session)
@@ -2492,6 +3379,7 @@ function generationErrorIsRetriable(error) {
   if ([400, 401, 403, 404, 409, 422].includes(status)) return false;
   if ([
     "structured_output_invalid",
+    "social_monthly_budget_limit",
     "social_compliance_rejected",
     "social_compliance_exhausted",
     "social_image_generation_failed",
@@ -2516,6 +3404,135 @@ function generationErrorIsRetriable(error) {
   return true;
 }
 
+async function checkpointProviderCallStarted(run, {
+  stage,
+  provider = "openai",
+  model = null,
+  input = null,
+  now = new Date(),
+} = {}) {
+  const normalizedStage = trimText(stage).toUpperCase();
+  const callKey = `${normalizedStage.toLowerCase()}:${crypto.randomUUID()}`;
+  run.provider_call_checkpoints = [
+    ...safeArray(run.provider_call_checkpoints),
+    {
+      call_key: callKey,
+      stage: normalizedStage,
+      status: "STARTED",
+      provider: trimText(provider || "openai").toLowerCase(),
+      model: trimText(model) || null,
+      input_fingerprint: sha256(input || { stage: normalizedStage, generation_run_id: run._id || null }),
+      started_at: now,
+      completed_at: null,
+      uncertain_at: null,
+    },
+  ];
+  run.markModified?.("provider_call_checkpoints");
+  await run.save();
+  return callKey;
+}
+
+async function checkpointProviderCallCompleted(run, callKey, { now = new Date() } = {}) {
+  const checkpoint = safeArray(run.provider_call_checkpoints)
+    .find((row) => trimText(row?.call_key) === trimText(callKey));
+  if (!checkpoint) {
+    const error = new Error("The provider-call checkpoint could not be completed because its durable start marker is missing");
+    error.code = "social_provider_call_checkpoint_missing";
+    throw error;
+  }
+  checkpoint.status = "COMPLETED";
+  checkpoint.completed_at = now;
+  checkpoint.uncertain_at = null;
+  run.markModified?.("provider_call_checkpoints");
+  await run.save();
+  return checkpoint;
+}
+
+function generationLeaseLostError() {
+  const error = new Error("The Social Manager worker no longer owns this generation run lease");
+  error.code = "social_generation_lease_lost";
+  error.statusCode = 409;
+  return error;
+}
+
+async function refreshGenerationLease(run, { now = new Date(), dependencies = {} } = {}) {
+  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  if (!run?._id || typeof RunModel?.updateOne !== "function") return true;
+  const leaseOwner = trimText(run.lease_owner) || GENERATION_WORKER_OWNER;
+  const result = await RunModel.updateOne(
+    { _id: run._id, status: "RUNNING", lease_owner: leaseOwner },
+    { $set: {
+      heartbeat_at: now,
+      lease_expires_at: new Date(now.getTime() + GENERATION_LEASE_MS),
+    } },
+  );
+  const matched = result?.matchedCount ?? result?.n ?? result?.modifiedCount;
+  if (matched === 0) throw generationLeaseLostError();
+  run.lease_owner = leaseOwner;
+  run.heartbeat_at = now;
+  run.lease_expires_at = new Date(now.getTime() + GENERATION_LEASE_MS);
+  return true;
+}
+
+async function withGenerationLeaseHeartbeat(run, operation, { dependencies = {} } = {}) {
+  const intervalMs = Math.max(Number(dependencies.generationLeaseHeartbeatIntervalMs || 60 * 1000), 10);
+  let stopped = false;
+  let inFlight = null;
+  let heartbeatError = null;
+  const beat = () => {
+    if (stopped || inFlight) return;
+    inFlight = refreshGenerationLease(run, { dependencies })
+      .then(() => { heartbeatError = null; })
+      .catch((error) => { heartbeatError = error; })
+      .finally(() => { inFlight = null; });
+  };
+  const timer = setInterval(beat, intervalMs);
+  timer.unref?.();
+  try {
+    const result = await operation();
+    if (inFlight) await inFlight;
+    // The final conditional refresh is the authoritative ownership check. A
+    // transient timer failure must not discard a completed provider response,
+    // and a later successful heartbeat clears the earlier transport error.
+    try {
+      await refreshGenerationLease(run, { dependencies });
+      heartbeatError = null;
+    } catch (error) {
+      heartbeatError = error;
+    }
+    if (heartbeatError?.code === "social_generation_lease_lost") throw heartbeatError;
+    if (heartbeatError) {
+      logger.warn("Generation lease heartbeat could not be confirmed after provider work; the final run CAS remains authoritative", {
+        generationRunId: String(run?._id || ""),
+        errorCode: heartbeatError?.code || null,
+        errorMessage: normalizeWhitespace(heartbeatError?.message || "lease refresh failed").slice(0, 500),
+      });
+    }
+    return result;
+  } finally {
+    stopped = true;
+    clearInterval(timer);
+    if (inFlight) await inFlight;
+  }
+}
+
+async function commitGenerationRunSuccess(run, values, { dependencies = {} } = {}) {
+  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const leaseOwner = trimText(run.lease_owner) || GENERATION_WORKER_OWNER;
+  if (typeof RunModel?.findOneAndUpdate === "function") {
+    const committed = await RunModel.findOneAndUpdate(
+      { _id: run._id, status: "RUNNING", lease_owner: leaseOwner },
+      { $set: values },
+      { new: true },
+    );
+    if (!committed) throw generationLeaseLostError();
+    return committed;
+  }
+  Object.assign(run, values);
+  await run.save();
+  return run;
+}
+
 async function executeGenerationRun(run, { dependencies = {} } = {}) {
   const models = {
     SocialAsset: dependencies.SocialAsset || SocialAsset,
@@ -2524,10 +3541,64 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     SocialResearchSource: dependencies.SocialResearchSource || SocialResearchSource,
     SocialWeeklyPlan: dependencies.SocialWeeklyPlan || SocialWeeklyPlan,
   };
-  const canonicalSettings = await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
-  const runtimeSettings = (dependencies.buildSocialManagerRuntimeSettings || buildSocialManagerRuntimeSettings)(canonicalSettings);
+  let canonicalSettings = null;
+  let runtimeSettings = null;
   let draft = null;
+  let research = null;
+  let decision = null;
+  let imageResult = null;
+  let promptVersionRows = [];
+  const priorRunUsage = clone(run.usage || {});
+  const stagedGenerationFiles = [];
+  let generationFileCleanup = null;
+  const rememberGenerationFiles = (files = []) => {
+    safeArray(files).forEach((file) => {
+      const storageKey = trimText(file?.storage_key || file?.storageKey);
+      if (!storageKey) return;
+      stagedGenerationFiles.push({
+        storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+        storage_key: storageKey,
+      });
+    });
+  };
+  const checkpointPromptRuns = async (promptRuns = []) => {
+    const rows = await ensurePromptVersions({
+      promptRuns,
+      actor: run.initiated_by_admin_id,
+      dependencies,
+    });
+    run.stage_executions = mergeStageExecutionHistory(
+      safeArray(run.stage_executions),
+      stageExecutions(rows),
+    );
+    const usage = mergeGenerationUsage(promptRuns.map((promptRun) => promptRun.usage || {}));
+    const prior = mergeGenerationUsage(run.usage || {});
+    run.usage = {
+      ...mergeGenerationUsage(prior, usage),
+      estimated_cost: Number((Number(prior.estimated_cost || 0) + estimateOpenAiCostUsd(usage)).toFixed(6)),
+      cost_currency: "USD",
+    };
+    await run.save();
+    return rows;
+  };
   try {
+    canonicalSettings = await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
+    runtimeSettings = (dependencies.buildSocialManagerRuntimeSettings || buildSocialManagerRuntimeSettings)(canonicalSettings);
+    await (dependencies.enforceMonthlyBudget || enforceMonthlyBudget)({
+      settings: canonicalSettings,
+      now: new Date(),
+      models: {
+        SocialGenerationRun: typeof dependencies.SocialGenerationRun?.aggregate === "function"
+          ? dependencies.SocialGenerationRun
+          : dependencies.SocialGenerationRun ? { aggregate: async () => [] } : SocialGenerationRun,
+        SocialGenerationUsageLedger: typeof dependencies.SocialGenerationUsageLedger?.aggregate === "function"
+          ? dependencies.SocialGenerationUsageLedger
+          : dependencies.SocialGenerationRun ? null : SocialGenerationUsageLedger,
+        SocialPaidCallUsageLedger: typeof dependencies.SocialPaidCallUsageLedger?.aggregate === "function"
+          ? dependencies.SocialPaidCallUsageLedger
+          : dependencies.SocialGenerationRun ? null : SocialPaidCallUsageLedger,
+      },
+    });
     await updateRunStage(run, "COLLECTING_INTERNAL_SIGNALS");
     const internalSignals = await (dependencies.collectInternalSignals || collectInternalSignals)({ now: new Date(), settings: runtimeSettings, dependencies });
     run.internal_signal_summary = internalSignals.summary;
@@ -2541,13 +3612,57 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       active_campaigns: Number(internalSignals.summary?.recent_product_campaign_count || 0),
     };
     await updateRunStage(run, "RESEARCHING");
-    const research = await (dependencies.collectExternalResearch || collectExternalResearch)({ now: new Date(), internalSignals, settings: runtimeSettings, dependencies });
-    run.input_snapshot_hash = sha256({ internalSignals, research: { mode: research.mode, signals: research.signals, sources: research.sources } });
+    const researchFocus = buildWeeklyCandidateResearchFocus(run.generation_request?.weekly_candidate);
+    const researchCallKey = await checkpointProviderCallStarted(run, {
+      stage: "RESEARCHING",
+      provider: runtimeSettings.models?.text_provider || "openai",
+      model: runtimeSettings.models?.research_model || null,
+      input: {
+        research_focus: researchFocus,
+        generation_request: run.generation_request || normalizeGenerationRequest(),
+        internal_signal_summary: run.internal_signal_summary,
+      },
+    });
+    research = await withGenerationLeaseHeartbeat(run, () => (
+      dependencies.collectExternalResearch || collectExternalResearch
+    )({
+      now: new Date(),
+      internalSignals,
+      settings: runtimeSettings,
+      focus: researchFocus,
+      generationRequest: run.generation_request || normalizeGenerationRequest(),
+      dependencies,
+    }), { dependencies });
+    const researchPromptVersionRows = await checkpointPromptRuns(researchPromptRuns(research));
+    promptVersionRows.push(...researchPromptVersionRows);
+    await checkpointProviderCallCompleted(run, researchCallKey);
+    run.input_snapshot_hash = sha256({
+      internalSignals,
+      research: {
+        mode: research.mode,
+        signals: research.signals,
+        sources: research.sources,
+        research_focus: research.research_focus || researchFocus,
+        claim_coverage: research.claim_coverage || [],
+      },
+    });
     const sourceDocuments = await persistResearchSources({ run, research, dependencies });
     run.research_mode = researchMode(research.mode);
     run.source_ids = sourceDocuments.map((source) => source._id);
     await updateRunStage(run, "ANALYZING_MARKET");
-    const decision = await (dependencies.generateDailyDecision || generateDailyDecision)({
+    const decisionCallKey = await checkpointProviderCallStarted(run, {
+      stage: "ANALYZING_MARKET",
+      provider: runtimeSettings.models?.text_provider || "openai",
+      model: runtimeSettings.models?.strategy_model || runtimeSettings.models?.copy_model || null,
+      input: {
+        research_fingerprint: sha256(research || {}),
+        generation_request: run.generation_request || normalizeGenerationRequest(),
+        internal_signal_summary: run.internal_signal_summary,
+      },
+    });
+    decision = await withGenerationLeaseHeartbeat(run, () => (
+      dependencies.generateDailyDecision || generateDailyDecision
+    )({
       now: new Date(),
       internalSignals,
       research,
@@ -2555,18 +3670,12 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       generationRequest: run.generation_request || normalizeGenerationRequest(),
       providers: dependencies.providers || {},
       dependencies,
-    });
-    const researchPromptRun = research.prompt_version ? [{
-      stage: "research",
-      provider: research.provider,
-      model: research.model,
-      prompt_version: research.prompt_version,
-      usage: research.usage || {},
-    }] : [];
-    const promptVersionRows = await ensurePromptVersions({ promptRuns: [...researchPromptRun, ...(decision.prompt_runs || [])], actor: run.initiated_by_admin_id, dependencies });
+    }), { dependencies });
+    const decisionPromptVersionRows = await checkpointPromptRuns(decision.prompt_runs || []);
+    promptVersionRows.push(...decisionPromptVersionRows);
+    await checkpointProviderCallCompleted(run, decisionCallKey);
     run.daily_market_analysis = decision.market_analysis || null;
     run.content_revision_attempts = decision.content_revision_attempts || [];
-    run.stage_executions = stageExecutions(promptVersionRows);
     await run.save();
 
     const requestedVisualMode = run.generation_request?.visual_mode_resolution?.requested
@@ -2600,7 +3709,18 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     run.image_generation_status = "RUNNING";
     await run.save();
     const visualMode = resolvedVisualMode.effective;
-    const imageResult = await (dependencies.generateSocialVisuals || generateSocialVisuals)({
+    const imageCallKey = await checkpointProviderCallStarted(run, {
+      stage: "GENERATING_IMAGES",
+      provider: runtimeSettings.models?.image_provider || "openai",
+      model: runtimeSettings.models?.image_model || null,
+      input: {
+        recommendation: decision.package.primaryRecommendation,
+        visual_mode: visualMode,
+      },
+    });
+    imageResult = await withGenerationLeaseHeartbeat(run, () => (
+      dependencies.generateSocialVisuals || generateSocialVisuals
+    )({
       draftLike: {
         idempotency_key: `social-draft:${run._id}`,
         generation_date: run.generation_date,
@@ -2620,15 +3740,26 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
                 settings: runtimeSettings,
                 dependencies,
               });
-              return response.output || response;
+              return imagePromptRevisionResult(response);
             }
             : undefined),
       },
-    });
+    }), { dependencies });
+    rememberGenerationFiles(imageResult.original_visuals.flatMap((visual) => safeArray(visual.staged_files)));
     await updateRunStage(run, "VALIDATING_IMAGES");
     run.image_generation_attempts = imageAttemptRows(imageResult, decision.package.primaryRecommendation, visualMode);
     run.image_generation_status = "COMPLETED";
+    const checkpointUsage = mergeGenerationUsage(run.usage || {});
+    const imageCheckpointUsage = mergeGenerationUsage(imageResult.usage || {});
+    run.usage = {
+      ...mergeGenerationUsage(checkpointUsage, imageCheckpointUsage),
+      estimated_cost: Number((
+        Number(checkpointUsage.estimated_cost || 0) + Number(imageResult.estimated_cost || 0)
+      ).toFixed(6)),
+      cost_currency: "USD",
+    };
     await run.save();
+    await checkpointProviderCallCompleted(run, imageCallKey);
     await updateRunStage(run, "COMPOSING_FINAL_ASSETS");
 
     const priorDraft = await models.SocialPostDraft.findOne({ generation_date: run.generation_date }).sort({ revision: -1, created_at: -1 });
@@ -2782,7 +3913,9 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       sourceProvenance: "generated_without_reference",
       usageRightsStatus: "api_permitted",
       allowTemplateOnly: false,
+      onStagedFile: (file) => rememberGenerationFiles([file]),
     });
+    rememberGenerationFiles(creativeResult.staged_files || creativeResult.assets);
     if (creativeResult.validation_status === "invalid" || !creativeResult.assets.length) {
       const error = new Error("The final AI-based creative did not pass required asset validation");
       error.code = "social_creative_validation_failed";
@@ -2800,7 +3933,9 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       dependencies,
       AssetModel: models.SocialAsset,
     });
+    rememberGenerationFiles(creativeResult.staged_files || creativeResult.assets);
     if (visualMode === "FULL_AI_GRAPHIC") applyFullAiDraftManifest(draft, creativeResult.assets);
+    await refreshGenerationLease(run, { dependencies });
     draft.asset_ids = creativeAssetIds(creativeResult.assets);
     draft.final_composed_asset_ids = creativeAssetIds(creativeResult.assets, { publishableCompositionOnly: true });
     draft.creative_readiness = {
@@ -2828,33 +3963,43 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     await updateRunStage(run, "AWAITING_REVIEW");
     await draft.save();
 
-    run.status = "SUCCEEDED";
-    run.current_stage = "COMPLETED";
-    run.selected_draft_id = draft._id;
-    run.used_fallback = false;
-    run.fallback_reason = null;
-    run.deterministic_content_fallback_used = false;
-    run.template_only_visual_fallback_used = false;
-    run.full_ai_generation = true;
-    run.stage_executions = stageExecutions(promptVersionRows);
-    run.candidate_count = Number(decision.candidate_count || 0);
-    run.candidate_summaries = candidateSummaries(decision);
-    const combinedUsage = {
+    // These exact prompt executions were persisted before image generation.
+    // Do not append the same paid calls a second time on success.
+    const currentAttemptUsage = {
       input_tokens: Number(decision.usage?.input_tokens || 0) + Number(research.usage?.input_tokens || 0),
       output_tokens: Number(decision.usage?.output_tokens || 0) + Number(research.usage?.output_tokens || 0),
       total_tokens: Number(decision.usage?.total_tokens || 0) + Number(research.usage?.total_tokens || 0),
     };
-    run.usage = {
+    const currentImageUsage = mergeGenerationUsage(imageResult.usage || {});
+    const combinedUsage = mergeGenerationUsage(priorRunUsage, currentAttemptUsage, currentImageUsage);
+    const completedUsage = {
       ...combinedUsage,
-      estimated_cost: Number((estimateOpenAiCostUsd(combinedUsage) + Number(imageResult.estimated_cost || 0)).toFixed(6)),
+      estimated_cost: Number((
+        Number(priorRunUsage.estimated_cost || 0)
+        + estimateOpenAiCostUsd(currentAttemptUsage)
+        + Number(imageResult.estimated_cost || 0)
+      ).toFixed(6)),
       cost_currency: "USD",
     };
-    run.completed_at = new Date();
-    run.finished_at = run.completed_at;
-    run.lease_owner = null;
-    run.lease_expires_at = null;
-    run.last_error = null;
-    await run.save();
+    const completedAt = new Date();
+    run = await commitGenerationRunSuccess(run, {
+      status: "SUCCEEDED",
+      current_stage: "COMPLETED",
+      selected_draft_id: draft._id,
+      used_fallback: false,
+      fallback_reason: null,
+      deterministic_content_fallback_used: false,
+      template_only_visual_fallback_used: false,
+      full_ai_generation: true,
+      candidate_count: Number(decision.candidate_count || 0),
+      candidate_summaries: candidateSummaries(decision),
+      usage: completedUsage,
+      completed_at: completedAt,
+      finished_at: completedAt,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_error: null,
+    }, { dependencies });
     if (run.weekly_plan_id && run.weekly_candidate_id) {
       await models.SocialWeeklyPlan.updateOne(
         { _id: run.weekly_plan_id, "selected_posts.candidateId": run.weekly_candidate_id },
@@ -2885,8 +4030,8 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       run,
       action: "DRAFT_GENERATED",
       summary: visualMode === "FULL_AI_GRAPHIC"
-        ? "Generated one primary and two alternatives through the staged AI workflow, then created and independently validated a complete OpenAI-rendered Pink Paisa graphic with no post-generation pixel overlays."
-        : "Generated one primary and two alternatives through the staged AI workflow, then created original OpenAI artwork and an exact-copy final composition.",
+        ? `${run.weekly_plan_id ? "Generated the administrator-approved weekly primary" : "Generated one primary and two alternatives"} through the staged AI workflow, then created and independently validated a complete OpenAI-rendered Pink Paisa graphic with no post-generation pixel overlays.`
+        : `${run.weekly_plan_id ? "Generated the administrator-approved weekly primary" : "Generated one primary and two alternatives"} through the staged AI workflow, then created original OpenAI artwork and an exact-copy final composition.`,
       actor: run.initiated_by_admin_id,
       actorType: run.initiated_by_admin_id ? "ADMIN" : "WORKER",
       promptVersionIds: draft.prompt_version_ids,
@@ -2915,8 +4060,147 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     }
     return draft;
   } catch (error) {
+    const postReadySignal = draft
+      && (String(draft.status).toUpperCase() === "NEEDS_REVIEW"
+        || ["AWAITING_REVIEW", "COMPLETED"].includes(String(run.current_stage).toUpperCase())
+        || String(run.status).toUpperCase() === "SUCCEEDED");
+    if (postReadySignal) {
+      try {
+        let committed = await authoritativeCompletedGenerationDraft(run._id, draft._id, { dependencies });
+        if (!committed) {
+          const reconciled = await reconcileCommittedGenerationDraft(run._id, {
+            now: new Date(),
+            requireExpiredLease: false,
+            dependencies,
+          });
+          if (reconciled) committed = { run: reconciled.run, draft: reconciled.draft };
+        }
+        if (committed) {
+          try {
+            if (committed.run.weekly_plan_id && committed.run.weekly_candidate_id) {
+              await reconcileSucceededWeeklyRunLink(committed.run._id, { dependencies });
+            }
+            await reconcileSucceededGenerationAudit(committed.run._id, { dependencies });
+          } catch (followUpError) {
+            logger.warn("A completed Social Manager draft needs follow-up finalization reconciliation", {
+              generationRunId: String(committed.run._id),
+              draftId: String(committed.draft._id),
+              errorCode: followUpError?.code || null,
+              errorMessage: normalizeWhitespace(followUpError?.message || "generation finalization follow-up failed").slice(0, 500),
+            });
+          }
+          return committed.draft;
+        }
+      } catch (reconciliationError) {
+        error.reconciliation_error = {
+          code: reconciliationError?.code || null,
+          message: "The completed generation outcome could not be reconciled safely; committed draft media was preserved.",
+        };
+        error.code = "social_generation_finalization_reconciliation_required";
+        throw error;
+      }
+    }
+    if (transactionCommitIsIndeterminate(error)) {
+      error.reconciliation_error = {
+        code: "UnknownTransactionCommitResult",
+        message: "Generation finalization remains indeterminate; draft assets and run state were preserved for deferred reconciliation.",
+      };
+      error.code = "social_generation_finalization_reconciliation_required";
+      throw error;
+    }
+    rememberGenerationFiles(error.staged_files);
     const failedAt = new Date();
+    if (draft) {
+      await models.SocialAsset.updateMany(
+        { draft_id: draft._id, is_active: true, deleted_at: null },
+        { $set: { is_active: false, deleted_at: failedAt } },
+      ).catch(() => null);
+    }
+    generationFileCleanup = await cleanupUncommittedFinalFiles(stagedGenerationFiles, {
+      AssetModel: models.SocialAsset,
+      dependencies,
+    });
+    if (generationFileCleanup.failed) error.staged_file_cleanup = generationFileCleanup;
     const failedStage = run.current_stage;
+    const researchPromptEvidence = researchPromptRuns(research);
+    const terminalPromptEvidence = failedProviderPromptRun(error);
+    const promptEvidenceByKey = new Map();
+    [
+      ...researchPromptEvidence,
+      ...(safeArray(error.prompt_runs).length
+        ? safeArray(error.prompt_runs)
+        : safeArray(decision?.prompt_runs)),
+      ...(terminalPromptEvidence ? [terminalPromptEvidence] : []),
+    ].forEach((promptRun) => {
+      if (!promptRun?.stage || !promptRun?.prompt_version) return;
+      const key = [
+        promptRun.stage,
+        promptRun.provider_response_id || promptRun.response_id || "no-response",
+        promptRun.input_fingerprint || "no-input",
+        promptRun.output_fingerprint || "no-output",
+        promptRun.status || "SUCCEEDED",
+      ].join(":");
+      promptEvidenceByKey.set(key, promptRun);
+    });
+    const failurePromptRuns = [...promptEvidenceByKey.values()];
+    let failurePromptVersionRows = [];
+    if (failurePromptRuns.length) {
+      try {
+        failurePromptVersionRows = await ensurePromptVersions({
+          promptRuns: failurePromptRuns,
+          actor: run.initiated_by_admin_id,
+          dependencies,
+        });
+      } catch (promptEvidenceError) {
+        logger.warn("Unable to link failed Social Manager provider evidence to immutable prompt records", {
+          generationRunId: String(run._id),
+          originalErrorCode: error.code || "social_generation_failed",
+          evidenceErrorCode: promptEvidenceError.code || null,
+          evidenceErrorMessage: normalizeWhitespace(promptEvidenceError.message).slice(0, 1000),
+        });
+        failurePromptVersionRows = failurePromptRuns.map((promptRun) => ({ promptRun, document: null }));
+      }
+    }
+    const failedStageExecutions = stageExecutions(failurePromptVersionRows);
+    if (!failedStageExecutions.some((execution) => execution.status === "FAILED")) {
+      failedStageExecutions.push({
+        stage: failedStage || "FAILED",
+        status: "FAILED",
+        provider: error.provider || error.image_generation?.provider || null,
+        model: error.model || error.image_generation?.model || null,
+        prompt_version_id: null,
+        prompt_semantic_version: null,
+        runtime_prompt_version: error.prompt_version || null,
+        system_instructions_version: error.prompt_version || null,
+        input_fingerprint: error.input_fingerprint || null,
+        output_fingerprint: error.output_fingerprint
+          || (trimText(error.raw_output) ? sha256(error.raw_output) : null),
+        provider_response_id: error.response_id || null,
+        input_tokens: Number(error.usage?.input_tokens || 0),
+        output_tokens: Number(error.usage?.output_tokens || 0),
+        total_tokens: Number(error.usage?.total_tokens || 0),
+        estimated_cost: estimateOpenAiCostUsd(error.usage || {}),
+        attempt_count: Math.max(Number(error.attempt_count || 1), 1),
+        retry_number: Math.max(Number(error.attempt_count || 1) - 1, 0),
+        output_json: null,
+        request_metadata: null,
+        response_metadata: {
+          validation_errors: safeArray(error.validation_errors)
+            .map((value) => normalizeWhitespace(value).slice(0, 1000))
+            .filter(Boolean)
+            .slice(0, 20),
+          raw_output_retained: false,
+        },
+        started_at: error.started_at || run.started_at || null,
+        finished_at: error.completed_at || failedAt,
+        error_code: error.code || "social_generation_failed",
+        error_message: safeDurableErrorMessage(error),
+      });
+    }
+    run.stage_executions = mergeStageExecutionHistory(
+      safeArray(run.stage_executions),
+      failedStageExecutions,
+    );
     if (safeArray(error.content_revision_attempts).length) {
       run.content_revision_attempts = error.content_revision_attempts;
     }
@@ -2925,7 +4209,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       draft.failed_at = failedAt;
       draft.last_error = {
         code: error.code || "social_generation_failed",
-        message: normalizeWhitespace(error.message).slice(0, 4000),
+        message: safeDurableErrorMessage(error),
         stage: run.current_stage,
         is_retriable: false,
         occurred_at: failedAt,
@@ -2942,13 +4226,83 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         { $set: { "story_plan.$.status": "FAILED" } },
       ).catch(() => null);
     }
-    const retriable = generationErrorIsRetriable(error) && Number(run.attempt_count || 0) < Number(run.max_attempts || 1);
+    const uncertainProviderCheckpoints = safeArray(run.provider_call_checkpoints)
+      .filter((checkpoint) => ["STARTED", "UNCERTAIN"].includes(String(checkpoint?.status).toUpperCase()));
+    uncertainProviderCheckpoints.forEach((checkpoint) => {
+      if (String(checkpoint.status).toUpperCase() === "STARTED") {
+        checkpoint.status = "UNCERTAIN";
+        checkpoint.uncertain_at = failedAt;
+      }
+    });
+    if (uncertainProviderCheckpoints.length) run.markModified?.("provider_call_checkpoints");
+    const billableWorkOccurred = uncertainProviderCheckpoints.length > 0 || safeArray(run.stage_executions).some((execution) => (
+      trimText(execution.provider)
+      && (trimText(execution.provider_response_id)
+        || Number(execution.total_tokens || 0) > 0
+        || Number(execution.estimated_cost || 0) > 0)
+    )) || safeArray(run.image_generation_attempts).some((attempt) => (
+      trimText(attempt.provider_response_id)
+      || Number(attempt.estimated_cost || 0) > 0
+      || Number(attempt.total_tokens || 0) > 0
+    ));
+    // Provider clients already perform their own bounded retry loop. Once any
+    // billable response is checkpointed, never restart the entire workflow
+    // automatically: that would buy research/copy/images again after a local
+    // database, filesystem, or process failure. Recovery remains an explicit,
+    // visible administrator action with retained evidence.
+    const retriable = !billableWorkOccurred
+      && generationErrorIsRetriable(error)
+      && Number(run.attempt_count || 0) < Number(run.max_attempts || 1);
     const complianceFailure = error.code === "social_compliance_rejected" || error.code === "social_compliance_exhausted";
     const imageFailure = String(error.code || "").startsWith("social_image_")
       || ["GENERATING_IMAGES", "VALIDATING_IMAGES"].includes(failedStage);
+    const metadataPoorImageFailure = imageFailure && !error.image_generation ? {
+      sequence: 1,
+      provider: error.provider || "openai",
+      model: error.model || null,
+      prompt: error.prompt || "",
+      usage: error.usage || {},
+      image_usage: error.usage || {},
+      estimated_cost: error.estimated_cost,
+      failures: (error.response_id || error.output_fingerprint || Object.values(mergeGenerationUsage(error.usage || {})).some(Boolean)) ? [{
+        attempt: Math.max(Number(error.attempt_count || 1), 1),
+        code: error.code || "social_image_generation_failed",
+        message: safeDurableErrorMessage(error),
+        prompt: error.prompt || "",
+        provider_response_id: error.response_id || null,
+        image_call_billable: Boolean(error.response_id) || Object.values(mergeGenerationUsage(error.usage || {})).some(Boolean),
+        image_usage: error.usage || {},
+        usage: error.usage || {},
+        estimated_cost: error.estimated_cost,
+        output_fingerprint: error.output_fingerprint || null,
+      }] : [],
+    } : null;
+    const completedImageEvidence = completedImageGenerationEvidence(imageResult);
+    const errorImageEvidence = imageFailure && (error.image_generation || metadataPoorImageFailure)
+      ? sanitizeImageGenerationEvidence(error.image_generation || metadataPoorImageFailure)
+      : null;
+    const sanitizedImageEvidence = imageEvidenceHasBillableWork(errorImageEvidence)
+      ? errorImageEvidence
+      : imageEvidenceHasBillableWork(completedImageEvidence)
+        ? completedImageEvidence
+        : null;
     run.status = retriable ? "PENDING" : complianceFailure ? "FAILED_COMPLIANCE" : imageFailure ? "FAILED_IMAGE_GENERATION" : "FAILED";
     run.current_stage = retriable ? "QUEUED" : "FAILED";
-    if (imageFailure) run.image_generation_status = "FAILED";
+    if (imageFailure) {
+      run.image_generation_status = "FAILED";
+      const failedAttempts = failedImageAttemptRows(
+        error,
+        decision?.package?.primaryRecommendation,
+        run.generation_request?.visual_mode || "AI_VISUAL_WITH_EXACT_OVERLAY",
+        sanitizedImageEvidence,
+      );
+      if (failedAttempts.length) {
+        run.image_generation_attempts = mergeImageAttemptHistory(
+          safeArray(run.image_generation_attempts),
+          failedAttempts,
+        );
+      }
+    }
     if (draft) run.failed_draft_id = draft._id;
     run.retry_count = Number(run.retry_count || 0) + (retriable ? 1 : 0);
     run.available_at = retriable ? new Date(failedAt.getTime() + Math.min(30000 * (2 ** Number(run.retry_count || 0)), 30 * 60 * 1000)) : run.available_at;
@@ -2956,29 +4310,981 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     run.finished_at = retriable ? null : failedAt;
     run.lease_owner = null;
     run.lease_expires_at = null;
+    const promptUsage = failurePromptRuns.length
+      ? mergeGenerationUsage(failurePromptRuns.map((promptRun) => promptRun.usage || {}))
+      : imageFailure
+        ? mergeGenerationUsage(decision?.usage || {}, research?.usage || {})
+        : mergeGenerationUsage(error.usage || decision?.usage || {}, research?.usage || {});
+    const failedImageUsage = sanitizedImageEvidence
+      ? mergeGenerationUsage(sanitizedImageEvidence.usage || {})
+      : mergeGenerationUsage();
+    const priorFailureUsage = priorRunUsage;
+    const combinedFailureUsage = mergeGenerationUsage(priorFailureUsage, promptUsage, failedImageUsage);
+    const imageFailureCost = sanitizedImageEvidence
+      ? Number(sanitizedImageEvidence.estimated_cost || 0)
+      : 0;
+    run.usage = {
+      ...combinedFailureUsage,
+      estimated_cost: Number((
+        Number(priorFailureUsage.estimated_cost || 0)
+        // Image usage is retained in the aggregate evidence, but image calls
+        // are priced by the image model's per-output estimate below. Feeding
+        // those usage fields into the text-token estimator would charge one
+        // failed image attempt twice.
+        + estimateOpenAiCostUsd(promptUsage)
+        + imageFailureCost
+      ).toFixed(6)),
+      cost_currency: "USD",
+    };
+    const failureDetails = {};
+    if (error.compliance) {
+      failureDetails.compliance = error.compliance;
+      failureDetails.compliance_history = error.compliance_history || [];
+    }
+    if (sanitizedImageEvidence) failureDetails.image_generation = sanitizedImageEvidence;
+    if (generationFileCleanup?.attempted) failureDetails.final_asset_cleanup = generationFileCleanup;
+    if (uncertainProviderCheckpoints.length) {
+      failureDetails.provider_call_uncertain = true;
+      failureDetails.provider_call_checkpoints = uncertainProviderCheckpoints.map((checkpoint) => ({
+        call_key: checkpoint.call_key,
+        stage: checkpoint.stage,
+        provider: checkpoint.provider,
+        model: checkpoint.model,
+        input_fingerprint: checkpoint.input_fingerprint,
+        started_at: checkpoint.started_at,
+        uncertain_at: checkpoint.uncertain_at,
+      }));
+    }
+    if (terminalPromptEvidence) {
+      failureDetails.provider_call = {
+        stage: terminalPromptEvidence.stage,
+        provider: terminalPromptEvidence.provider,
+        model: terminalPromptEvidence.model,
+        prompt_version: terminalPromptEvidence.prompt_version,
+        response_id: terminalPromptEvidence.response_id,
+        input_fingerprint: terminalPromptEvidence.input_fingerprint,
+        output_fingerprint: terminalPromptEvidence.output_fingerprint,
+        usage: terminalPromptEvidence.usage,
+        attempt_count: terminalPromptEvidence.attempt_count,
+        validation_errors: terminalPromptEvidence.response_metadata?.validation_errors || [],
+        attempts: terminalPromptEvidence.response_metadata?.attempts || [],
+        raw_output_retained: false,
+      };
+    } else if (safeArray(error.validation_errors).length) {
+      failureDetails.validation_errors = safeArray(error.validation_errors)
+        .map((value) => normalizeWhitespace(value).slice(0, 1000))
+        .filter(Boolean)
+        .slice(0, 20);
+      failureDetails.invalid_output_fingerprint = trimText(error.output_fingerprint)
+        || (trimText(error.raw_output) ? sha256(error.raw_output) : null);
+      failureDetails.raw_output_retained = false;
+    }
     run.last_error = {
       stage: failedStage || null,
       code: error.code || "social_generation_failed",
-      message: normalizeWhitespace(error.message).slice(0, 4000),
+      message: safeDurableErrorMessage(error),
       is_retriable: retriable,
-      details: error.compliance
-        ? { compliance: error.compliance, compliance_history: error.compliance_history || [] }
-        : error.image_generation
-          ? { image_generation: error.image_generation }
-          : null,
+      details: Object.keys(failureDetails).length ? failureDetails : null,
       occurred_at: failedAt,
     };
     await run.save();
-    await appendAudit({ entityType: "GENERATION_RUN", entityId: run._id, run, action: "GENERATION_FAILED", status: "FAILED", summary: retriable ? "Social generation failed temporarily and was queued for retry." : draft ? "Social generation failed; its incomplete draft was marked failed and cannot be approved." : "Social generation failed and no completed draft was created.", actor: run.initiated_by_admin_id, actorType: "WORKER", retryCount: run.retry_count, error, metadata: { next_retry_at: run.next_retry_at, failed_stage: failedStage, failure_status: run.status, failed_draft_id: draft?._id || null }, dependencies });
+    const failurePromptVersionIds = failurePromptVersionRows
+      .map((row) => row.document?._id)
+      .filter(Boolean);
+    const failureProviderModels = failurePromptRuns
+      .map((promptRun) => ({
+        provider: promptRun.provider,
+        model: promptRun.model,
+        stage: promptRun.stage,
+      }));
+    if (sanitizedImageEvidence?.provider && sanitizedImageEvidence?.model) {
+      failureProviderModels.push({
+        provider: sanitizedImageEvidence.provider,
+        model: sanitizedImageEvidence.model,
+        stage: "image_generation",
+      });
+    }
+    await appendAudit({
+      entityType: "GENERATION_RUN",
+      entityId: run._id,
+      run,
+      action: "GENERATION_FAILED",
+      status: "FAILED",
+      summary: retriable
+        ? "Social generation failed temporarily and was queued for retry."
+        : draft
+          ? "Social generation failed; its incomplete draft was marked failed and cannot be approved."
+          : "Social generation failed and no completed draft was created.",
+      actor: run.initiated_by_admin_id,
+      actorType: "WORKER",
+      promptVersionIds: failurePromptVersionIds,
+      sourceIds: safeArray(run.source_ids),
+      providerModels: failureProviderModels,
+      retryCount: run.retry_count,
+      error,
+      metadata: {
+        next_retry_at: run.next_retry_at,
+        failed_stage: failedStage,
+        failure_status: run.status,
+        failed_draft_id: draft?._id || null,
+        usage: clone(run.usage),
+        prompt_execution_count: run.stage_executions.length,
+        failed_prompt_execution_count: run.stage_executions.filter((execution) => execution.status === "FAILED").length,
+        validation_error_count: terminalPromptEvidence?.response_metadata?.validation_errors?.length
+          || safeArray(error.validation_errors).length,
+        invalid_output_fingerprint: terminalPromptEvidence?.output_fingerprint
+          || (trimText(error.raw_output) ? sha256(error.raw_output) : null),
+        image_attempt_count: safeArray(run.image_generation_attempts).length,
+        raw_provider_output_retained: false,
+      },
+      dependencies,
+    });
     if (!retriable) throw error;
     return null;
   }
 }
 
-async function processPendingSocialGenerationRuns({ now = new Date(), limit = 1, dependencies = {} } = {}) {
+function generationRunLeaseExpired(run, now = new Date()) {
+  const leaseExpiry = run?.lease_expires_at ? new Date(run.lease_expires_at) : null;
+  if (leaseExpiry && !Number.isNaN(leaseExpiry.getTime())) return leaseExpiry.getTime() <= now.getTime();
+  const duplicateStartedAt = run?.started_at ? new Date(run.started_at) : null;
+  return trimText(run?.idempotency_key).startsWith("social-duplicate:")
+    && duplicateStartedAt
+    && !Number.isNaN(duplicateStartedAt.getTime())
+    && duplicateStartedAt.getTime() <= now.getTime() - PAID_OPERATION_LEASE_MS;
+}
+
+async function reconcileCommittedGenerationDraft(runId, {
+  now = new Date(),
+  requireExpiredLease = true,
+  dependencies = {},
+} = {}) {
+  const BaseRunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const BaseDraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const BaseAssetModel = dependencies.SocialAsset || SocialAsset;
+  const BasePlanModel = dependencies.SocialWeeklyPlan || SocialWeeklyPlan;
+  return runInMongoTransaction(dependencies, async (session) => {
+    const RunModel = bindModelToMongoSession(BaseRunModel, session);
+    const DraftModel = bindModelToMongoSession(BaseDraftModel, session);
+    const AssetModel = bindModelToMongoSession(BaseAssetModel, session);
+    const PlanModel = bindModelToMongoSession(BasePlanModel, session);
+    const transactionDependencies = {
+      ...dependencies,
+      mongoSession: session,
+      SocialGenerationRun: RunModel,
+      SocialPostDraft: DraftModel,
+      SocialAsset: AssetModel,
+      SocialWeeklyPlan: PlanModel,
+      SocialAuditLog: bindModelToMongoSession(dependencies.SocialAuditLog || SocialAuditLog, session),
+    };
+    const run = await RunModel.findById(runId);
+    if (!run
+      || String(run.status).toUpperCase() !== "RUNNING"
+      || (requireExpiredLease && !generationRunLeaseExpired(run, now))) return null;
+
+    let draftQuery = DraftModel.findOne({
+      generation_run_id: run._id,
+      status: "NEEDS_REVIEW",
+      "approval_json.status": "NEEDS_REVIEW",
+      "creative_readiness.ai_visual_status": "COMPLETED",
+    });
+    if (typeof draftQuery?.sort === "function") draftQuery = draftQuery.sort({ revision: -1, created_at: -1 });
+    const draft = await draftQuery;
+    if (!draft || !safeArray(draft.asset_ids).length || !safeArray(draft.final_composed_asset_ids).length) return null;
+    try {
+      (dependencies.validateSocialPackage || validateSocialPackage)(clone(draft.current_package || draft.result_json));
+    } catch (_error) {
+      return null;
+    }
+
+    let assetQuery = AssetModel.find({ draft_id: draft._id, is_active: true, deleted_at: null });
+    if (typeof assetQuery?.sort === "function") assetQuery = assetQuery.sort({ slide_number: 1, created_at: 1 });
+    const assets = await maybeLean(assetQuery);
+    const readiness = (dependencies.reviewAssetReadiness || reviewAssetReadiness)(safeArray(assets), { draft });
+    if (!readiness?.passed) return null;
+
+    if (run.weekly_plan_id || draft.weekly_plan_id) {
+      const planId = run.weekly_plan_id || draft.weekly_plan_id;
+      const candidateId = run.weekly_candidate_id || draft.candidate_id;
+      const plan = await PlanModel.findById(planId);
+      const selected = weeklyPlanItemByCandidate(plan, candidateId);
+      if (!plan || !selected) return null;
+      selected.draft_id = draft._id;
+      selected.generation_run_id = run._id;
+      selected.status = "NEEDS_REVIEW";
+      if (draft.bundle_role === "COMPANION_STORY") selected.parent_draft_id = draft.parent_draft_id || null;
+      await plan.save(session ? { session } : undefined);
+    }
+
+    run.status = "SUCCEEDED";
+    run.current_stage = "COMPLETED";
+    run.selected_draft_id = draft._id;
+    run.failed_draft_id = null;
+    run.image_generation_status = "COMPLETED";
+    run.used_fallback = false;
+    run.deterministic_content_fallback_used = false;
+    run.template_only_visual_fallback_used = false;
+    run.full_ai_generation = draft.generation_mode === "FULL_AI";
+    run.completed_at = now;
+    run.finished_at = now;
+    run.lease_owner = null;
+    run.lease_expires_at = null;
+    run.last_error = null;
+    await run.save(session ? { session } : undefined);
+    await appendAudit({
+      entityType: "GENERATION_RUN",
+      entityId: run._id,
+      draft,
+      run,
+      action: "GENERATION_RUN_RECONCILED",
+      summary: "Recovered a completed reviewable draft after its generation worker lease expired, without replaying any provider calls.",
+      actor: run.initiated_by_admin_id,
+      actorType: "WORKER",
+      promptVersionIds: safeArray(draft.prompt_version_ids),
+      sourceIds: safeArray(draft.research_source_ids),
+      metadata: {
+        selected_draft_id: draft._id,
+        paid_provider_calls_replayed: false,
+        prior_run_status: "RUNNING",
+      },
+      dependencies: transactionDependencies,
+    });
+    return { run, draft };
+  });
+}
+
+async function authoritativeCompletedGenerationDraft(runId, draftId, { dependencies = {} } = {}) {
   const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const AssetModel = dependencies.SocialAsset || SocialAsset;
+  const [run, draft] = await Promise.all([
+    RunModel.findById(runId),
+    DraftModel.findById(draftId),
+  ]);
+  if (!run || !draft
+    || String(run.status).toUpperCase() !== "SUCCEEDED"
+    || String(run.selected_draft_id || "") !== String(draft._id)
+    || String(draft.generation_run_id || "") !== String(run._id)
+    || String(draft.status).toUpperCase() !== "NEEDS_REVIEW") return null;
+  const assetQuery = AssetModel.find({ draft_id: draft._id, is_active: true, deleted_at: null });
+  const assets = await maybeLean(typeof assetQuery?.sort === "function" ? assetQuery.sort({ slide_number: 1 }) : assetQuery);
+  const readiness = (dependencies.reviewAssetReadiness || reviewAssetReadiness)(safeArray(assets), { draft });
+  return readiness?.passed ? { run, draft } : null;
+}
+
+async function reconcileSucceededGenerationAudit(runId, { dependencies = {} } = {}) {
+  const BaseRunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const BaseDraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const BaseAuditModel = dependencies.SocialAuditLog || SocialAuditLog;
+  return runInMongoTransaction(dependencies, async (session) => {
+    const RunModel = bindModelToMongoSession(BaseRunModel, session);
+    const DraftModel = bindModelToMongoSession(BaseDraftModel, session);
+    const AuditModel = bindModelToMongoSession(BaseAuditModel, session);
+    const run = await RunModel.findById(runId);
+    if (!run || String(run.status).toUpperCase() !== "SUCCEEDED" || !run.selected_draft_id) return null;
+    const draft = await DraftModel.findById(run.selected_draft_id);
+    if (!draft || String(draft.status).toUpperCase() !== "NEEDS_REVIEW") return null;
+    const existing = await maybeLean(AuditModel.findOne({
+      generation_run_id: run._id,
+      draft_id: draft._id,
+      action: { $in: ["DRAFT_GENERATED", "DRAFT_GENERATED_RECONCILED", "GENERATION_RUN_RECONCILED"] },
+      action_status: "SUCCEEDED",
+    }));
+    if (existing) return { run, draft, audit: existing, reused: true };
+    const audit = await appendAudit({
+      entityType: "DRAFT",
+      entityId: draft._id,
+      draft,
+      run,
+      action: "DRAFT_GENERATED_RECONCILED",
+      summary: "Recorded the successful draft-generation outcome after an interrupted final audit write, without replaying any provider calls.",
+      actor: run.initiated_by_admin_id,
+      actorType: "WORKER",
+      promptVersionIds: safeArray(draft.prompt_version_ids),
+      sourceIds: safeArray(draft.research_source_ids),
+      metadata: { paid_provider_calls_replayed: false },
+      dependencies: {
+        ...dependencies,
+        mongoSession: session,
+        SocialAuditLog: AuditModel,
+      },
+    });
+    return { run, draft, audit, reused: false };
+  });
+}
+
+async function reconcileSucceededWeeklyRunLink(runId, { now = new Date(), dependencies = {} } = {}) {
+  const BaseRunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const BaseDraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const BasePlanModel = dependencies.SocialWeeklyPlan || SocialWeeklyPlan;
+  return runInMongoTransaction(dependencies, async (session) => {
+    const RunModel = bindModelToMongoSession(BaseRunModel, session);
+    const DraftModel = bindModelToMongoSession(BaseDraftModel, session);
+    const PlanModel = bindModelToMongoSession(BasePlanModel, session);
+    const transactionDependencies = {
+      ...dependencies,
+      mongoSession: session,
+      SocialGenerationRun: RunModel,
+      SocialPostDraft: DraftModel,
+      SocialWeeklyPlan: PlanModel,
+      SocialAuditLog: bindModelToMongoSession(dependencies.SocialAuditLog || SocialAuditLog, session),
+    };
+    const run = await RunModel.findById(runId);
+    if (!run
+      || String(run.status).toUpperCase() !== "SUCCEEDED"
+      || !run.selected_draft_id
+      || !run.weekly_plan_id
+      || !run.weekly_candidate_id) return null;
+    const draft = await DraftModel.findById(run.selected_draft_id);
+    if (!draft
+      || String(draft.status).toUpperCase() !== "NEEDS_REVIEW"
+      || String(draft.generation_run_id || "") !== String(run._id)) return null;
+    const plan = await PlanModel.findById(run.weekly_plan_id);
+    const selected = weeklyPlanItemByCandidate(plan, run.weekly_candidate_id);
+    if (!plan || !selected) return null;
+    const linked = String(selected.draft_id || "") === String(draft._id)
+      && String(selected.generation_run_id || "") === String(run._id)
+      && String(selected.status).toUpperCase() === "NEEDS_REVIEW"
+      && (draft.bundle_role !== "COMPANION_STORY"
+        || String(selected.parent_draft_id || "") === String(draft.parent_draft_id || ""));
+    if (linked) return { run, draft, plan, reused: true };
+    selected.draft_id = draft._id;
+    selected.generation_run_id = run._id;
+    selected.status = "NEEDS_REVIEW";
+    if (draft.bundle_role === "COMPANION_STORY") selected.parent_draft_id = draft.parent_draft_id || null;
+    await plan.save(session ? { session } : undefined);
+    await appendAudit({
+      entityType: "GENERATION_RUN",
+      entityId: run._id,
+      draft,
+      run,
+      action: "GENERATION_WEEKLY_LINK_RECONCILED",
+      summary: "Restored the weekly-plan link for a successfully generated review draft after an interrupted finalization.",
+      actor: run.initiated_by_admin_id,
+      actorType: "WORKER",
+      metadata: {
+        weekly_plan_id: plan._id,
+        weekly_candidate_id: run.weekly_candidate_id,
+        selected_draft_id: draft._id,
+        paid_provider_calls_replayed: false,
+        reconciled_at: now,
+      },
+      dependencies: transactionDependencies,
+    });
+    return { run, draft, plan, reused: false };
+  });
+}
+
+function staleDuplicateFailure(now) {
+  return {
+    stage: "GENERATING_IMAGES",
+    code: "social_duplicate_reconciliation_required",
+    message: "The duplicate request lease expired before a success receipt was committed; automatic replay was blocked to prevent duplicate spend.",
+    is_retriable: false,
+    occurred_at: now,
+  };
+}
+
+async function failStaleDuplicatePlaceholder(runId, { now = new Date(), dependencies = {} } = {}) {
+  const BaseRunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const BaseDraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const BaseOperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  const staleDuplicateCutoff = new Date(now.getTime() - PAID_OPERATION_LEASE_MS);
+  const duplicateFailure = staleDuplicateFailure(now);
+  return runInMongoTransaction(dependencies, async (session) => {
+    const RunModel = bindModelToMongoSession(BaseRunModel, session);
+    const DraftModel = bindModelToMongoSession(BaseDraftModel, session);
+    const OperationModel = bindModelToMongoSession(BaseOperationModel, session);
+    const run = await RunModel.findOneAndUpdate(
+      {
+        _id: runId,
+        status: "RUNNING",
+        idempotency_key: /^social-duplicate:/,
+        $or: [
+          { lease_expires_at: { $lte: now } },
+          { lease_expires_at: null, started_at: { $lte: staleDuplicateCutoff } },
+        ],
+      },
+      { $set: {
+        status: "FAILED",
+        current_stage: "FAILED",
+        lease_owner: null,
+        lease_expires_at: null,
+        finished_at: now,
+        last_error: {
+          ...duplicateFailure,
+          details: { paid_operation_reconciliation_required: true },
+        },
+      } },
+      { new: true },
+    );
+    if (!run) return null;
+    if (typeof DraftModel?.updateMany === "function") {
+      await DraftModel.updateMany(
+        {
+          generation_run_id: runId,
+          status: { $in: ["DRAFT", "NEEDS_REVIEW", "REJECTED"] },
+        },
+        { $set: {
+          status: "FAILED",
+          failed_at: now,
+          last_error: duplicateFailure,
+        } },
+      );
+    }
+    if (typeof OperationModel?.updateMany === "function") {
+      await OperationModel.updateMany(
+        { generation_run_id: runId, status: "RUNNING" },
+        { $set: {
+          status: "FAILED",
+          finished_at: now,
+          error: {
+            code: "social_paid_operation_reconciliation_required",
+            message: "The linked duplicate request expired without a committed success receipt; manual reconciliation is required before retrying.",
+            evidence_fingerprint: null,
+          },
+        } },
+      );
+    }
+    return run;
+  });
+}
+
+function stalePaidRunEvidenceFilter() {
+  return {
+    $or: [
+      { stage_executions: { $elemMatch: {
+        provider: { $nin: [null, ""] },
+        $or: [
+          { provider_response_id: { $nin: [null, ""] } },
+          { total_tokens: { $gt: 0 } },
+          { estimated_cost: { $gt: 0 } },
+        ],
+      } } },
+      { image_generation_attempts: { $elemMatch: {
+        $or: [
+          { provider_response_id: { $nin: [null, ""] } },
+          { total_tokens: { $gt: 0 } },
+          { estimated_cost: { $gt: 0 } },
+        ],
+      } } },
+      { provider_call_checkpoints: { $elemMatch: { status: "STARTED" } } },
+    ],
+  };
+}
+
+function partialAssetStorageFiles(assets = [], run = null) {
+  const files = [];
+  const append = (storageKey, storageProvider = "local") => {
+    const key = trimText(storageKey);
+    if (!key) return;
+    files.push({
+      storage_provider: trimText(storageProvider || "local").toLowerCase(),
+      storage_key: key,
+    });
+  };
+  for (const asset of safeArray(assets)) {
+    const provenance = asObject(asset?.provenance) || {};
+    const baseImage = asObject(provenance.base_image) || {};
+    append(asset?.storage_key, asset?.storage_provider);
+    append(asset?.original_visual?.storage_key, asset?.original_visual?.storage_provider);
+    append(asset?.provider_original?.storage_key, asset?.provider_original?.storage_provider);
+    append(asset?.normalization?.output_storage_key, asset?.storage_provider);
+    append(provenance.provider_original?.storage_key, provenance.provider_original?.storage_provider);
+    append(provenance.normalization?.output_storage_key, asset?.storage_provider);
+    append(provenance.ai_background?.storage_key, provenance.ai_background?.storage_provider);
+    append(provenance.authentic_product_reference?.storage_key, provenance.authentic_product_reference?.storage_provider);
+    append(baseImage.storage_key, baseImage.storage_provider);
+    append(baseImage.provider_original?.storage_key, baseImage.provider_original?.storage_provider);
+    append(baseImage.normalization?.output_storage_key, baseImage.storage_provider);
+    append(baseImage.ai_background?.storage_key, baseImage.ai_background?.storage_provider);
+    append(baseImage.authentic_product_reference?.storage_key, baseImage.authentic_product_reference?.storage_provider);
+    safeArray(asset?.reference_assets).forEach((reference) => append(reference?.storage_key, reference?.storage_provider));
+  }
+  safeArray(run?.image_generation_attempts).forEach((attempt) => append(
+    attempt?.original_storage_key,
+    attempt?.original_storage_provider || "local",
+  ));
+  const seen = new Set();
+  return files.filter((file) => {
+    if (seen.has(file.storage_key)) return false;
+    seen.add(file.storage_key);
+    return true;
+  });
+}
+
+async function failStalePaidGenerationRun(runId, { now = new Date(), dependencies = {} } = {}) {
+  const BaseRunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const BaseDraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const BaseAssetModel = dependencies.SocialAsset || SocialAsset;
+  const BasePlanModel = dependencies.SocialWeeklyPlan || SocialWeeklyPlan;
+  const BaseAuditModel = dependencies.SocialAuditLog || SocialAuditLog;
+  const failure = {
+    stage: "WORKER_LEASE",
+    code: "social_paid_run_reconciliation_required",
+    message: "The worker lease expired after billable provider work was checkpointed; automatic replay was blocked to prevent duplicate spend.",
+    is_retriable: false,
+    occurred_at: now,
+  };
+  return runInMongoTransaction(dependencies, async (session) => {
+    const RunModel = bindModelToMongoSession(BaseRunModel, session);
+    const DraftModel = bindModelToMongoSession(BaseDraftModel, session);
+    const AssetModel = bindModelToMongoSession(BaseAssetModel, session);
+    const PlanModel = bindModelToMongoSession(BasePlanModel, session);
+    const AuditModel = bindModelToMongoSession(BaseAuditModel, session);
+    const run = await RunModel.findOneAndUpdate(
+      {
+        _id: runId,
+        status: "RUNNING",
+        lease_expires_at: { $lte: now },
+        idempotency_key: { $not: /^social-duplicate:/ },
+        ...stalePaidRunEvidenceFilter(),
+      },
+      { $set: {
+        status: "FAILED",
+        current_stage: "FAILED",
+        lease_owner: null,
+        lease_expires_at: null,
+        finished_at: now,
+        last_error: {
+          ...failure,
+          details: { paid_evidence_checkpointed: true, incomplete_assets_deactivated: true },
+        },
+      } },
+      { new: true },
+    );
+    if (!run) return null;
+    const uncertainCheckpoints = safeArray(run.provider_call_checkpoints).map((checkpoint) => {
+      const value = clone(asObject(checkpoint) || checkpoint);
+      if (String(value?.status).toUpperCase() === "STARTED") {
+        value.status = "UNCERTAIN";
+        value.uncertain_at = now;
+      }
+      return value;
+    });
+    const uncertainStages = uncertainCheckpoints
+      .filter((checkpoint) => checkpoint.status === "UNCERTAIN")
+      .map((checkpoint) => checkpoint.stage);
+    if (typeof RunModel.updateOne === "function") {
+      const updatedError = {
+        ...clone(asObject(run.last_error) || run.last_error || failure),
+        details: {
+          paid_evidence_checkpointed: true,
+          incomplete_assets_deactivated: true,
+          uncertain_provider_call_stages: uncertainStages,
+        },
+      };
+      await RunModel.updateOne(
+        { _id: runId, status: "FAILED" },
+        { $set: { provider_call_checkpoints: uncertainCheckpoints, last_error: updatedError } },
+      );
+      run.provider_call_checkpoints = uncertainCheckpoints;
+      run.last_error = updatedError;
+    }
+    const draftQuery = DraftModel.find({
+      generation_run_id: runId,
+      status: { $in: ["DRAFT", "NEEDS_REVIEW", "REJECTED"] },
+    });
+    const drafts = safeArray(await maybeLean(draftQuery));
+    const assetQuery = AssetModel.find({ generation_run_id: runId, is_active: true, deleted_at: null });
+    const assets = safeArray(await maybeLean(assetQuery));
+    const draftIds = drafts.map((draft) => draft._id || draft.id).filter(Boolean);
+    const assetIds = assets.map((asset) => asset._id || asset.id).filter(Boolean);
+    const stagedFiles = partialAssetStorageFiles(assets, run);
+    if (draftIds.length) {
+      await DraftModel.updateMany(
+        { _id: { $in: draftIds }, status: { $in: ["DRAFT", "NEEDS_REVIEW", "REJECTED"] } },
+        { $set: { status: "FAILED", failed_at: now, last_error: failure } },
+      );
+      if (typeof RunModel.updateOne === "function") {
+        await RunModel.updateOne(
+          { _id: runId, status: "FAILED" },
+          { $set: { failed_draft_id: draftIds[0] } },
+        );
+      }
+    }
+    if (assetIds.length) {
+      await AssetModel.updateMany(
+        { _id: { $in: assetIds }, is_active: true, deleted_at: null },
+        { $set: { is_active: false, deleted_at: now } },
+      );
+    }
+    if (run.weekly_plan_id && run.weekly_candidate_id && typeof PlanModel?.updateOne === "function") {
+      await PlanModel.updateOne(
+        { _id: run.weekly_plan_id, "selected_posts.candidateId": run.weekly_candidate_id },
+        { $set: { "selected_posts.$.status": "FAILED" } },
+      );
+      await PlanModel.updateOne(
+        { _id: run.weekly_plan_id, "story_plan.candidateId": run.weekly_candidate_id },
+        { $set: { "story_plan.$.status": "FAILED" } },
+      );
+    }
+    await appendAudit({
+      entityType: "GENERATION_RUN",
+      entityId: run._id,
+      draft: drafts[0] || null,
+      run,
+      action: "STALE_PAID_GENERATION_TERMINATED",
+      summary: "Atomically failed an expired paid generation run, its incomplete draft, and its partial active assets without replaying any provider call.",
+      actor: run.initiated_by_admin_id,
+      actorType: "WORKER",
+      idempotencyKey: `social-stale-paid-run:${run._id}:terminalized`,
+      metadata: {
+        failed_draft_ids: draftIds,
+        deactivated_asset_ids: assetIds,
+        guarded_file_cleanup_required: stagedFiles.length > 0,
+        guarded_file_cleanup_targets: stagedFiles.map((file) => file.storage_key),
+        paid_provider_calls_replayed: false,
+      },
+      dependencies: { ...dependencies, mongoSession: session, SocialAuditLog: AuditModel },
+    });
+    return { run, drafts, assets, stagedFiles };
+  });
+}
+
+const PAID_MUTATION_SUCCESS_ACTIONS = [
+  "AI_IMAGE_REGENERATED",
+  "DUPLICATED_AS_NEW_DRAFT",
+  "REGENERATED_STRATEGY",
+  "REGENERATED_ALTERNATIVES",
+  "REGENERATED_COPY",
+  "REGENERATED_HOOKS",
+  "REGENERATED_CAPTION",
+  "REGENERATED_FORMAT",
+  "REGENERATED_REVISION",
+  "REGENERATED_COMPLIANCE",
+  "REGENERATED_VISUAL",
+];
+
+function paidLedgerStorageFiles(ledgers = []) {
+  const files = [];
+  const append = (file) => {
+    const storageKey = trimText(file?.storage_key || file?.storageKey);
+    if (!storageKey) return;
+    files.push({
+      storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+      storage_key: storageKey,
+    });
+  };
+  const visit = (value, inheritedProvider = "local", visited = new Set()) => {
+    if (!value || typeof value !== "object") return;
+    if (visited.has(value)) return;
+    visited.add(value);
+    const provider = trimText(value.storage_provider || value.storageProvider || inheritedProvider || "local").toLowerCase();
+    for (const [key, child] of Object.entries(value)) {
+      if (["storage_key", "storageKey", "output_storage_key", "outputStorageKey"].includes(key)
+        && typeof child === "string") {
+        append({ storage_provider: provider, storage_key: child });
+      } else if (child && typeof child === "object") {
+        visit(child, provider, visited);
+      }
+    }
+  };
+  for (const ledger of safeArray(ledgers)) visit(asObject(ledger?.evidence) || {});
+  const seen = new Set();
+  return files.filter((file) => {
+    if (seen.has(file.storage_key)) return false;
+    seen.add(file.storage_key);
+    return true;
+  });
+}
+
+function paidLedgerRecoveryEvidence(ledgers = []) {
+  return safeArray(ledgers).map((ledger) => {
+    const value = asObject(ledger) || {};
+    const evidence = asObject(value.evidence) || {};
+    return {
+      ledger_id: value._id || value.id || null,
+      status: value.status || null,
+      provider: value.provider || evidence.provider || null,
+      model: value.model || evidence.model || null,
+      incurred_at: value.incurred_at || null,
+      usage: clone(value.usage || evidence.usage || {}),
+      paid_call_id: evidence.paid_call_id || null,
+      completed_visuals: safeArray(evidence.completed_visuals).map((visual) => ({
+        sequence: visual.sequence || null,
+        response_id: visual.response_id || null,
+        output_fingerprint: visual.output_fingerprint || null,
+        checksum_sha256: visual.checksum_sha256 || null,
+        storage_key: visual.storage_key || null,
+        image_usage: clone(visual.image_usage || {}),
+        validation_usage: clone(visual.validation_usage || {}),
+        status: visual.status || null,
+      })),
+      failures: safeArray(evidence.failures).map((failure) => ({
+        code: failure.code || null,
+        provider_response_id: failure.provider_response_id || null,
+        output_fingerprint: failure.output_fingerprint || null,
+        usage: clone(failure.usage || {}),
+        estimated_cost: Number(failure.estimated_cost || 0),
+      })),
+      raw_image_bytes_retained: false,
+    };
+  });
+}
+
+async function reconcileStalePaidOperation(operationId, { now = new Date(), dependencies = {} } = {}) {
+  const BaseOperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  const BaseAuditModel = dependencies.SocialAuditLog || SocialAuditLog;
+  const BaseLedgerModel = dependencies.SocialPaidCallUsageLedger || SocialPaidCallUsageLedger;
+  return runInMongoTransaction(dependencies, async (session) => {
+    const OperationModel = bindModelToMongoSession(BaseOperationModel, session);
+    const AuditModel = bindModelToMongoSession(BaseAuditModel, session);
+    const LedgerModel = bindModelToMongoSession(BaseLedgerModel, session);
+    const operation = await OperationModel.findById(operationId);
+    if (!operation) return null;
+    const operationKey = trimText(operation.idempotency_key);
+    if (String(operation.status).toUpperCase() === "FAILED"
+      && operation.error?.code === "social_paid_operation_reconciliation_required") {
+      const terminalAudit = await maybeLean(AuditModel.findOne({
+        idempotency_key: `${operationKey}:stale-terminal`,
+        action: "STALE_PAID_OPERATION_RECONCILIATION_REQUIRED",
+      }));
+      const completedCleanup = await maybeLean(AuditModel.findOne({
+        action: "STALE_PAID_OPERATION_FILES_CLEANED",
+        action_status: "SUCCEEDED",
+        "metadata.paid_operation_id": operation._id,
+      }));
+      if (!terminalAudit || completedCleanup) return { operation, stagedFiles: [], reused: true };
+      const targets = safeArray(terminalAudit.metadata?.guarded_file_cleanup_targets)
+        .map((target) => (typeof target === "string"
+          ? { storage_provider: "local", storage_key: trimText(target) }
+          : {
+            storage_provider: trimText(target?.storage_provider || "local").toLowerCase(),
+            storage_key: trimText(target?.storage_key),
+          }))
+        .filter((file) => file.storage_key);
+      return { operation, stagedFiles: targets, reused: true };
+    }
+    const leaseExpiry = new Date(operation.lease_expires_at || 0);
+    if (String(operation.status).toUpperCase() !== "RUNNING"
+      || Number.isNaN(leaseExpiry.getTime())
+      || leaseExpiry.getTime() > now.getTime()) return null;
+    const successAudit = await maybeLean(AuditModel.findOne({
+      "metadata.paid_operation_key": operationKey,
+      action: { $in: PAID_MUTATION_SUCCESS_ACTIONS },
+      action_status: "SUCCEEDED",
+    }));
+    if (successAudit) {
+      const resultDraftId = successAudit.draft_id || operation.result_draft_id || operation.source_draft_id;
+      const reconciled = await OperationModel.findOneAndUpdate(
+        { _id: operation._id, status: "RUNNING" },
+        { $set: { status: "SUCCEEDED", result_draft_id: resultDraftId, finished_at: now } },
+        { new: true },
+      );
+      return { operation: reconciled || operation, stagedFiles: [], successReconciled: true };
+    }
+    const ledgers = safeArray(await maybeLean(LedgerModel.find({
+      operation: operation.operation,
+      "evidence.paid_call_id": String(operation._id),
+    })));
+    const stagedFiles = paidLedgerStorageFiles(ledgers);
+    const transitioned = await OperationModel.findOneAndUpdate(
+      { _id: operation._id, status: "RUNNING", lease_expires_at: { $lte: now } },
+      { $set: {
+        status: "FAILED",
+        finished_at: now,
+        error: {
+          code: "social_paid_operation_reconciliation_required",
+          message: "The paid operation lease expired without a committed success audit; provider calls will not be replayed automatically.",
+          evidence_fingerprint: ledgers.length ? sha256(paidLedgerRecoveryEvidence(ledgers)) : null,
+        },
+      } },
+      { new: true },
+    );
+    if (!transitioned) return null;
+    await appendAudit({
+      entityType: "DRAFT",
+      entityId: operation.source_draft_id,
+      action: "STALE_PAID_OPERATION_RECONCILIATION_REQUIRED",
+      summary: "Terminalized an expired paid mutation without replaying its provider call and retained sanitized usage, response, validation, and cleanup evidence.",
+      actor: operation.actor_admin_id,
+      actorType: "WORKER",
+      idempotencyKey: `${operationKey}:stale-terminal`,
+      metadata: {
+        paid_operation_id: operation._id,
+        paid_operation_key: operationKey,
+        operation: operation.operation,
+        generation_run_id: operation.generation_run_id || null,
+        result_draft_id: operation.result_draft_id || null,
+        paid_call_evidence: paidLedgerRecoveryEvidence(ledgers),
+        guarded_file_cleanup_required: stagedFiles.length > 0,
+        guarded_file_cleanup_targets: stagedFiles,
+        provider_calls_replayed: false,
+      },
+      dependencies: { ...dependencies, mongoSession: session, SocialAuditLog: AuditModel },
+    });
+    return { operation: transitioned, stagedFiles, reused: false };
+  });
+}
+
+async function processStalePaidOperations({ now = new Date(), dependencies = {} } = {}) {
+  const OperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  if (typeof OperationModel?.find !== "function") return { processed: 0, cleaned: 0, failed: 0 };
+  let query = OperationModel.find({
+    $or: [
+      { status: "RUNNING", lease_expires_at: { $lte: now } },
+      { status: "FAILED", "error.code": "social_paid_operation_reconciliation_required" },
+    ],
+  });
+  if (typeof query?.sort === "function") query = query.sort({ lease_expires_at: 1, started_at: 1 });
+  if (typeof query?.limit === "function") query = query.limit(100);
+  const operations = safeArray(await maybeLean(query));
+  let processed = 0;
+  let cleaned = 0;
+  let failed = 0;
+  for (const operation of operations) {
+    const result = await reconcileStalePaidOperation(operation._id || operation.id, { now, dependencies });
+    if (!result) continue;
+    processed += 1;
+    if (!result.stagedFiles.length) continue;
+    const cleanup = await cleanupUncommittedFinalFiles(result.stagedFiles, {
+      AssetModel: dependencies.SocialAsset || SocialAsset,
+      dependencies,
+    });
+    if (cleanup.failed) failed += 1;
+    else cleaned += cleanup.removed;
+    try {
+      await appendAudit({
+        entityType: "DRAFT",
+        entityId: result.operation.source_draft_id,
+        action: "STALE_PAID_OPERATION_FILES_CLEANED",
+        status: cleanup.failed ? "FAILED" : "SUCCEEDED",
+        summary: cleanup.failed
+          ? "The stale paid operation was terminalized, but one or more unreferenced provider files still require cleanup."
+          : "Reference-guarded cleanup removed unused provider files from a stale paid operation.",
+        actor: result.operation.actor_admin_id,
+        actorType: "WORKER",
+        idempotencyKey: `${result.operation.idempotency_key}:stale-files:${cleanup.failed ? "failed" : "succeeded"}`,
+        metadata: { paid_operation_id: result.operation._id, guarded_file_cleanup: cleanup },
+        dependencies,
+      });
+    } catch (auditError) {
+      logger.warn("Unable to record stale paid-operation file cleanup", {
+        paidOperationId: String(result.operation._id),
+        errorCode: auditError?.code || null,
+        errorMessage: normalizeWhitespace(auditError?.message || "cleanup audit failed").slice(0, 500),
+      });
+    }
+  }
+  return { processed, cleaned, failed };
+}
+
+async function processPendingSocialGenerationRuns({ now = new Date(), limit = 1, dependencies = {} } = {}) {
+  await processStalePaidOperations({ now, dependencies });
+  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  if (typeof RunModel.find === "function") {
+    let succeededQuery = RunModel.find({
+      status: "SUCCEEDED",
+      selected_draft_id: { $ne: null },
+    });
+    if (typeof succeededQuery?.sort === "function") succeededQuery = succeededQuery.sort({ completed_at: -1, created_at: -1 });
+    if (typeof succeededQuery?.limit === "function") succeededQuery = succeededQuery.limit(100);
+    const succeededWeeklyRuns = await maybeLean(succeededQuery);
+    for (const succeededRun of safeArray(succeededWeeklyRuns)) {
+      try {
+        if (succeededRun.weekly_plan_id && succeededRun.weekly_candidate_id) {
+          await reconcileSucceededWeeklyRunLink(succeededRun._id || succeededRun.id, { now, dependencies });
+        }
+        await reconcileSucceededGenerationAudit(succeededRun._id || succeededRun.id, { dependencies });
+      } catch (error) {
+        logger.warn("Unable to reconcile a successful Social Manager run with its weekly plan", {
+          generationRunId: String(succeededRun._id || succeededRun.id),
+          errorCode: error?.code || null,
+          errorMessage: normalizeWhitespace(error?.message || "weekly-plan reconciliation failed").slice(0, 500),
+        });
+      }
+    }
+  }
+  const staleDuplicateCutoff = new Date(now.getTime() - PAID_OPERATION_LEASE_MS);
+  const staleLookup = {
+    status: "RUNNING",
+    $or: [
+      { lease_expires_at: { $lte: now } },
+      {
+        idempotency_key: /^social-duplicate:/,
+        lease_expires_at: null,
+        started_at: { $lte: staleDuplicateCutoff },
+      },
+    ],
+  };
+  const reconciliationErrors = [];
+  if (typeof RunModel.find === "function") {
+    let staleQuery = RunModel.find(staleLookup);
+    if (typeof staleQuery?.sort === "function") staleQuery = staleQuery.sort({ lease_expires_at: 1, started_at: 1 });
+    if (typeof staleQuery?.limit === "function") staleQuery = staleQuery.limit(100);
+    const staleRuns = await maybeLean(staleQuery);
+    for (const staleRun of safeArray(staleRuns)) {
+      try {
+        await reconcileCommittedGenerationDraft(staleRun._id || staleRun.id, { now, dependencies });
+      } catch (error) {
+        reconciliationErrors.push(staleRun._id || staleRun.id);
+        logger.warn("Unable to reconcile an expired Social Manager generation run", {
+          generationRunId: String(staleRun._id || staleRun.id),
+          errorCode: error?.code || null,
+          errorMessage: normalizeWhitespace(error?.message || "generation reconciliation failed").slice(0, 500),
+        });
+      }
+    }
+  }
+  const reconciliationExclusion = reconciliationErrors.length
+    ? { _id: { $nin: reconciliationErrors } }
+    : {};
+  const staleDuplicateRuns = typeof RunModel.find === "function"
+    ? await maybeLean(RunModel.find({ ...staleLookup, ...reconciliationExclusion, idempotency_key: /^social-duplicate:/ }))
+    : [];
+  const staleDuplicateIds = safeArray(staleDuplicateRuns).map((run) => run._id || run.id).filter(Boolean);
+  for (const staleDuplicateId of staleDuplicateIds) {
+    await failStaleDuplicatePlaceholder(staleDuplicateId, { now, dependencies });
+  }
+  const stalePaidRuns = typeof RunModel.find === "function"
+    ? safeArray(await maybeLean(RunModel.find({
+      ...reconciliationExclusion,
+      status: "RUNNING",
+      lease_expires_at: { $lte: now },
+      idempotency_key: { $not: /^social-duplicate:/ },
+      ...stalePaidRunEvidenceFilter(),
+    }))).filter((run) => !/^social-duplicate:/.test(trimText(run?.idempotency_key)))
+    : [];
+  for (const stalePaidRun of stalePaidRuns) {
+    const terminalized = await failStalePaidGenerationRun(stalePaidRun._id || stalePaidRun.id, { now, dependencies });
+    if (!terminalized?.stagedFiles?.length) continue;
+    const cleanup = await cleanupUncommittedFinalFiles(terminalized.stagedFiles, {
+      AssetModel: dependencies.SocialAsset || SocialAsset,
+      dependencies,
+    });
+    try {
+      await appendAudit({
+        entityType: "GENERATION_RUN",
+        entityId: terminalized.run._id,
+        draft: terminalized.drafts[0] || null,
+        run: terminalized.run,
+        action: "STALE_PAID_GENERATION_FILES_CLEANED",
+        status: cleanup.failed ? "FAILED" : "SUCCEEDED",
+        summary: cleanup.failed
+          ? "The stale paid run was terminalized, but one or more unreferenced partial files still require cleanup."
+          : "Removed unreferenced partial files after atomically terminalizing a stale paid generation run.",
+        actor: terminalized.run.initiated_by_admin_id,
+        actorType: "WORKER",
+        idempotencyKey: `social-stale-paid-run:${terminalized.run._id}:files`,
+        metadata: { guarded_file_cleanup: cleanup },
+        dependencies,
+      });
+    } catch (auditError) {
+      logger.warn("Unable to record stale paid generation file cleanup", {
+        generationRunId: String(terminalized.run._id),
+        errorCode: auditError?.code || null,
+        errorMessage: normalizeWhitespace(auditError?.message || "cleanup audit failed").slice(0, 500),
+      });
+    }
+  }
   await RunModel.updateMany(
-    { status: "RUNNING", lease_expires_at: { $lte: now } },
+    {
+      ...reconciliationExclusion,
+      status: "RUNNING",
+      lease_expires_at: { $lte: now },
+      idempotency_key: { $not: /^social-duplicate:/ },
+    },
     { $set: { status: "PENDING", current_stage: "QUEUED", lease_owner: null, lease_expires_at: null, available_at: now } },
   );
   let processed = 0;
@@ -3070,7 +5376,7 @@ async function loadDraftRelations(draft, dependencies = {}) {
 
 async function getDraftDetail(draftId, { dependencies = {} } = {}) {
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
-  const draft = await DraftModel.findById(draftId);
+  let draft = await DraftModel.findById(draftId);
   if (!draft) {
     const error = new Error("Social draft not found");
     error.statusCode = 404;
@@ -3097,57 +5403,171 @@ async function getGenerationRun(runId, { dependencies = {} } = {}) {
   };
 }
 
+function weeklyRetryContext(run) {
+  if (!run?.weekly_plan_id || !run?.weekly_candidate_id) return null;
+  return {
+    planId: run.weekly_plan_id,
+    candidateId: run.weekly_candidate_id,
+    visualModeResolution: clone(asObject(run.generation_request)?.visual_mode_resolution || null),
+  };
+}
+
 async function retryGenerationRun(runId, {
   actor = null,
   requestId = null,
   requestKey = null,
   ip = null,
   additionalInstructions = null,
+  now = new Date(),
   dependencies = {},
 } = {}) {
   const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
-  const original = await RunModel.findById(runId);
-  if (!original) {
-    const error = new Error("Social generation run not found");
-    error.statusCode = 404;
+  const transactionAvailable = Boolean(
+    dependencies.mongoSession
+    || typeof dependencies.startSession === "function"
+    || (mongoose.connection?.readyState === 1 && typeof mongoose.startSession === "function"),
+  );
+  if (!transactionAvailable) {
+    const error = new Error("A Mongo transaction is required to queue a retry without racing failure dismissal");
+    error.code = "social_generation_retry_transaction_required";
+    error.statusCode = 503;
     throw error;
   }
-  const status = String(original.status || "").toUpperCase();
-  if (!["FAILED", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"].includes(status)) {
-    const error = new Error(`A ${status || "non-failed"} generation run cannot be manually retried`);
-    error.code = "social_generation_retry_not_allowed";
-    error.statusCode = 409;
-    throw error;
+
+  const suppliedRequestKey = trimText(requestKey).slice(0, 300) || null;
+  const effectiveRequestKey = suppliedRequestKey
+    || `social-run-retry:${runId}:${crypto.randomUUID()}`;
+  try {
+    return await runInMongoTransaction(dependencies, async (session) => {
+    const transactionDependencies = { ...dependencies, mongoSession: session };
+    const original = await applyMongoSession(RunModel.findById(runId), session);
+    if (!original) {
+      const error = new Error("Social generation run not found");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (original.recovery_archived_at) {
+      const error = new Error("An archived generation failure is no longer actionable; queue a new creative instead");
+      error.code = "social_generation_failure_archived";
+      error.statusCode = 409;
+      throw error;
+    }
+    const status = String(original.status || "").toUpperCase();
+    if (!["FAILED", "FAILED_COMPLIANCE", "FAILED_IMAGE_GENERATION"].includes(status)) {
+      const error = new Error(`A ${status || "non-failed"} generation run cannot be manually retried`);
+      error.code = "social_generation_retry_not_allowed";
+      error.statusCode = 409;
+      throw error;
+    }
+
+    if (original.superseded_by_generation_run_id) {
+      const existingRetry = await applyMongoSession(
+        RunModel.findById(original.superseded_by_generation_run_id),
+        session,
+      );
+      if (existingRetry
+        && suppliedRequestKey
+        && trimText(existingRetry.idempotency_key) === suppliedRequestKey
+        && String(existingRetry.retry_of_generation_run_id || "") === String(original._id)) {
+        const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+        const draft = existingRetry.selected_draft_id
+          ? await applyMongoSession(DraftModel.findById(existingRetry.selected_draft_id), session)
+          : null;
+        return { run: existingRetry, draft, reused: true };
+      }
+      const error = new Error("A replacement generation run has already been queued for this failure");
+      error.code = "social_generation_retry_already_queued";
+      error.statusCode = 409;
+      throw error;
+    }
+
+    const generationRequest = clone(asObject(original.generation_request) || {});
+    const direction = trimText(additionalInstructions);
+    if (direction) {
+      generationRequest.admin_instructions = [
+        trimText(generationRequest.admin_instructions),
+        `Retry direction from the administrator: ${direction}`,
+      ].filter(Boolean).join("\n").slice(0, 4000);
+    }
+    const result = await requestGeneration({
+      triggerType: "RETRY",
+      actor,
+      now,
+      force: true,
+      requestKey: effectiveRequestKey,
+      generationRequest,
+      weeklyContext: weeklyRetryContext(original),
+      dependencies: transactionDependencies,
+    });
+    const retryRun = result.run;
+    if (!retryRun || String(retryRun._id || retryRun.id) === String(original._id || original.id)) {
+      const error = new Error("The retry idempotency key does not resolve to a distinct retry run");
+      error.code = "social_generation_retry_idempotency_conflict";
+      error.statusCode = 409;
+      throw error;
+    }
+    if (result.reused) {
+      const exactLineage = String(retryRun.retry_of_generation_run_id || "") === String(original._id)
+        && String(retryRun.trigger_type || "").toUpperCase() === "RETRY"
+        && trimText(retryRun.idempotency_key) === effectiveRequestKey;
+      if (!exactLineage) {
+        const error = new Error("The retry idempotency key belongs to a different generation request");
+        error.code = "social_generation_retry_idempotency_conflict";
+        error.statusCode = 409;
+        throw error;
+      }
+    } else if (retryRun.retry_of_generation_run_id
+      && String(retryRun.retry_of_generation_run_id) !== String(original._id)) {
+      const error = new Error("The queued retry already belongs to a different failed generation run");
+      error.code = "social_generation_retry_idempotency_conflict";
+      error.statusCode = 409;
+      throw error;
+    }
+    if (!retryRun.retry_of_generation_run_id) {
+      retryRun.retry_of_generation_run_id = original._id;
+      await retryRun.save(session ? { session } : undefined);
+    }
+    original.superseded_by_generation_run_id = retryRun._id;
+    original.superseded_at = now;
+    await original.save(session ? { session } : undefined);
+    await appendAudit({
+      entityType: "GENERATION_RUN",
+      entityId: original._id,
+      run: original,
+      action: "GENERATION_RETRY_REQUESTED",
+      summary: `An administrator atomically queued a replacement generation run for ${status.toLowerCase().replace(/_/g, " ")}.`,
+      actor,
+      requestId,
+      ip,
+      metadata: { retry_run_id: retryRun._id, additional_direction_supplied: Boolean(direction) },
+      dependencies: transactionDependencies,
+    });
+    return result;
+    });
+  } catch (error) {
+    const duplicateKey = error?.code === 11000 || error?.cause?.code === 11000;
+    if (!duplicateKey) throw error;
+
+    // The competing transaction has committed (duplicate-key detection waits
+    // for it), so resolve the winner using a fresh session and accept it only
+    // when both the caller key and retry lineage match exactly.
+    const retryRun = await RunModel.findOne({ idempotency_key: effectiveRequestKey });
+    const exactLineage = retryRun
+      && String(retryRun.retry_of_generation_run_id || "") === String(runId)
+      && String(retryRun.trigger_type || "").toUpperCase() === "RETRY"
+      && trimText(retryRun.idempotency_key) === effectiveRequestKey;
+    if (!exactLineage) {
+      const conflict = new Error("The retry idempotency key belongs to a different generation request");
+      conflict.code = "social_generation_retry_idempotency_conflict";
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+    const draft = retryRun.selected_draft_id
+      ? await DraftModel.findById(retryRun.selected_draft_id)
+      : null;
+    return { run: retryRun, draft, reused: true };
   }
-  const generationRequest = clone(asObject(original.generation_request) || {});
-  const direction = trimText(additionalInstructions);
-  if (direction) {
-    generationRequest.admin_instructions = [
-      trimText(generationRequest.admin_instructions),
-      `Retry direction from the administrator: ${direction}`,
-    ].filter(Boolean).join("\n").slice(0, 4000);
-  }
-  const result = await requestGeneration({
-    triggerType: "RETRY",
-    actor,
-    force: true,
-    requestKey: requestKey || `social-run-retry:${original._id}:${crypto.randomUUID()}`,
-    generationRequest,
-    dependencies,
-  });
-  await appendAudit({
-    entityType: "GENERATION_RUN",
-    entityId: original._id,
-    run: original,
-    action: "GENERATION_RETRY_REQUESTED",
-    summary: `An administrator queued a new generation run to retry ${status.toLowerCase().replace(/_/g, " ")}.`,
-    actor,
-    requestId,
-    ip,
-    metadata: { retry_run_id: result.run?._id || null, additional_direction_supplied: Boolean(direction) },
-    dependencies,
-  });
-  return result;
 }
 
 async function getTodayRecommendation({ now = new Date(), dependencies = {} } = {}) {
@@ -3214,9 +5634,21 @@ async function getTodayRecommendation({ now = new Date(), dependencies = {} } = 
 
 async function listDraftCalendar({ status = null, dateFrom = null, dateTo = null, page = 1, limit = 50, dependencies = {} } = {}) {
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  const AuditModel = dependencies.SocialAuditLog || SocialAuditLog;
   const query = {};
   if (status && status !== "ALL") query.status = status;
   if (dateFrom || dateTo) query.generation_date = { ...(dateFrom ? { $gte: dateFrom } : {}), ...(dateTo ? { $lte: dateTo } : {}) };
+  const { _private: { hiddenFailureContext } } = require("./socialWorkSummaryService");
+  const runScope = query.generation_date ? { generation_date: query.generation_date } : {};
+  const hiddenFailures = await hiddenFailureContext(
+    RunModel,
+    runScope,
+    AuditModel,
+    DraftModel,
+    query.generation_date ? { generation_date: query.generation_date } : {},
+  );
+  if (hiddenFailures.draft_ids.length) query._id = { $nin: hiddenFailures.draft_ids };
   const safeLimit = Math.min(Math.max(Number(limit || 50), 1), 100);
   const safePage = Math.max(Number(page || 1), 1);
   const [drafts, total] = await Promise.all([
@@ -3554,7 +5986,7 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
         approved_copy_checksum_sha256: copyChecksum,
       },
       logo: { method: "openai_image_baked_in", source: null },
-      caption_policy: buildCaptionPolicyProvenance(recommendation),
+      caption_policy: buildCaptionPolicyProvenance(recommendation, "FULL_AI_GRAPHIC"),
       final_pixel_contract: {
         method: "normalized_ai_bytes_passthrough",
         normalized_checksum_sha256: stage.normalized.checksum_sha256,
@@ -3605,6 +6037,72 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
 
 async function maybeLean(query) {
   return query && typeof query.lean === "function" ? query.lean() : query;
+}
+
+async function authoritativePaidMutationDraft({
+  operationClaim,
+  draftId,
+  action,
+  minimumRevision = null,
+  allowedStatuses = null,
+  dependencies = {},
+} = {}) {
+  if (!operationClaim?.key || !draftId) return null;
+  const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const AuditModel = dependencies.SocialAuditLog || SocialAuditLog;
+  const OperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  const draft = await DraftModel.findById(draftId);
+  if (!draft) return null;
+  if (minimumRevision != null && Number(draft.revision || 0) < Number(minimumRevision)) return null;
+  if (safeArray(allowedStatuses).length
+    && !safeArray(allowedStatuses).includes(String(draft.status).toUpperCase())) return null;
+  const actions = safeArray(action).filter(Boolean);
+  const auditFilter = {
+    draft_id: draft._id,
+    action: actions.length > 1 ? { $in: actions } : actions[0],
+    action_status: "SUCCEEDED",
+    "metadata.paid_operation_key": operationClaim.key,
+  };
+  const successAudit = typeof AuditModel?.findOne === "function"
+    ? await maybeLean(AuditModel.findOne(auditFilter))
+    : null;
+  const successReceipt = operationClaim.tracked && operationClaim.row?._id && typeof OperationModel?.findOne === "function"
+    ? await maybeLean(OperationModel.findOne({
+      _id: operationClaim.row?._id,
+      status: "SUCCEEDED",
+      result_draft_id: draft._id,
+    }))
+    : null;
+  return successAudit || successReceipt ? { draft, audit: successAudit, receipt: successReceipt } : null;
+}
+
+async function authoritativeNativeSwapDraft({
+  draftId,
+  idempotencyKey,
+  minimumRevision,
+  finalAssetId,
+  dependencies = {},
+} = {}) {
+  const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const AuditModel = dependencies.SocialAuditLog || SocialAuditLog;
+  const AssetModel = dependencies.SocialAsset || SocialAsset;
+  const [draft, audit] = await Promise.all([
+    DraftModel.findById(draftId),
+    maybeLean(AuditModel.findOne({
+      idempotency_key: idempotencyKey,
+      draft_id: draftId,
+      action: "AI_IMAGE_REGENERATED",
+      action_status: "SUCCEEDED",
+    })),
+  ]);
+  if (!draft || !audit
+    || Number(draft.revision || 0) < Number(minimumRevision)
+    || String(draft.status).toUpperCase() !== "NEEDS_REVIEW"
+    || !safeArray(draft.final_composed_asset_ids).some((id) => String(id) === String(finalAssetId))) return null;
+  const activeAsset = typeof AssetModel?.exists === "function"
+    ? await AssetModel.exists({ _id: finalAssetId, draft_id: draft._id, is_active: true, deleted_at: null })
+    : await maybeLean(AssetModel.findOne({ _id: finalAssetId, draft_id: draft._id, is_active: true, deleted_at: null }));
+  return activeAsset ? { draft, audit } : null;
 }
 
 async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
@@ -3944,7 +6442,33 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
       return { replayed: false, draftId: draft._id };
     });
   } catch (error) {
-    const cleanup = await (dependencies.cleanupStagedFullAiGraphic || cleanupStagedFullAiGraphic)(stage.staged_files, dependencies);
+    let committed = null;
+    try {
+      committed = await authoritativeNativeSwapDraft({
+        draftId,
+        idempotencyKey: mutationIdempotencyKey,
+        minimumRevision: Number(preflightDraft.revision || 0) + 1,
+        finalAssetId: prepared.finalRow._id,
+        dependencies,
+      });
+    } catch (reconciliationError) {
+      error.reconciliation_error = {
+        code: reconciliationError?.code || null,
+        message: "The native poster transaction outcome could not be reconciled safely; staged media was preserved.",
+      };
+      error.code = "social_full_ai_graphic_reconciliation_required";
+      throw error;
+    }
+    if (committed) return readDetail(draftId, { dependencies });
+    if (transactionCommitIsIndeterminate(error)) {
+      error.reconciliation_error = {
+        code: "UnknownTransactionCommitResult",
+        message: "The native poster commit remains indeterminate; staged media was preserved for deferred reconciliation.",
+      };
+      error.code = "social_full_ai_graphic_reconciliation_required";
+      throw error;
+    }
+    const cleanup = await cleanupUncommittedFinalFiles(stage.staged_files, { AssetModel, dependencies });
     if (cleanup.failed) error.staged_file_cleanup = cleanup;
     throw error;
   }
@@ -4007,6 +6531,7 @@ async function recomposeDraftFromActiveOriginals(draft, {
   dependencies = {},
   AssetModel = SocialAsset,
   visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY",
+  onStagedFile = null,
 } = {}) {
   const originalQuery = AssetModel.find({
     draft_id: draft._id,
@@ -4032,6 +6557,7 @@ async function recomposeDraftFromActiveOriginals(draft, {
     imageModel: baseImages[0]?.model,
     visualMode,
     allowTemplateOnly: false,
+    onStagedFile,
   });
   if (creativeResult.validation_status === "invalid" || !creativeResult.assets.length) {
     const error = new Error(`${visualMode === "FULL_AI_GRAPHIC" ? "FULL_AI branded-finish/video reassembly" : "Exact-copy recomposition"} from the retained AI originals failed validation`);
@@ -4059,7 +6585,7 @@ async function recomposeDraftFromActiveOriginals(draft, {
 
 async function refreshActiveCreativeMetadata(draft, AssetModel) {
   const recommendation = draft.current_package?.primaryRecommendation || {};
-  const policy = buildCaptionPolicyProvenance(recommendation);
+  const policy = buildCaptionPolicyProvenance(recommendation, draft.visual_mode);
   await AssetModel.updateMany(
     {
       draft_id: draft._id,
@@ -4122,7 +6648,19 @@ async function recheckSafeEditReadiness(draft, AssetModel) {
 async function updateDraftPackage(draftId, input, { actor = null, requestId = null, ip = null, dependencies = {} } = {}) {
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
   const AssetModel = dependencies.SocialAsset || SocialAsset;
-  const mutation = await runInMongoTransaction(dependencies, async (session) => {
+  const stagedEditFiles = [];
+  const rememberEditFiles = (files = []) => {
+    safeArray(files).forEach((file) => {
+      const storageKey = trimText(file?.storage_key || file?.storageKey);
+      if (storageKey) stagedEditFiles.push({
+        storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+        storage_key: storageKey,
+      });
+    });
+  };
+  let mutation;
+  try {
+    mutation = await runInMongoTransaction(dependencies, async (session) => {
     const TransactionAssetModel = bindModelToMongoSession(AssetModel, session);
     const TransactionDraftModel = bindModelToMongoSession(DraftModel, session);
     const transactionDependencies = {
@@ -4197,7 +6735,9 @@ async function updateDraftPackage(draftId, input, { actor = null, requestId = nu
         dependencies: transactionDependencies,
         AssetModel: TransactionAssetModel,
         visualMode: fullAiVideoReassemblyRequired ? "FULL_AI_GRAPHIC" : "AI_VISUAL_WITH_EXACT_OVERLAY",
+        onStagedFile: (file) => rememberEditFiles([file]),
       });
+      rememberEditFiles(recomposed.creativeResult.staged_files || recomposed.creativeResult.assets);
       draft.asset_ids = creativeAssetIds(recomposed.creativeResult.assets);
       draft.final_composed_asset_ids = creativeAssetIds(recomposed.creativeResult.assets, { publishableCompositionOnly: true });
       draft.original_ai_asset_ids = recomposed.originals.map((asset) => asset._id || asset.id).filter(Boolean);
@@ -4255,13 +6795,20 @@ async function updateDraftPackage(draftId, input, { actor = null, requestId = nu
     });
     await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, action: "DRAFT_EDITED", summary: `Edited ${changes.length} social content field${changes.length === 1 ? "" : "s"}${imageGenerationRequired ? "; fresh AI artwork is required" : exactCopyRecomposeRequired ? "; exact-copy assets were recomposed from retained AI originals" : fullAiVideoReassemblyRequired ? "; video was reassembled from retained AI frames" : ""}.`, actor, fieldChanges: changes, requestId, ip, metadata: { revision: draft.revision, workflow_status: draft.status, image_generation_required: imageGenerationRequired, exact_copy_recomposed: exactCopyRecomposeRequired, full_ai_video_reassembled: fullAiVideoReassemblyRequired, caption_policy_metadata_refreshed: !imageGenerationRequired && !exactCopyRecomposeRequired && !fullAiVideoReassemblyRequired, approved_copy_metadata_refreshed: !imageGenerationRequired && !exactCopyRecomposeRequired && !fullAiVideoReassemblyRequired, original_ai_assets_reused: !imageGenerationRequired }, dependencies: transactionDependencies });
     return { draftId: draft._id, readDependencies: dependencies.mongoSession ? transactionDependencies : null };
-  });
+    });
+  } catch (error) {
+    rememberEditFiles(error.staged_files);
+    const cleanup = await cleanupUncommittedFinalFiles(stagedEditFiles, { AssetModel, dependencies });
+    if (cleanup.failed) error.staged_file_cleanup = cleanup;
+    throw error;
+  }
   return getDraftDetail(mutation.draftId, { dependencies: mutation.readDependencies || dependencies });
 }
 
 async function regenerateDraftVisual(draftId, {
   actor = null,
   requestId = null,
+  requestKey = null,
   ip = null,
   templateMode = false,
   visualMode = null,
@@ -4269,12 +6816,14 @@ async function regenerateDraftVisual(draftId, {
   dependencies = {},
 } = {}) {
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
-  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
-  const AssetModel = dependencies.SocialAsset || SocialAsset;
-  const draft = await DraftModel.findById(draftId);
+  let RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  let AssetModel = dependencies.SocialAsset || SocialAsset;
+  let draft = await DraftModel.findById(draftId);
   if (!draft) { const error = new Error("Social draft not found"); error.statusCode = 404; throw error; }
   if (["PUBLISHING", "PUBLISHED"].includes(draft.status)) { const error = new Error("A publishing or published draft cannot regenerate its creative"); error.statusCode = 409; throw error; }
   if (draft.publication_id) { const error = new Error("A draft with a publication attempt is immutable; duplicate it before changing creative"); error.statusCode = 409; throw error; }
+  const expectedRevision = Number(draft.revision || 0);
+  const expectedPackageFingerprint = sha256(draft.current_package || {});
   if (templateMode) {
     const error = new Error("Template-only Social Media Manager creatives are disabled; generate an original OpenAI visual or use an approved authentic product asset");
     error.code = "social_template_mode_disabled";
@@ -4326,29 +6875,183 @@ async function regenerateDraftVisual(draftId, {
       throw error;
     }
   }
-  const imageResult = await (dependencies.generateSocialVisuals || generateSocialVisuals)({
-    draftLike: draft,
-    recommendation: regenerationRecommendation,
-    settings: runtimeSettings,
-    visualMode: effectiveVisualMode,
-    assetSequence: requestedAssetSequence,
-    comparisonVisuals: priorOriginalAssets.map((asset) => ({
-      sequence: Number(asset.slide_number),
-      checksum_sha256: asset.checksum_sha256,
-      perceptual_hash_64: asset.perceptual_hash_64 || asset.provenance?.perceptual_hash_64 || null,
-    })),
-    dependencies: {
-      ...dependencies,
-      reviseImagePrompt: dependencies.reviseImagePrompt
-        || dependencies.providers?.reviseImagePrompt
-        || (typeof openAiSocialProvider.reviseImagePrompt === "function"
-          ? async (input) => {
-            const response = await openAiSocialProvider.reviseImagePrompt({ context: input, settings: runtimeSettings, dependencies });
-            return response.output || response;
-          }
-          : undefined),
+  const operationClaim = await claimPaidOperation({
+    operation: "VISUAL_REGENERATION",
+    draft,
+    requestKey,
+    requestPayload: {
+      visual_mode: effectiveVisualMode,
+      asset_sequence: requestedAssetSequence,
     },
+    actor,
+    requestId,
+    dependencies,
   });
+  if (operationClaim.reused) {
+    return getDraftDetail(operationClaim.row.result_draft_id || draft._id, { dependencies });
+  }
+  await heartbeatPaidOperation(operationClaim, { dependencies });
+  try {
+    await (dependencies.enforceMonthlyBudget || enforceMonthlyBudget)({
+      settings: canonicalSettings,
+      now: new Date(),
+      models: {
+      SocialGenerationRun: typeof dependencies.SocialGenerationRun?.aggregate === "function"
+        ? dependencies.SocialGenerationRun
+        : dependencies.SocialGenerationRun ? { aggregate: async () => [] } : SocialGenerationRun,
+      SocialGenerationUsageLedger: typeof dependencies.SocialGenerationUsageLedger?.aggregate === "function"
+        ? dependencies.SocialGenerationUsageLedger
+        : dependencies.SocialGenerationRun ? null : SocialGenerationUsageLedger,
+      SocialPaidCallUsageLedger: typeof dependencies.SocialPaidCallUsageLedger?.aggregate === "function"
+        ? dependencies.SocialPaidCallUsageLedger
+        : dependencies.SocialGenerationRun ? null : SocialPaidCallUsageLedger,
+      },
+    });
+  } catch (error) {
+    await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
+    throw error;
+  }
+  const paidCallId = String(operationClaim.row?._id || sha256(operationClaim.key)).slice(0, 200);
+  const stagedFinalFiles = [];
+  let finalFileCleanup = null;
+  const rememberFinalFiles = (files = []) => {
+    safeArray(files).forEach((file) => {
+      const storageKey = trimText(file?.storage_key || file?.storageKey);
+      if (!storageKey) return;
+      stagedFinalFiles.push({
+        storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+        storage_key: storageKey,
+      });
+    });
+  };
+  let imageResult;
+  try {
+    imageResult = await (dependencies.generateSocialVisuals || generateSocialVisuals)({
+      draftLike: draft,
+      recommendation: regenerationRecommendation,
+      settings: runtimeSettings,
+      visualMode: effectiveVisualMode,
+      assetSequence: requestedAssetSequence,
+      comparisonVisuals: priorOriginalAssets.map((asset) => ({
+        sequence: Number(asset.slide_number),
+        checksum_sha256: asset.checksum_sha256,
+        perceptual_hash_64: asset.perceptual_hash_64 || asset.provenance?.perceptual_hash_64 || null,
+      })),
+      dependencies: {
+        ...dependencies,
+        reviseImagePrompt: dependencies.reviseImagePrompt
+          || dependencies.providers?.reviseImagePrompt
+          || (typeof openAiSocialProvider.reviseImagePrompt === "function"
+            ? async (input) => {
+              const response = await openAiSocialProvider.reviseImagePrompt({ context: input, settings: runtimeSettings, dependencies });
+              return imagePromptRevisionResult(response);
+            }
+            : undefined),
+      },
+    });
+    rememberFinalFiles(imageResult.original_visuals.flatMap((visual) => safeArray(visual.staged_files)));
+    await heartbeatPaidOperation(operationClaim, { dependencies });
+  } catch (error) {
+    rememberFinalFiles(error.staged_files);
+    rememberFinalFiles(error.image_generation?.staged_files);
+    finalFileCleanup = await cleanupUncommittedFinalFiles(stagedFinalFiles, { AssetModel, dependencies });
+    if (finalFileCleanup.failed) error.staged_file_cleanup = finalFileCleanup;
+    const evidence = failedImageGenerationEvidence(error);
+    await persistPaidImageCallUsage({
+      callId: paidCallId,
+      draft,
+      operation: "VISUAL_REGENERATION",
+      status: "FAILED",
+      evidence,
+      requestId,
+      dependencies,
+    }).catch((ledgerError) => {
+      error.usage_ledger_error = {
+        code: ledgerError?.code || null,
+        message: "Paid-call usage evidence could not be written to its append-only ledger.",
+      };
+    });
+    await appendAudit({
+      entityType: "DRAFT",
+      entityId: draft._id,
+      draft,
+      action: "AI_IMAGE_REGENERATION_FAILED",
+      status: "FAILED",
+      summary: "The AI visual regeneration failed; paid-call evidence and staged-file recovery details were retained.",
+      actor,
+      requestId,
+      ip,
+      error,
+      metadata: { paid_call_id: paidCallId, final_asset_cleanup: finalFileCleanup, raw_provider_output_retained: false },
+      dependencies,
+    }).catch(() => null);
+    await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
+    throw error;
+  }
+  const paidImageEvidence = completedImageGenerationEvidence(imageResult);
+  try {
+    await persistPaidImageCallUsage({
+      callId: paidCallId,
+      draft,
+      operation: "VISUAL_REGENERATION",
+      status: "SUCCEEDED",
+      evidence: paidImageEvidence,
+      requestId,
+      dependencies,
+    });
+  } catch (error) {
+    error.image_generation = paidImageEvidence;
+    error.usage_ledger_error = {
+      code: trimText(error?.code).slice(0, 200) || null,
+      message: "Paid-call usage evidence could not be written to its append-only ledger.",
+    };
+    const recoveryEvidence = {
+      kind: "PAID_IMAGE_USAGE_LEDGER_FALLBACK",
+      operation: "VISUAL_REGENERATION",
+      paid_call_id: paidCallId,
+      provider_evidence: paidImageEvidence,
+      ledger_error: error.usage_ledger_error,
+      raw_image_bytes_retained: false,
+    };
+    try {
+      await finishPaidOperation(operationClaim, {
+        status: "FAILED",
+        error,
+        recoveryEvidence,
+        dependencies,
+      });
+    } catch (receiptError) {
+      error.recovery_receipt_error = {
+        code: trimText(receiptError?.code).slice(0, 200) || null,
+        message: "Provider evidence could not be durably saved; staged files were preserved for reconciliation.",
+      };
+      error.staged_files = stagedFinalFiles;
+      throw error;
+    }
+    finalFileCleanup = await cleanupUncommittedFinalFiles(stagedFinalFiles, { AssetModel, dependencies });
+    if (finalFileCleanup.failed) error.staged_file_cleanup = finalFileCleanup;
+    await appendAudit({
+      entityType: "DRAFT",
+      entityId: draft._id,
+      draft,
+      action: "AI_IMAGE_USAGE_LEDGER_FALLBACK_RECORDED",
+      status: "FAILED",
+      summary: "The AI image provider call completed, but its usage ledger write failed; sanitized provider evidence was retained on the paid-operation receipt.",
+      actor,
+      requestId,
+      ip,
+      error,
+      metadata: {
+        paid_operation_key: operationClaim.key,
+        paid_call_id: paidCallId,
+        evidence_fingerprint: sha256(recoveryEvidence),
+        final_asset_cleanup: finalFileCleanup,
+        raw_provider_output_retained: false,
+      },
+      dependencies,
+    }).catch(() => null);
+    throw error;
+  }
   const generatedBaseImages = imageResult.original_visuals.map((visual) => ({
     buffer: visual.buffer,
     url: visual.url,
@@ -4424,90 +7127,195 @@ async function regenerateDraftVisual(draftId, {
   const combinedBaseImages = requestedAssetSequence == null
     ? generatedBaseImages
     : [...retainedBaseImages, ...generatedBaseImages].sort((left, right) => left.sequence - right.sequence);
-  const renderOptions = {
-    assetModel: AssetModel,
-    baseImages: combinedBaseImages,
-    imageProvider: imageResult.provider,
-    imageModel: imageResult.model,
-    visualMode: effectiveVisualMode,
-    allowTemplateOnly: false,
-  };
-  let originalAssets = [];
-  if (typeof AssetModel.insertMany === "function" || typeof AssetModel.create === "function") {
-    const persistedRun = await RunModel.findById(draft.generation_run_id);
-    const runIdentity = persistedRun || { _id: draft.generation_run_id };
-    originalAssets = await persistOriginalAiVisualAssets({
-      draft,
-      run: runIdentity,
-      imageResult,
-      recommendation: regenerationRecommendation,
-      visualMode: effectiveVisualMode,
-      AssetModel,
-      replaceSequences: requestedAssetSequence == null ? null : [requestedAssetSequence],
+  let mutation;
+  try {
+    mutation = await runInMongoTransaction(dependencies, async (session) => {
+      const TransactionAssetModel = bindModelToMongoSession(AssetModel, session);
+      const TransactionRunModel = bindModelToMongoSession(RunModel, session);
+      const TransactionDraftModel = bindModelToMongoSession(DraftModel, session);
+      const TransactionOperationModel = bindModelToMongoSession(dependencies.SocialPaidOperation || SocialPaidOperation, session);
+      const TransactionAuditModel = bindModelToMongoSession(dependencies.SocialAuditLog || SocialAuditLog, session);
+      const transactionDependencies = {
+        ...dependencies,
+        mongoSession: session,
+        SocialAsset: TransactionAssetModel,
+        SocialGenerationRun: TransactionRunModel,
+        SocialPostDraft: TransactionDraftModel,
+        SocialPaidOperation: TransactionOperationModel,
+        SocialAuditLog: TransactionAuditModel,
+      };
+      const freshDraft = await TransactionDraftModel.findById(draftId);
+      if (!freshDraft
+        || Number(freshDraft.revision || 0) !== expectedRevision
+        || sha256(freshDraft.current_package || {}) !== expectedPackageFingerprint
+        || freshDraft.publication_id
+        || ["PUBLISHING", "PUBLISHED"].includes(freshDraft.status)) {
+        const error = new Error("The draft changed while paid visual generation was running; the new media was not committed");
+        error.code = "social_draft_changed_during_paid_operation";
+        error.statusCode = 409;
+        throw error;
+      }
+      draft = freshDraft;
+      const renderOptions = {
+        assetModel: TransactionAssetModel,
+        baseImages: combinedBaseImages,
+        imageProvider: imageResult.provider,
+        imageModel: imageResult.model,
+        visualMode: effectiveVisualMode,
+        allowTemplateOnly: false,
+        onStagedFile: (file) => rememberFinalFiles([file]),
+      };
+      let originalAssets = [];
+      if (typeof TransactionAssetModel.insertMany === "function" || typeof TransactionAssetModel.create === "function") {
+        const persistedRun = await TransactionRunModel.findById(draft.generation_run_id);
+        const runIdentity = persistedRun || { _id: draft.generation_run_id };
+        originalAssets = await persistOriginalAiVisualAssets({
+          draft,
+          run: runIdentity,
+          imageResult,
+          recommendation: regenerationRecommendation,
+          visualMode: effectiveVisualMode,
+          AssetModel: TransactionAssetModel,
+          replaceSequences: requestedAssetSequence == null ? null : [requestedAssetSequence],
+          paidCallId,
+        });
+      }
+      let result = await (dependencies.renderSocialDraftAssets || renderSocialDraftAssets)(renderDraft, renderOptions);
+      rememberFinalFiles(result.staged_files || result.assets);
+      if (result.validation_status === "invalid" || !result.assets.length) {
+        const error = new Error("The regenerated creative did not pass required asset validation");
+        error.code = "social_creative_validation_failed";
+        throw error;
+      }
+      result = await assembleReelCreative({
+        draft,
+        run: { _id: draft.generation_run_id },
+        recommendation: regenerationRecommendation,
+        imageResult,
+        creativeResult: result,
+        visualMode: effectiveVisualMode,
+        actor,
+        dependencies: transactionDependencies,
+        AssetModel: TransactionAssetModel,
+      });
+      rememberFinalFiles(result.assets);
+      if (effectiveVisualMode === "FULL_AI_GRAPHIC") applyFullAiDraftManifest(draft, result.assets);
+      else draft.full_ai_graphic_manifest = null;
+      draft.asset_ids = creativeAssetIds(result.assets);
+      draft.final_composed_asset_ids = creativeAssetIds(result.assets, { publishableCompositionOnly: true });
+      if (originalAssets.length) {
+        const retainedIds = requestedAssetSequence == null
+          ? []
+          : priorOriginalAssets
+            .filter((asset) => Number(asset.slide_number) !== requestedAssetSequence)
+            .map((asset) => asset._id || asset.id)
+            .filter(Boolean);
+        draft.original_ai_asset_ids = [...retainedIds, ...originalAssets.map((asset) => asset._id || asset.id).filter(Boolean)];
+      }
+      draft.visual_mode = effectiveVisualMode;
+      draft.visual_mode_resolution = visualModeResolution;
+      draft.current_package = renderDraft.current_package;
+      draft.generation_mode = "FULL_AI";
+      draft.full_ai_ready = true;
+      draft.creative_readiness = {
+        status: result.validation_status === "invalid" ? "FAILED" : result.manual_review_required ? "NEEDS_MANUAL_REVIEW" : "READY",
+        validation_status: result.validation_status,
+        manual_review_required: result.manual_review_required,
+        manual_review_flags: result.manual_review_flags,
+        asset_group_id: result.asset_group_id,
+        primary_asset_url: result.primary_asset_url,
+        original_asset_urls: combinedBaseImages.map((visual) => visual.url || visual.source_url).filter(Boolean),
+        asset_count: result.assets.length,
+        ai_visual_required: true,
+        ai_visual_status: "COMPLETED",
+        reel_assembly_status: ["REEL", "VIDEO_FEED"].includes(draft.current_package.primaryRecommendation.format) ? "COMPLETED" : "NOT_APPLICABLE",
+        reel_video_asset_id: result.reel_video_asset?._id || result.reel_video_asset?.id || null,
+        reel_video_url: result.reel_video_asset?.url || null,
+        reel_subtitle_asset_id: result.reel_subtitle_asset?._id || result.reel_subtitle_asset?.id || null,
+        reel_subtitle_url: result.reel_subtitle_asset?.url || null,
+        reel_subtitle_language: result.reel_subtitle_asset?.subtitle_language || null,
+        checked_at: new Date(),
+      };
+      if (["APPROVED", "SCHEDULED", "REJECTED", "FAILED"].includes(draft.status)) clearApprovalAndSchedule(draft);
+      draft.revision = Math.max(Number(draft.revision || 0), 0) + 1;
+      draft.status = "NEEDS_REVIEW";
+      draft.submitted_for_review_at = new Date();
+      draft.approval_json = { required: true, status: "NEEDS_REVIEW", approved_revision: null };
+      await draft.save(session ? { session } : undefined);
+      await (dependencies.syncWeeklyPlanFromDraft || syncWeeklyPlanFromDraft)(draft, {
+        status: "NEEDS_REVIEW",
+        dependencies: transactionDependencies,
+      });
+      await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, action: "AI_IMAGE_REGENERATED", summary: requestedAssetSequence == null ? `Generated ${imageResult.image_count} new OpenAI original visual${imageResult.image_count === 1 ? "" : "s"} and recomposed the approved package.` : `Regenerated carousel slide ${requestedAssetSequence} and recomposed the carousel while retaining the other approved AI originals.`, actor, requestId, ip, metadata: { paid_operation_key: operationClaim.key, paid_call_id: paidCallId, asset_group_id: result.asset_group_id, validation_status: result.validation_status, image_ai_used_for_text: effectiveVisualMode === "FULL_AI_GRAPHIC", template_mode: false, image_provider: imageResult?.provider || null, image_model: imageResult?.model || null, image_cost: imageResult?.estimated_cost ?? null, asset_sequence: requestedAssetSequence, partial_generation: requestedAssetSequence != null, visual_mode_resolution: visualModeResolution }, dependencies: transactionDependencies });
+      await finishPaidOperation(operationClaim, {
+        status: "SUCCEEDED",
+        resultDraftId: draft._id,
+        dependencies: transactionDependencies,
+      });
+      return { draftId: draft._id };
     });
-  }
-  let result = await (dependencies.renderSocialDraftAssets || renderSocialDraftAssets)(renderDraft, renderOptions);
-  if (result.validation_status === "invalid" || !result.assets.length) {
-    const error = new Error("The regenerated creative did not pass required asset validation");
-    error.code = "social_creative_validation_failed";
+  } catch (error) {
+    let committed = null;
+    try {
+      committed = await authoritativePaidMutationDraft({
+        operationClaim,
+        draftId,
+        action: "AI_IMAGE_REGENERATED",
+        minimumRevision: expectedRevision + 1,
+        allowedStatuses: ["NEEDS_REVIEW"],
+        dependencies,
+      });
+    } catch (reconciliationError) {
+      error.reconciliation_error = {
+        code: reconciliationError?.code || null,
+        message: "The paid visual mutation outcome could not be reconciled safely; committed media was preserved.",
+      };
+      error.code = "social_paid_mutation_reconciliation_required";
+      throw error;
+    }
+    if (committed) return getDraftDetail(committed.draft._id, { dependencies });
+    if (transactionCommitIsIndeterminate(error)) {
+      error.reconciliation_error = {
+        code: "UnknownTransactionCommitResult",
+        message: "The paid visual commit remains indeterminate; media and the running receipt were preserved for deferred reconciliation.",
+      };
+      error.code = "social_paid_mutation_reconciliation_required";
+      throw error;
+    }
+    rememberFinalFiles(error.staged_files);
+    finalFileCleanup = await cleanupUncommittedFinalFiles(stagedFinalFiles, {
+      AssetModel,
+      dependencies,
+    });
+    if (finalFileCleanup.failed) error.staged_file_cleanup = finalFileCleanup;
+    if (!error.image_generation) error.image_generation = paidImageEvidence;
+    await appendAudit({
+      entityType: "DRAFT",
+      entityId: draft._id,
+      draft,
+      action: "AI_IMAGE_REGENERATION_FAILED",
+      status: "FAILED",
+      summary: "The paid AI visual call completed, but the replacement creative was not committed because downstream validation or composition failed.",
+      actor,
+      requestId,
+      ip,
+      error,
+      metadata: {
+        paid_operation_key: operationClaim.key,
+        paid_call_id: paidCallId,
+        failed_stage: "COMPOSING_FINAL_ASSETS",
+        image_provider: imageResult?.provider || null,
+        image_model: imageResult?.model || null,
+        image_cost: imageResult?.estimated_cost ?? null,
+        raw_provider_output_retained: false,
+        final_asset_cleanup: finalFileCleanup,
+      },
+      dependencies,
+    }).catch(() => null);
+    await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
     throw error;
   }
-  result = await assembleReelCreative({
-    draft,
-    run: { _id: draft.generation_run_id },
-    recommendation: regenerationRecommendation,
-    imageResult,
-    creativeResult: result,
-    visualMode: effectiveVisualMode,
-    actor,
-    dependencies,
-    AssetModel,
-  });
-  if (effectiveVisualMode === "FULL_AI_GRAPHIC") applyFullAiDraftManifest(draft, result.assets);
-  else draft.full_ai_graphic_manifest = null;
-  draft.asset_ids = creativeAssetIds(result.assets);
-  draft.final_composed_asset_ids = creativeAssetIds(result.assets, { publishableCompositionOnly: true });
-  if (originalAssets.length) {
-    const retainedIds = requestedAssetSequence == null
-      ? []
-      : priorOriginalAssets
-        .filter((asset) => Number(asset.slide_number) !== requestedAssetSequence)
-        .map((asset) => asset._id || asset.id)
-        .filter(Boolean);
-    draft.original_ai_asset_ids = [...retainedIds, ...originalAssets.map((asset) => asset._id || asset.id).filter(Boolean)];
-  }
-  draft.visual_mode = effectiveVisualMode;
-  draft.visual_mode_resolution = visualModeResolution;
-  draft.current_package = renderDraft.current_package;
-  draft.generation_mode = "FULL_AI";
-  draft.full_ai_ready = true;
-  draft.creative_readiness = {
-    status: result.validation_status === "invalid" ? "FAILED" : result.manual_review_required ? "NEEDS_MANUAL_REVIEW" : "READY",
-    validation_status: result.validation_status,
-    manual_review_required: result.manual_review_required,
-    manual_review_flags: result.manual_review_flags,
-    asset_group_id: result.asset_group_id,
-    primary_asset_url: result.primary_asset_url,
-    original_asset_urls: combinedBaseImages.map((visual) => visual.url || visual.source_url).filter(Boolean),
-    asset_count: result.assets.length,
-    ai_visual_required: true,
-    ai_visual_status: "COMPLETED",
-    reel_assembly_status: ["REEL", "VIDEO_FEED"].includes(draft.current_package.primaryRecommendation.format) ? "COMPLETED" : "NOT_APPLICABLE",
-    reel_video_asset_id: result.reel_video_asset?._id || result.reel_video_asset?.id || null,
-    reel_video_url: result.reel_video_asset?.url || null,
-    reel_subtitle_asset_id: result.reel_subtitle_asset?._id || result.reel_subtitle_asset?.id || null,
-    reel_subtitle_url: result.reel_subtitle_asset?.url || null,
-    reel_subtitle_language: result.reel_subtitle_asset?.subtitle_language || null,
-    checked_at: new Date(),
-  };
-  if (["APPROVED", "SCHEDULED", "REJECTED", "FAILED"].includes(draft.status)) clearApprovalAndSchedule(draft);
-  draft.status = "NEEDS_REVIEW";
-  draft.submitted_for_review_at = new Date();
-  draft.approval_json = { required: true, status: "NEEDS_REVIEW", approved_revision: null };
-  await draft.save();
-  await (dependencies.syncWeeklyPlanFromDraft || syncWeeklyPlanFromDraft)(draft, { status: "NEEDS_REVIEW", dependencies });
-  await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, action: "AI_IMAGE_REGENERATED", summary: requestedAssetSequence == null ? `Generated ${imageResult.image_count} new OpenAI original visual${imageResult.image_count === 1 ? "" : "s"} and recomposed the approved package.` : `Regenerated carousel slide ${requestedAssetSequence} and recomposed the carousel while retaining the other approved AI originals.`, actor, requestId, ip, metadata: { asset_group_id: result.asset_group_id, validation_status: result.validation_status, image_ai_used_for_text: effectiveVisualMode === "FULL_AI_GRAPHIC", template_mode: false, image_provider: imageResult?.provider || null, image_model: imageResult?.model || null, image_cost: imageResult?.estimated_cost ?? null, asset_sequence: requestedAssetSequence, partial_generation: requestedAssetSequence != null, visual_mode_resolution: visualModeResolution }, dependencies });
-  return getDraftDetail(draft._id, { dependencies });
+  return getDraftDetail(mutation.draftId, { dependencies });
 }
 
 async function factCheckDraft(draftId, { actor = null, requestId = null, ip = null, dependencies = {} } = {}) {
@@ -4810,7 +7618,7 @@ async function reviewAndRevisePartialContent({
   }
 }
 
-async function regenerateDraftPart(draftId, scope, {
+async function regenerateDraftPartCore(draftId, scope, {
   actor = null,
   requestId = null,
   ip = null,
@@ -4828,16 +7636,16 @@ async function regenerateDraftPart(draftId, scope, {
   })[requestedScope] || requestedScope;
   if (normalizedScope === "fact_check") return factCheckDraft(draftId, { actor, requestId, ip, dependencies });
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
-  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
-  const AssetModel = dependencies.SocialAsset || SocialAsset;
-  const draft = await DraftModel.findById(draftId);
+  let RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  let AssetModel = dependencies.SocialAsset || SocialAsset;
+  let draft = await DraftModel.findById(draftId);
   if (!draft) { const error = new Error("Social draft not found"); error.statusCode = 404; throw error; }
   if (["PUBLISHING", "PUBLISHED"].includes(draft.status)) { const error = new Error("A publishing or published draft cannot be regenerated"); error.statusCode = 409; throw error; }
   if (draft.publication_id) { const error = new Error("A draft with a publication attempt is immutable; duplicate it before regenerating content"); error.statusCode = 409; throw error; }
   const canonicalSettings = await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
   const runtimeSettings = (dependencies.buildSocialManagerRuntimeSettings || buildSocialManagerRuntimeSettings)(canonicalSettings);
   let nextPackage = clone(draft.current_package);
-  let promptRuns = [];
+  let promptRuns = dependencies.paidOperationContext?.promptRuns || [];
   const revisionAttempts = [];
   let assetInvalidation = null;
   let independentComplianceReview = null;
@@ -4847,6 +7655,7 @@ async function regenerateDraftPart(draftId, scope, {
     const internalSignals = await (dependencies.collectInternalSignals || collectInternalSignals)({ now: new Date(), settings: runtimeSettings, dependencies });
     const research = await (dependencies.collectExternalResearch || collectExternalResearch)({ now: new Date(), internalSignals, settings: runtimeSettings, dependencies });
     collectedResearch = research;
+    promptRuns.push(...researchPromptRuns(research));
     const decision = await (dependencies.generateDailyDecision || generateDailyDecision)({
       now: new Date(),
       internalSignals,
@@ -4868,7 +7677,9 @@ async function regenerateDraftPart(draftId, scope, {
       nextPackage.alternativeRecommendations = clone(decision.package.alternativeRecommendations);
       nextPackage.rejectedIdeas = clone(decision.package.rejectedIdeas);
     }
-    promptRuns = decision.prompt_runs || [];
+    promptRuns.push(
+      ...safeArray(decision.prompt_runs),
+    );
     revisionAttempts.push(...safeArray(decision.content_revision_attempts));
     const run = await RunModel.findById(draft.generation_run_id);
     if (run) {
@@ -5080,6 +7891,48 @@ async function regenerateDraftPart(draftId, scope, {
     error.statusCode = 422;
     throw error;
   }
+  if (typeof dependencies.beforePartialMutation === "function") {
+    await dependencies.beforePartialMutation({ draft, promptRuns });
+  }
+  const originalDependencies = dependencies;
+  const originalRunModel = RunModel;
+  const originalAssetModel = AssetModel;
+  const pendingResearchSourceIds = safeArray(draft.research_source_ids);
+  let mutation;
+  try {
+    mutation = await runInMongoTransaction(originalDependencies, async (session) => {
+      const TransactionDraftModel = bindModelToMongoSession(DraftModel, session);
+      RunModel = bindModelToMongoSession(originalRunModel, session);
+      AssetModel = bindModelToMongoSession(originalAssetModel, session);
+      const transactionDependencies = {
+        ...originalDependencies,
+        mongoSession: session,
+        SocialPostDraft: TransactionDraftModel,
+        SocialGenerationRun: RunModel,
+        SocialAsset: AssetModel,
+        SocialPromptVersion: bindModelToMongoSession(originalDependencies.SocialPromptVersion || SocialPromptVersion, session),
+        SocialAuditLog: bindModelToMongoSession(originalDependencies.SocialAuditLog || SocialAuditLog, session),
+        SocialWeeklyPlan: bindModelToMongoSession(originalDependencies.SocialWeeklyPlan || SocialWeeklyPlan, session),
+      };
+      dependencies = transactionDependencies;
+      const freshDraft = await TransactionDraftModel.findById(draftId);
+      const expectedRevision = originalDependencies.paidOperationContext?.expectedRevision;
+      const expectedPackageFingerprint = originalDependencies.paidOperationContext?.expectedPackageFingerprint;
+      if (!freshDraft
+        || Number(freshDraft.revision || 0) !== Number(expectedRevision)
+        || sha256(freshDraft.current_package || {}) !== expectedPackageFingerprint
+        || freshDraft.publication_id
+        || ["PUBLISHING", "PUBLISHED"].includes(freshDraft.status)) {
+        const error = new Error("The draft changed while paid regeneration was running; the generated result was not committed");
+        error.code = "social_draft_changed_during_paid_operation";
+        error.statusCode = 409;
+        throw error;
+      }
+      draft = freshDraft;
+      draft.research_source_ids = [...new Map([
+        ...safeArray(draft.research_source_ids).map((id) => [String(id), id]),
+        ...pendingResearchSourceIds.map((id) => [String(id), id]),
+      ]).values()];
   const before = clone(draft.current_package);
   const changes = findFieldChanges(before, nextPackage);
   draft.current_package = nextPackage;
@@ -5112,7 +7965,14 @@ async function regenerateDraftPart(draftId, scope, {
     draft.creative_readiness = { status: "STALE", reason: `${normalizedScope} regeneration changed the creative brief`, checked_at: new Date() };
   } else if (assetInvalidation === "FINAL_ONLY") {
     if (draft.visual_mode === "AI_VISUAL_WITH_EXACT_OVERLAY") {
-      const recomposed = await recomposeDraftFromActiveOriginals(draft, { actor, dependencies, AssetModel });
+      const recomposed = await recomposeDraftFromActiveOriginals(draft, {
+        actor,
+        dependencies,
+        AssetModel,
+        onStagedFile: dependencies.onPartialStagedFile,
+      });
+      safeArray(recomposed.creativeResult?.staged_files || recomposed.creativeResult?.assets)
+        .forEach((file) => dependencies.onPartialStagedFile?.(file));
       draft.asset_ids = creativeAssetIds(recomposed.creativeResult.assets);
       draft.final_composed_asset_ids = creativeAssetIds(recomposed.creativeResult.assets, { publishableCompositionOnly: true });
       draft.original_ai_asset_ids = recomposed.originals.map((asset) => asset._id || asset.id).filter(Boolean);
@@ -5139,7 +7999,10 @@ async function regenerateDraftPart(draftId, scope, {
         dependencies,
         AssetModel,
         visualMode: "FULL_AI_GRAPHIC",
+        onStagedFile: dependencies.onPartialStagedFile,
       });
+      safeArray(recomposed.creativeResult?.staged_files || recomposed.creativeResult?.assets)
+        .forEach((file) => dependencies.onPartialStagedFile?.(file));
       draft.asset_ids = creativeAssetIds(recomposed.creativeResult.assets);
       draft.final_composed_asset_ids = creativeAssetIds(recomposed.creativeResult.assets, { publishableCompositionOnly: true });
       draft.original_ai_asset_ids = recomposed.originals.map((asset) => asset._id || asset.id).filter(Boolean);
@@ -5200,6 +8063,8 @@ async function regenerateDraftPart(draftId, scope, {
         submitted_at: draft.submitted_for_review_at,
       };
     }
+  } else {
+    draft.revision = Math.max(Number(draft.revision || 0), 0) + 1;
   }
   await draft.save();
   if (changes.length) {
@@ -5234,6 +8099,8 @@ async function regenerateDraftPart(draftId, scope, {
     promptVersionIds: promptVersionRows.map((row) => row.document._id),
     providerModels: promptRuns.map((row) => ({ provider: row.provider, model: row.model, stage: row.stage })),
     metadata: {
+      paid_operation_key: dependencies.paidOperationContext?.operationClaim?.key || null,
+      paid_call_id: dependencies.paidOperationContext?.paidCallId || null,
       asset_invalidation: assetInvalidation,
       revision: draft.revision,
       workflow_status: draft.status,
@@ -5244,7 +8111,211 @@ async function regenerateDraftPart(draftId, scope, {
     },
     dependencies,
   });
-  return getDraftDetail(draft._id, { dependencies });
+      return {
+        draftId: draft._id,
+        readDependencies: originalDependencies.mongoSession ? transactionDependencies : null,
+      };
+    });
+  } finally {
+    dependencies = originalDependencies;
+    RunModel = originalRunModel;
+    AssetModel = originalAssetModel;
+  }
+  return getDraftDetail(mutation.draftId, {
+    dependencies: mutation.readDependencies || originalDependencies,
+  });
+}
+
+async function regenerateDraftPart(draftId, scope, options = {}) {
+  const requestedScope = trimText(scope || "").toLowerCase();
+  const normalizedScope = ({
+    change_format: "format",
+    format_change: "format",
+    revise: "revision",
+    run_compliance: "compliance",
+    visual_direction: "visual",
+  })[requestedScope] || requestedScope;
+  if (normalizedScope === "fact_check") return regenerateDraftPartCore(draftId, scope, options);
+
+  const dependencies = options.dependencies || {};
+  const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
+  const AssetModel = dependencies.SocialAsset || SocialAsset;
+  const draft = await DraftModel.findById(draftId);
+  if (!draft) { const error = new Error("Social draft not found"); error.statusCode = 404; throw error; }
+  const canonicalSettings = await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
+  const operationClaim = await claimPaidOperation({
+    operation: "PARTIAL_REGENERATION",
+    draft,
+    requestKey: options.requestKey,
+    requestPayload: {
+      scope: normalizedScope,
+      target_format: trimText(options.targetFormat).toUpperCase() || null,
+      instructions_fingerprint: trimText(options.instructions) ? sha256(trimText(options.instructions)) : null,
+    },
+    actor: options.actor,
+    requestId: options.requestId,
+    dependencies,
+  });
+  if (operationClaim.reused) {
+    return getDraftDetail(operationClaim.row.result_draft_id || draft._id, { dependencies });
+  }
+  await heartbeatPaidOperation(operationClaim, { dependencies });
+  try {
+    await (dependencies.enforceMonthlyBudget || enforceMonthlyBudget)({
+      settings: canonicalSettings,
+      now: new Date(),
+      models: {
+        SocialGenerationRun: typeof dependencies.SocialGenerationRun?.aggregate === "function"
+          ? dependencies.SocialGenerationRun
+          : dependencies.SocialGenerationRun ? { aggregate: async () => [] } : SocialGenerationRun,
+        SocialGenerationUsageLedger: typeof dependencies.SocialGenerationUsageLedger?.aggregate === "function"
+          ? dependencies.SocialGenerationUsageLedger
+          : dependencies.SocialGenerationRun ? null : SocialGenerationUsageLedger,
+        SocialPaidCallUsageLedger: typeof dependencies.SocialPaidCallUsageLedger?.aggregate === "function"
+          ? dependencies.SocialPaidCallUsageLedger
+          : dependencies.SocialGenerationRun ? null : SocialPaidCallUsageLedger,
+      },
+    });
+  } catch (error) {
+    await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
+    throw error;
+  }
+
+  const paidCallId = String(operationClaim.row?._id || sha256(operationClaim.key)).slice(0, 200);
+  const paidContext = {
+    operationClaim,
+    paidCallId,
+    promptRuns: [],
+    stagedFiles: [],
+    ledgerRecorded: false,
+    expectedRevision: Number(draft.revision || 0),
+    expectedPackageFingerprint: sha256(draft.current_package || {}),
+  };
+  const rememberStagedFiles = (files = []) => {
+    safeArray(files).forEach((file) => {
+      const storageKey = trimText(file?.storage_key || file?.storageKey);
+      if (storageKey) paidContext.stagedFiles.push({
+        storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+        storage_key: storageKey,
+      });
+    });
+  };
+  const coreDependencies = {
+    ...dependencies,
+    paidOperationContext: paidContext,
+    onPartialStagedFile: (file) => rememberStagedFiles([file]),
+    beforePartialMutation: async ({ promptRuns }) => {
+      await persistPaidTextCallUsage({
+        callId: paidCallId,
+        draft,
+        status: "SUCCEEDED",
+        promptRuns,
+        requestId: options.requestId,
+        dependencies,
+      });
+      paidContext.ledgerRecorded = true;
+      await heartbeatPaidOperation(operationClaim, { dependencies });
+    },
+  };
+  try {
+    const result = await regenerateDraftPartCore(draftId, scope, {
+      ...options,
+      dependencies: coreDependencies,
+    });
+    try {
+      await finishPaidOperation(operationClaim, {
+        status: "SUCCEEDED",
+        resultDraftId: draft._id,
+        dependencies,
+      });
+    } catch (finalizationError) {
+      finalizationError.paid_mutation_committed = true;
+      throw finalizationError;
+    }
+    return result;
+  } catch (error) {
+    if (error.paid_mutation_committed) throw error;
+    let committed = null;
+    try {
+      committed = await authoritativePaidMutationDraft({
+        operationClaim,
+        draftId,
+        action: `REGENERATED_${normalizedScope.toUpperCase()}`,
+        minimumRevision: paidContext.expectedRevision + 1,
+        dependencies,
+      });
+    } catch (reconciliationError) {
+      error.reconciliation_error = {
+        code: reconciliationError?.code || null,
+        message: "The paid partial-regeneration outcome could not be reconciled safely; committed media was preserved.",
+      };
+      error.code = "social_paid_mutation_reconciliation_required";
+      throw error;
+    }
+    if (committed) {
+      try {
+        await finishPaidOperation(operationClaim, {
+          status: "SUCCEEDED",
+          resultDraftId: committed.draft._id,
+          dependencies,
+        });
+      } catch (finalizationError) {
+        finalizationError.paid_mutation_committed = true;
+        throw finalizationError;
+      }
+      return getDraftDetail(committed.draft._id, { dependencies });
+    }
+    if (transactionCommitIsIndeterminate(error)) {
+      error.reconciliation_error = {
+        code: "UnknownTransactionCommitResult",
+        message: "The paid partial-regeneration commit remains indeterminate; media and the running receipt were preserved for deferred reconciliation.",
+      };
+      error.code = "social_paid_mutation_reconciliation_required";
+      throw error;
+    }
+    paidContext.promptRuns.push(...safeArray(error.prompt_runs));
+    rememberStagedFiles(error.staged_files);
+    rememberStagedFiles(error.image_generation?.staged_files);
+    const cleanup = await cleanupUncommittedFinalFiles(paidContext.stagedFiles, { AssetModel, dependencies });
+    if (cleanup.failed) error.staged_file_cleanup = cleanup;
+    if (!paidContext.ledgerRecorded) {
+      await persistPaidTextCallUsage({
+        callId: paidCallId,
+        draft,
+        status: "FAILED",
+        promptRuns: paidContext.promptRuns,
+        error,
+        requestId: options.requestId,
+        dependencies,
+      }).catch((ledgerError) => {
+        error.usage_ledger_error = {
+          code: ledgerError?.code || null,
+          message: "Paid-call usage evidence could not be written to its append-only ledger.",
+        };
+      });
+    }
+    await appendAudit({
+      entityType: "DRAFT",
+      entityId: draft._id,
+      draft,
+      action: "PARTIAL_REGENERATION_FAILED",
+      status: "FAILED",
+      summary: "The paid partial regeneration failed; sanitized provider, validation, and cleanup evidence was retained.",
+      actor: options.actor,
+      requestId: options.requestId,
+      ip: options.ip,
+      metadata: {
+        paid_operation_key: operationClaim.key,
+        paid_call_id: paidCallId,
+        scope: normalizedScope,
+        final_asset_cleanup: cleanup,
+        raw_provider_output_retained: false,
+      },
+      dependencies,
+    }).catch(() => null);
+    await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
+    throw error;
+  }
 }
 
 async function submitDraftForReview(draftId, { actor = null, requestId = null, ip = null, dependencies = {} } = {}) {
@@ -5294,11 +8365,11 @@ function assertStoryFrameCaptionPolicy(recommendation, assets = []) {
     !asset.asset_role
     || ["FINAL_COMPOSED", "FINAL_VIDEO"].includes(asset.asset_role)
   ));
-  if (publicationAssets.some((asset) => asset.provenance?.caption_policy?.method !== "story_frame_overlay")) {
-    const error = new Error("Stories publish without captions, so every final Story asset must retain the approved first-frame/final-frame disclosure policy");
+  if (publicationAssets.some((asset) => !captionPolicyPassed(asset, "STORY", recommendation))) {
+    const error = new Error("Stories publish without captions, so every final Story asset must retain validated first-frame/final-frame on-image copy provenance");
     error.code = "social_story_frame_copy_invalid";
     error.statusCode = 409;
-    error.issues = ["STORY_FRAME_OVERLAY_REQUIRED"];
+    error.issues = ["STORY_ON_FRAME_COPY_PROVENANCE_REQUIRED"];
     throw error;
   }
 }
@@ -6200,10 +9271,40 @@ async function publishDraftNow(draftId, { actor, requestId = null, ip = null, de
   return { draft: await getDraftDetail(draftId, { dependencies }), publication: asObject(result.publication), queued: true };
 }
 
-async function duplicateDraft(draftId, { actor, now = new Date(), requestId = null, ip = null, dependencies = {} } = {}) {
+async function duplicateCommitSucceeded({ run, draft, operationClaim, dependencies = {} } = {}) {
+  if (!run || !draft || !operationClaim?.key) return false;
+  if (String(run.status).toUpperCase() !== "SUCCEEDED"
+    || String(draft.status).toUpperCase() !== "NEEDS_REVIEW"
+    || String(run.selected_draft_id || "") !== String(draft._id || "")) return false;
+  const AuditModel = dependencies.SocialAuditLog || SocialAuditLog;
+  const OperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+  let successAudit = null;
+  let successReceipt = null;
+  if (typeof AuditModel?.findOne === "function") {
+    successAudit = await maybeLean(AuditModel.findOne({
+      generation_run_id: run._id,
+      draft_id: draft._id,
+      action: "DUPLICATED_AS_NEW_DRAFT",
+      action_status: "SUCCEEDED",
+      "metadata.paid_operation_key": operationClaim.key,
+    }));
+  }
+  if (typeof OperationModel?.findOne === "function") {
+    successReceipt = await maybeLean(OperationModel.findOne({
+      _id: operationClaim.row?._id,
+      operation: "DUPLICATE",
+      status: "SUCCEEDED",
+      generation_run_id: run._id,
+      result_draft_id: draft._id,
+    }));
+  }
+  return Boolean(successAudit || successReceipt);
+}
+
+async function duplicateDraft(draftId, { actor, now = new Date(), requestId = null, requestKey = null, ip = null, dependencies = {} } = {}) {
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
-  const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
-  const AssetModel = dependencies.SocialAsset || SocialAsset;
+  let RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
+  let AssetModel = dependencies.SocialAsset || SocialAsset;
   const original = await DraftModel.findById(draftId);
   if (!original) { const error = new Error("Social draft not found"); error.statusCode = 404; throw error; }
   const canonicalSettings = await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
@@ -6224,11 +9325,70 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
     recommendation: packageValue.primaryRecommendation,
     strict: false,
   });
-  const run = await RunModel.create({
+  const operationClaim = await claimPaidOperation({
+    operation: "DUPLICATE",
+    draft: original,
+    requestKey,
+    requestPayload: {
+      visual_mode: visualModeResolution.effective,
+    },
+    actor,
+    requestId,
+    dependencies,
+  });
+  if (operationClaim.reused) {
+    return getDraftDetail(operationClaim.row.result_draft_id, { dependencies });
+  }
+  await heartbeatPaidOperation(operationClaim, { dependencies });
+  try {
+    await (dependencies.enforceMonthlyBudget || enforceMonthlyBudget)({
+      settings: canonicalSettings,
+      now,
+      models: {
+        SocialGenerationRun: typeof dependencies.SocialGenerationRun?.aggregate === "function"
+          ? dependencies.SocialGenerationRun
+          : dependencies.SocialGenerationRun ? { aggregate: async () => [] } : SocialGenerationRun,
+        SocialGenerationUsageLedger: typeof dependencies.SocialGenerationUsageLedger?.aggregate === "function"
+          ? dependencies.SocialGenerationUsageLedger
+          : dependencies.SocialGenerationRun ? null : SocialGenerationUsageLedger,
+        SocialPaidCallUsageLedger: typeof dependencies.SocialPaidCallUsageLedger?.aggregate === "function"
+          ? dependencies.SocialPaidCallUsageLedger
+          : dependencies.SocialGenerationRun ? null : SocialPaidCallUsageLedger,
+      },
+    });
+  } catch (error) {
+    await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
+    throw error;
+  }
+  let run = null;
+  let draft = null;
+  let imageResult = null;
+  const paidCallId = String(operationClaim.row?._id || sha256(operationClaim.key)).slice(0, 200);
+  let paidLedgerRecorded = false;
+  const stagedDuplicateFiles = [];
+  let duplicateFileCleanup = null;
+  const rememberDuplicateFiles = (files = []) => {
+    safeArray(files).forEach((file) => {
+      const storageKey = trimText(file?.storage_key || file?.storageKey);
+      if (storageKey) stagedDuplicateFiles.push({
+        storage_provider: trimText(file?.storage_provider || file?.storageProvider || "local").toLowerCase(),
+        storage_key: storageKey,
+      });
+    });
+  };
+  try {
+    const created = await runInMongoTransaction(dependencies, async (session) => {
+      const TransactionRunModel = bindModelToMongoSession(RunModel, session);
+      const TransactionDraftModel = bindModelToMongoSession(DraftModel, session);
+      const TransactionPaidOperationModel = bindModelToMongoSession(
+        dependencies.SocialPaidOperation || SocialPaidOperation,
+        session,
+      );
+      const transactionRun = await TransactionRunModel.create({
     generation_date: generationDate,
     timezone: "Asia/Kolkata",
     trigger_type: "BACKFILL",
-    idempotency_key: `social-duplicate:${original._id}:${crypto.randomUUID()}`,
+    idempotency_key: `social-duplicate:${original._id}:${sha256(operationClaim.key)}`,
     generation_request: {
       requested_format: packageValue.primaryRecommendation.format,
       generation_scope: "IMAGE",
@@ -6250,14 +9410,17 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
     queued_at: now,
     available_at: now,
     started_at: now,
+    heartbeat_at: now,
+    lease_owner: GENERATION_WORKER_OWNER,
+    lease_expires_at: new Date(now.getTime() + PAID_OPERATION_LEASE_MS),
     attempt_count: 1,
-  });
-  const draft = await DraftModel.create({
-    generation_run_id: run._id,
+      });
+      const transactionDraft = await TransactionDraftModel.create({
+    generation_run_id: transactionRun._id,
     generation_date: generationDate,
     timezone: "Asia/Kolkata",
     revision: 1,
-    idempotency_key: `social-draft-copy:${original._id}:${run._id}`,
+    idempotency_key: `social-draft-copy:${original._id}:${transactionRun._id}`,
     parent_draft_id: original._id,
     generation_mode: original.generation_mode === "FULL_AI" ? "FULL_AI" : "ADMIN_MANUAL",
     visual_mode: visualModeResolution.effective,
@@ -6273,9 +9436,18 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
     creative_readiness: { status: "PENDING", reason: "New draft requires its own asset version" },
     approval_json: { required: true, status: "PENDING" },
     content_fingerprint: buildPublicationFingerprint({ recommendation: packageValue.primaryRecommendation, assetUrls: [] }),
-  });
-  try {
-    const imageResult = await (dependencies.generateSocialVisuals || generateSocialVisuals)({
+      });
+      if (operationClaim.tracked && operationClaim.row?._id && typeof TransactionPaidOperationModel.updateOne === "function") {
+        await TransactionPaidOperationModel.updateOne(
+          { _id: operationClaim.row._id, status: "RUNNING" },
+          { $set: { generation_run_id: transactionRun._id, result_draft_id: transactionDraft._id } },
+        );
+      }
+      return { run: transactionRun, draft: transactionDraft };
+    });
+    run = created.run;
+    draft = created.draft;
+    imageResult = await (dependencies.generateSocialVisuals || generateSocialVisuals)({
       draftLike: draft,
       recommendation: packageValue.primaryRecommendation,
       settings: runtimeSettings,
@@ -6287,11 +9459,60 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
           || (typeof openAiSocialProvider.reviseImagePrompt === "function"
             ? async (input) => {
               const response = await openAiSocialProvider.reviseImagePrompt({ context: input, settings: runtimeSettings, dependencies });
-              return response.output || response;
+              return imagePromptRevisionResult(response);
             }
             : undefined),
       },
     });
+    rememberDuplicateFiles(imageResult.original_visuals.flatMap((visual) => safeArray(visual.staged_files)));
+    await persistPaidImageCallUsage({
+      callId: paidCallId,
+      draft,
+      operation: "DUPLICATE",
+      status: "SUCCEEDED",
+      evidence: completedImageGenerationEvidence(imageResult),
+      requestId,
+      dependencies,
+    });
+    paidLedgerRecorded = true;
+    await heartbeatPaidOperation(operationClaim, { dependencies });
+    if (typeof RunModel.updateOne === "function") {
+      const heartbeatAt = new Date();
+      await RunModel.updateOne(
+        { _id: run._id, status: "RUNNING" },
+        { $set: {
+          heartbeat_at: heartbeatAt,
+          lease_expires_at: new Date(heartbeatAt.getTime() + PAID_OPERATION_LEASE_MS),
+        } },
+      );
+    }
+    const originalDependencies = dependencies;
+    const originalRunModel = RunModel;
+    const originalAssetModel = AssetModel;
+    let duplicateMutation;
+    try {
+      duplicateMutation = await runInMongoTransaction(originalDependencies, async (session) => {
+        RunModel = bindModelToMongoSession(originalRunModel, session);
+        AssetModel = bindModelToMongoSession(originalAssetModel, session);
+        const TransactionDraftModel = bindModelToMongoSession(DraftModel, session);
+        const transactionDependencies = {
+          ...originalDependencies,
+          mongoSession: session,
+          SocialGenerationRun: RunModel,
+          SocialPostDraft: TransactionDraftModel,
+          SocialAsset: AssetModel,
+          SocialAuditLog: bindModelToMongoSession(originalDependencies.SocialAuditLog || SocialAuditLog, session),
+          SocialPaidOperation: bindModelToMongoSession(originalDependencies.SocialPaidOperation || SocialPaidOperation, session),
+        };
+        dependencies = transactionDependencies;
+        run = await RunModel.findById(run._id);
+        draft = await TransactionDraftModel.findById(draft._id);
+        if (!run || !draft || run.status !== "RUNNING" || draft.status !== "DRAFT") {
+          const error = new Error("The duplicate draft state changed before its paid creative could be committed");
+          error.code = "social_draft_changed_during_paid_operation";
+          error.statusCode = 409;
+          throw error;
+        }
     run.current_stage = "VALIDATING_IMAGES";
     run.image_generation_attempts = imageAttemptRows(imageResult, packageValue.primaryRecommendation, visualModeResolution.effective);
     run.image_generation_status = "COMPLETED";
@@ -6348,7 +9569,9 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
       imageModel: imageResult.model,
       visualMode: visualModeResolution.effective,
       allowTemplateOnly: false,
+      onStagedFile: (file) => rememberDuplicateFiles([file]),
     });
+    rememberDuplicateFiles(creativeResult.staged_files || creativeResult.assets);
     if (creativeResult.validation_status === "invalid" || !creativeResult.assets.length) {
       const error = new Error("The duplicated draft's AI-based creative did not pass required validation");
       error.code = "social_creative_validation_failed";
@@ -6365,6 +9588,7 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
       dependencies,
       AssetModel,
     });
+    rememberDuplicateFiles(creativeResult.staged_files || creativeResult.assets);
     if (visualModeResolution.effective === "FULL_AI_GRAPHIC") applyFullAiDraftManifest(draft, creativeResult.assets);
     draft.asset_ids = creativeAssetIds(creativeResult.assets);
     draft.final_composed_asset_ids = creativeAssetIds(creativeResult.assets, { publishableCompositionOnly: true });
@@ -6395,46 +9619,187 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
     run.status = "SUCCEEDED";
     run.current_stage = "COMPLETED";
     run.selected_draft_id = draft._id;
-    run.usage = {
-      input_tokens: 0,
-      output_tokens: 0,
-      total_tokens: 0,
-      estimated_cost: Number(imageResult.estimated_cost || 0),
-      cost_currency: imageResult.cost_currency || "USD",
-    };
+    // The immutable paid-call ledger is authoritative for duplicate image
+    // spend. Keep detailed attempts on the run, but do not count the same call
+    // again in the run aggregate used by monthly budget enforcement.
+    run.usage = { ...mergeGenerationUsage(), estimated_cost: 0, cost_currency: "USD" };
     run.completed_at = new Date();
     run.finished_at = run.completed_at;
+    run.lease_owner = null;
+    run.lease_expires_at = null;
     run.last_error = null;
     await run.save();
-    await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, run, action: "DUPLICATED_AS_NEW_DRAFT", summary: "Duplicated the AI-authored package as a new unapproved draft, generated fresh original OpenAI artwork, and composed new final assets.", actor, requestId, ip, metadata: { parent_draft_id: original._id, image_provider: imageResult.provider, image_model: imageResult.model, image_count: imageResult.image_count }, dependencies });
-    return getDraftDetail(draft._id, { dependencies });
+    await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, run, action: "DUPLICATED_AS_NEW_DRAFT", summary: "Duplicated the AI-authored package as a new unapproved draft, generated fresh original OpenAI artwork, and composed new final assets.", actor, requestId, ip, metadata: { paid_operation_key: operationClaim.key, paid_call_id: paidCallId, parent_draft_id: original._id, image_provider: imageResult.provider, image_model: imageResult.model, image_count: imageResult.image_count }, dependencies });
+    await finishPaidOperation(operationClaim, {
+      status: "SUCCEEDED",
+      resultDraftId: draft._id,
+      generationRunId: run._id,
+      dependencies,
+    });
+        return { draftId: draft._id };
+      });
+    } finally {
+      dependencies = originalDependencies;
+      RunModel = originalRunModel;
+      AssetModel = originalAssetModel;
+    }
+    return getDraftDetail(duplicateMutation.draftId, { dependencies });
   } catch (error) {
+    rememberDuplicateFiles(error.staged_files);
+    rememberDuplicateFiles(error.image_generation?.staged_files);
+    let operationReceipt = operationClaim.row || null;
+    if ((!run || !draft) && operationClaim.tracked) {
+      const OperationModel = dependencies.SocialPaidOperation || SocialPaidOperation;
+      try {
+        if (typeof OperationModel?.findOne === "function") {
+          operationReceipt = await OperationModel.findOne({ _id: operationClaim.row?._id }) || operationReceipt;
+        }
+      } catch (reconciliationError) {
+        error.reconciliation_error = {
+          code: reconciliationError?.code || null,
+          message: "The duplicate placeholder transaction outcome could not be reconciled safely.",
+        };
+        error.code = "social_duplicate_reconciliation_required";
+        throw error;
+      }
+    }
+    const committedRunId = run?._id || operationReceipt?.generation_run_id || null;
+    const committedDraftId = draft?._id || operationReceipt?.result_draft_id || null;
+    let placeholderReloadError = null;
+    if (committedRunId && typeof RunModel.findById === "function") {
+      try { run = await RunModel.findById(committedRunId) || run; } catch (reloadError) { placeholderReloadError = reloadError; }
+    }
+    if (committedDraftId && typeof DraftModel.findById === "function") {
+      try { draft = await DraftModel.findById(committedDraftId) || draft; } catch (reloadError) { placeholderReloadError = reloadError; }
+    }
+    if (operationReceipt?.generation_run_id && operationReceipt?.result_draft_id && (!run || !draft || placeholderReloadError)) {
+      error.reconciliation_error = {
+        code: placeholderReloadError?.code || null,
+        message: "The committed duplicate placeholder could not be reloaded safely; it was left for stale-run reconciliation.",
+      };
+      error.code = "social_duplicate_reconciliation_required";
+      throw error;
+    }
+    if (await duplicateCommitSucceeded({ run, draft, operationClaim, dependencies })) {
+      return getDraftDetail(draft._id, { dependencies });
+    }
+    if (transactionCommitIsIndeterminate(error)) {
+      error.reconciliation_error = {
+        code: "UnknownTransactionCommitResult",
+        message: "The duplicate transaction remains indeterminate; its receipt, placeholder records, and staged media were preserved for deferred reconciliation.",
+      };
+      error.code = "social_duplicate_reconciliation_required";
+      throw error;
+    }
+    if (!paidLedgerRecorded && draft) {
+      try {
+        const ledger = await persistPaidImageCallUsage({
+          callId: paidCallId,
+          draft,
+          operation: "DUPLICATE",
+          status: "FAILED",
+          evidence: failedImageGenerationEvidence(error),
+          requestId,
+          dependencies,
+        });
+        paidLedgerRecorded = Boolean(ledger);
+      } catch (ledgerError) {
+        error.usage_ledger_error = {
+          code: ledgerError?.code || null,
+          message: "Paid-call usage evidence could not be written to its append-only ledger.",
+        };
+      }
+    }
+    duplicateFileCleanup = await cleanupUncommittedFinalFiles(stagedDuplicateFiles, { AssetModel, dependencies });
+    if (duplicateFileCleanup.failed) error.staged_file_cleanup = duplicateFileCleanup;
     const failedAt = new Date();
+    if (!run || !draft) {
+      if (run) {
+        run.status = "FAILED";
+        run.current_stage = "FAILED";
+        run.image_generation_status = "FAILED";
+        run.completed_at = failedAt;
+        run.finished_at = failedAt;
+        run.last_error = {
+          stage: "CREATING_DUPLICATE_DRAFT",
+          code: error.code || "social_duplicate_initialization_failed",
+          message: "The duplicate run could not create its draft and was terminated before any paid generation call.",
+          is_retriable: false,
+          details: duplicateFileCleanup?.attempted ? { final_asset_cleanup: duplicateFileCleanup } : null,
+          occurred_at: failedAt,
+        };
+        await run.save().catch(() => null);
+      }
+      await finishPaidOperation(operationClaim, { status: "FAILED", error, dependencies }).catch(() => null);
+      throw error;
+    }
+    const failedStage = run.current_stage;
+    const errorImageEvidence = error.image_generation
+      ? sanitizeImageGenerationEvidence(error.image_generation)
+      : null;
+    const completedImageEvidence = completedImageGenerationEvidence(imageResult);
+    const sanitizedImageEvidence = imageEvidenceHasBillableWork(errorImageEvidence)
+      ? errorImageEvidence
+      : imageEvidenceHasBillableWork(completedImageEvidence)
+        ? completedImageEvidence
+        : null;
+    const imageFailure = String(error.code || "").includes("image")
+      || ["GENERATING_IMAGES", "VALIDATING_IMAGES"].includes(failedStage);
     run.status = String(error.code || "").includes("image") ? "FAILED_IMAGE_GENERATION" : "FAILED";
     run.current_stage = "FAILED";
-    run.image_generation_status = "FAILED";
+    run.image_generation_status = imageFailure ? "FAILED" : imageResult ? "COMPLETED" : run.image_generation_status;
     run.failed_draft_id = draft._id;
     run.completed_at = failedAt;
     run.finished_at = failedAt;
+    run.lease_owner = null;
+    run.lease_expires_at = null;
+    if (sanitizedImageEvidence) {
+      run.image_generation_attempts = mergeImageAttemptHistory(
+        safeArray(run.image_generation_attempts),
+        failedImageAttemptRows(
+          error,
+          packageValue.primaryRecommendation,
+          visualModeResolution.effective,
+          sanitizedImageEvidence,
+        ),
+      );
+      run.usage = paidLedgerRecorded
+        ? { ...mergeGenerationUsage(), estimated_cost: 0, cost_currency: "USD" }
+        : {
+          ...mergeGenerationUsage(sanitizedImageEvidence.usage || {}),
+          estimated_cost: Number(sanitizedImageEvidence.estimated_cost || 0),
+          cost_currency: sanitizedImageEvidence.cost_currency || "USD",
+        };
+    }
     run.last_error = {
-      stage: "GENERATING_IMAGES",
+      stage: failedStage || "GENERATING_IMAGES",
       code: error.code || "social_duplicate_generation_failed",
-      message: trimText(error.message).slice(0, 2000),
+      message: safeDurableErrorMessage(error),
       is_retriable: Boolean(error.code === "social_image_generation_failed"),
-      details: error.image_generation || null,
+      details: {
+        ...(sanitizedImageEvidence ? { image_generation: sanitizedImageEvidence } : {}),
+        ...(duplicateFileCleanup?.attempted ? { final_asset_cleanup: duplicateFileCleanup } : {}),
+      },
       occurred_at: failedAt,
     };
     draft.status = "FAILED";
     draft.failed_at = failedAt;
     draft.last_error = {
-      stage: "GENERATING_IMAGES",
+      stage: failedStage || "GENERATING_IMAGES",
       code: run.last_error.code,
       message: run.last_error.message,
       is_retriable: run.last_error.is_retriable,
       occurred_at: failedAt,
     };
     await Promise.all([run.save(), draft.save()]);
-    await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, run, action: "DUPLICATE_GENERATION_FAILED", status: "FAILED", summary: "The duplicated package could not produce validated original AI artwork; no fallback creative was created.", actor, requestId, ip, metadata: { error_code: run.last_error.code }, dependencies });
+    await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, run, action: "DUPLICATE_GENERATION_FAILED", status: "FAILED", summary: "The duplicated package could not produce validated original AI artwork; no fallback creative was created.", actor, requestId, ip, metadata: { paid_operation_key: operationClaim.key, paid_call_id: paidCallId, error_code: run.last_error.code, final_asset_cleanup: duplicateFileCleanup, raw_provider_output_retained: false }, dependencies });
+    await finishPaidOperation(operationClaim, {
+      status: "FAILED",
+      resultDraftId: draft._id,
+      generationRunId: run._id,
+      error,
+      dependencies,
+    }).catch(() => null);
     throw error;
   }
 }
@@ -6568,8 +9933,17 @@ module.exports = {
   publishDraftNow,
   _private: {
     assembleReelCreative,
+    authoritativeCompletedGenerationDraft,
+    authoritativeNativeSwapDraft,
+    authoritativePaidMutationDraft,
     candidateSummaries,
+    checkpointProviderCallCompleted,
+    checkpointProviderCallStarted,
+    commitGenerationRunSuccess,
     draftQueueNavigation,
+    duplicateCommitSucceeded,
+    failStaleDuplicatePlaceholder,
+    failStalePaidGenerationRun,
     currentVideoAssemblyPassed,
     creativeAssetIds,
     creativeCopyFingerprint,
@@ -6582,6 +9956,9 @@ module.exports = {
     findFieldChanges,
     freshnessForHours,
     generationErrorIsRetriable,
+    generationRunLeaseExpired,
+    imageAttemptRows,
+    imagePromptRevisionResult,
     istTimeParts,
     persistResearchSources,
     persistReviewerNotificationFailure,
@@ -6596,9 +9973,21 @@ module.exports = {
     visualModeProvenancePassed,
     buildNativeFullAiGraphicAssetRows,
     fullAiNativeSwapFingerprint,
+    fullAiDraftManifestFromAssets,
     normalizeFullAiTextManifest,
     packageWithFullAiNativeMode,
     reviewAssetReadiness,
+    reconcileCommittedGenerationDraft,
+    reconcileStalePaidOperation,
+    reconcileSucceededGenerationAudit,
+    reconcileSucceededWeeklyRunLink,
+    refreshGenerationLease,
+    runInMongoTransaction,
+    processStalePaidOperations,
+    weeklyRetryContext,
+    withGenerationLeaseHeartbeat,
+    claimPaidOperation,
+    finishPaidOperation,
     sha256,
     sourceType,
   },

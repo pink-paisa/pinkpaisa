@@ -118,6 +118,28 @@ const stageExecutionSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const providerCallCheckpointSchema = new mongoose.Schema(
+  {
+    call_key: { type: String, required: true, trim: true, maxlength: 200 },
+    stage: { type: String, required: true, enum: RUN_STAGES, uppercase: true, trim: true },
+    status: {
+      type: String,
+      required: true,
+      enum: ["STARTED", "COMPLETED", "UNCERTAIN"],
+      default: "STARTED",
+      uppercase: true,
+      trim: true,
+    },
+    provider: { type: String, default: "openai", trim: true, maxlength: 100 },
+    model: { type: String, default: null, trim: true, maxlength: 200 },
+    input_fingerprint: { type: String, required: true, trim: true, maxlength: 128 },
+    started_at: { type: Date, required: true },
+    completed_at: { type: Date, default: null },
+    uncertain_at: { type: Date, default: null },
+  },
+  { _id: false }
+);
+
 const generationRequestSchema = new mongoose.Schema(
   {
     requested_format: {
@@ -213,6 +235,8 @@ const imageGenerationAttemptSchema = new mongoose.Schema(
     provider: { type: String, required: true, default: "openai", trim: true },
     model: { type: String, required: true, trim: true },
     image_prompt: { type: String, required: true, trim: true, maxlength: 12000 },
+    prompt_fingerprint: { type: String, default: null, trim: true, maxlength: 128 },
+    output_fingerprint: { type: String, default: null, trim: true, maxlength: 128 },
     negative_visual_instructions: { type: [String], default: [] },
     provider_request_id: { type: String, default: null, trim: true },
     provider_response_id: { type: String, default: null, trim: true },
@@ -231,6 +255,9 @@ const imageGenerationAttemptSchema = new mongoose.Schema(
     original_height: { type: Number, default: null, min: 1, max: 10000 },
     reference_assets: { type: [mongoose.Schema.Types.Mixed], default: [] },
     validation_results: { type: mongoose.Schema.Types.Mixed, default: null },
+    image_usage: { type: usageSchema, default: () => ({}) },
+    validation_usage: { type: usageSchema, default: () => ({}) },
+    prompt_revision: { type: mongoose.Schema.Types.Mixed, default: null },
     usage: { type: usageSchema, default: () => ({}) },
     started_at: { type: Date, default: null },
     completed_at: { type: Date, default: null },
@@ -342,6 +369,7 @@ const SocialGenerationRunSchema = new mongoose.Schema(
     template_only_visual_fallback_used: { type: Boolean, default: false, index: true },
     source_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: "SocialResearchSource" }],
     stage_executions: { type: [stageExecutionSchema], default: [] },
+    provider_call_checkpoints: { type: [providerCallCheckpointSchema], default: [] },
     content_revision_attempts: { type: [contentRevisionAttemptSchema], default: [] },
     image_generation_attempts: { type: [imageGenerationAttemptSchema], default: [] },
     image_generation_status: {
@@ -366,6 +394,28 @@ const SocialGenerationRunSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    retry_of_generation_run_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "SocialGenerationRun",
+      default: null,
+      index: true,
+    },
+    superseded_by_generation_run_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "SocialGenerationRun",
+      default: null,
+      index: true,
+    },
+    superseded_at: { type: Date, default: null, index: true },
+    recovery_archived_at: { type: Date, default: null, index: true },
+    recovery_archived_by_admin_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    recovery_archive_reason: { type: String, default: null, trim: true, maxlength: 1000 },
+    recovery_archive_request_id: { type: String, default: null, trim: true, maxlength: 200 },
     usage: { type: usageSchema, default: () => ({}) },
     attempt_count: { type: Number, default: 0, min: 0 },
     retry_count: { type: Number, default: 0, min: 0 },
@@ -400,6 +450,7 @@ SocialGenerationRunSchema.index({ status: 1, lease_expires_at: 1 });
 SocialGenerationRunSchema.index({ status: 1, next_retry_at: 1, created_at: 1 });
 SocialGenerationRunSchema.index({ current_stage: 1, updated_at: 1 });
 SocialGenerationRunSchema.index({ generation_date: -1, image_generation_status: 1 });
+SocialGenerationRunSchema.index({ recovery_archived_at: 1, superseded_at: 1, finished_at: -1 });
 
 SocialGenerationRunSchema.statics.RUN_STATUSES = RUN_STATUSES;
 SocialGenerationRunSchema.statics.RUN_STAGES = RUN_STAGES;

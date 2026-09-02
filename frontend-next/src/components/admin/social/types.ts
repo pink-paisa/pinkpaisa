@@ -150,6 +150,11 @@ export type SocialGenerationRun = {
   retryCount: number;
   maxAttempts: number;
   nextRetryAt: string | null;
+  retryOfGenerationRunId: string;
+  supersededByGenerationRunId: string;
+  supersededAt: string | null;
+  recoveryArchivedAt: string | null;
+  recoveryArchiveReason: string;
   queuedAt: string | null;
   startedAt: string | null;
   completedAt: string | null;
@@ -706,6 +711,7 @@ export type SocialWorkFailureItem = {
   code: string;
   message: string;
   occurredAt: string | null;
+  recoveryAvailable: boolean;
 };
 
 export type SocialGeneratedContentCounts = {

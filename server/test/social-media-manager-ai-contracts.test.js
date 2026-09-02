@@ -204,6 +204,7 @@ test("format writer retries invalid structured output with schema feedback and p
         status: 200,
         json: async () => ({
           id: `resp-ai-contract-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify(output),
           usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
         }),
@@ -267,6 +268,7 @@ test("format writer revises output when the complete assembled caption exceeds 2
         status: 200,
         json: async () => ({
           id: `resp-ai-caption-contract-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify(output),
           usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
         }),
@@ -315,6 +317,7 @@ test("format writer constrains landing pages to verified active paths plus null 
         status: 200,
         json: async () => ({
           id: `resp-ai-destination-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify(output),
           usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
         }),
@@ -372,6 +375,7 @@ test("visual brief schema locks approved id, format, and visual mode and retries
         status: 200,
         json: async () => ({
           id: `resp-ai-visual-identity-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify(output),
           usage: { input_tokens: 12, output_tokens: 8, total_tokens: 20 },
         }),
@@ -430,6 +434,7 @@ test("revision schema locks outer and revised-content identity", async () => {
         status: 200,
         json: async () => ({
           id: "resp-ai-revision-identity",
+          status: "completed",
           output_text: JSON.stringify({
             id: "primary",
             format: "SINGLE_IMAGE",
@@ -491,6 +496,7 @@ test("product revision schema requires the exact verified product landing path a
         status: 200,
         json: async () => ({
           id: `resp-ai-product-revision-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify({
             id: "product-primary",
             format: "PRODUCT_FEATURE",
@@ -567,6 +573,7 @@ test("financial-disclaimer revision retries unexpected overlay mutations and acc
         status: 200,
         json: async () => ({
           id: `resp-ai-scoped-revision-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify({
             id: "primary",
             format: "SINGLE_IMAGE",
@@ -650,6 +657,7 @@ test("CTA revisions keep legacy on-image CTA placement unchanged", async () => {
         status: 200,
         json: async () => ({
           id: "resp-ai-cta-placement-revision",
+          status: "completed",
           output_text: JSON.stringify({
             id: "primary",
             format: "SINGLE_IMAGE",
@@ -707,6 +715,7 @@ test("revision transport strips null legacy overlay placements for current feed 
       status: 200,
       json: async () => ({
         id: "resp-ai-null-legacy-placement",
+        status: "completed",
         output_text: JSON.stringify({
           id: "primary",
           format: "SINGLE_IMAGE",
@@ -773,6 +782,7 @@ test("structured revision output retries control characters and malformed pipe m
         status: 200,
         json: async () => ({
           id: `resp-ai-hygiene-revision-${calls.length}`,
+          status: "completed",
           output_text: JSON.stringify({
             id: "primary",
             format: "SINGLE_IMAGE",
@@ -823,6 +833,7 @@ test("AI-selected carousel output uses the carousel-only schema instead of a def
         status: 200,
         json: async () => ({
           id: "resp-ai-carousel",
+          status: "completed",
           output_text: JSON.stringify(validCarouselContent()),
           usage: { input_tokens: 20, output_tokens: 30, total_tokens: 50 },
         }),

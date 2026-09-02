@@ -72,7 +72,7 @@ const fullAiDraft = (provenance: Record<string, unknown>) => {
   return draft;
 };
 
-const renderReviewDraft = (draft: ReturnType<typeof fullAiDraft>) => render(<SocialToday
+const renderReviewDraft = (draft: ReturnType<typeof fullAiDraft>, onAction = vi.fn()) => render(<SocialToday
   draft={draft}
   previousDraft={null}
   generationRun={null}
@@ -87,7 +87,7 @@ const renderReviewDraft = (draft: ReturnType<typeof fullAiDraft>) => render(<Soc
   onRecommendationChange={vi.fn()}
   onScheduleChange={vi.fn()}
   onSave={vi.fn()}
-  onAction={vi.fn()}
+  onAction={onAction}
   onAdoptAlternative={vi.fn()}
   onExport={vi.fn()}
   reviewMode
@@ -134,20 +134,20 @@ describe("SocialToday generation controls", () => {
     }));
   });
 
-  it("resolves a protected Story request to verified exact-overlay mode", async () => {
+  it("allows a general Story request to use complete AI-native no-overlay mode", async () => {
     const user = userEvent.setup();
     const onGenerate = renderToday();
     const selects = screen.getAllByRole("combobox");
 
     await user.selectOptions(selects[0], "STORY");
     await user.click(screen.getByText("Advanced visual mode"));
-    expect(selects[2]).toHaveValue("AI_VISUAL_WITH_EXACT_OVERLAY");
-    expect(screen.getByRole("option", { name: /AI-native complete graphic/ })).toBeDisabled();
+    expect(selects[2]).toHaveValue("FULL_AI_GRAPHIC");
+    expect(screen.getByRole("option", { name: /AI-native complete graphic/ })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: /Generate Today’s Post/ }));
     expect(onGenerate).toHaveBeenCalledWith(expect.objectContaining({
       requested_format: "STORY",
-      visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+      visual_mode: "FULL_AI_GRAPHIC",
     }));
   });
 
@@ -196,6 +196,27 @@ describe("SocialToday generation controls", () => {
     expect(screen.getAllByText("Headline · AI-rendered and validated").length).toBeGreaterThan(0);
     expect(screen.getByText(/only the branded finish is composited afterward/i)).toBeVisible();
     expect(screen.queryByText("Artwork & text · AI-native — No overlay")).not.toBeInTheDocument();
+  });
+
+  it("offers an existing eligible Story a one-click AI-native no-overlay regeneration", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const draft = fullAiDraft({
+      overlay: { method: "sharp_svg_overlay", image_ai_used_for_text: false },
+    });
+    draft.visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY";
+    draft.primary.format = "STORY";
+    draft.primary.postType = "EDUCATION";
+    draft.primary.affiliateDisclosure = "";
+    draft.primary.verifiedProductId = "";
+    renderReviewDraft(draft, onAction);
+
+    await user.click(screen.getByText("Advanced · regeneration and overrides"));
+    await user.click(screen.getByRole("button", { name: /Regenerate as AI-native — no overlay/i }));
+    expect(onAction).toHaveBeenCalledWith("regenerate", {
+      scope: "image",
+      visual_mode: "FULL_AI_GRAPHIC",
+    });
   });
 
   it("bundles a ready companion Story into the parent feed approval by default", async () => {

@@ -125,7 +125,7 @@ const recommendationSchema = objectSchema({
   objective: { type: "string", enum: OBJECTIVES },
   format: { type: "string", enum: FORMATS },
   contentPillar: { type: "string", enum: CONTENT_PILLARS },
-  targetAudienceSegment: stringSchema({ minLength: 1, maxLength: 240 }),
+  targetAudienceSegment: stringSchema({ minLength: 1, maxLength: 300 }),
   topic: stringSchema({ minLength: 1, maxLength: 240 }),
   verifiedProductId: nullableStringSchema({ maxLength: 80 }),
   verifiedProductTitle: nullableStringSchema({ maxLength: 240 }),
@@ -164,7 +164,11 @@ const FINAL_SOCIAL_PACKAGE_SCHEMA = objectSchema({
   generationDate: stringSchema({ pattern: "^\\d{4}-\\d{2}-\\d{2}$" }),
   timezone: { type: "string", const: "Asia/Kolkata" },
   primaryRecommendation: recommendationSchema,
-  alternativeRecommendations: arraySchema(recommendationSchema, { minItems: 2, maxItems: 2 }),
+  // Exploratory/manual decisions retain exactly two alternatives. A weekly
+  // item has already been selected and approved at the strategy stage, so its
+  // creative package intentionally contains no alternatives. One alternative
+  // is never valid: packages are either approved-primary-only or exploratory.
+  alternativeRecommendations: arraySchema(recommendationSchema, { maxItems: 2 }),
   rejectedIdeas: arraySchema(objectSchema({
     topic: stringSchema({ minLength: 1, maxLength: 240 }),
     reasonRejected: stringSchema({ minLength: 1, maxLength: 500 }),
@@ -197,7 +201,7 @@ const candidateSchema = objectSchema({
   objective: { type: "string", enum: OBJECTIVES },
   format: { type: "string", enum: FORMATS },
   contentPillar: { type: "string", enum: CONTENT_PILLARS },
-  targetAudienceSegment: stringSchema({ minLength: 1, maxLength: 240 }),
+  targetAudienceSegment: stringSchema({ minLength: 1, maxLength: 300 }),
   businessObjective: stringSchema({ minLength: 1, maxLength: 400 }),
   verifiedProductId: nullableStringSchema({ maxLength: 80 }),
   verifiedProductTitle: nullableStringSchema({ maxLength: 240 }),
@@ -364,7 +368,7 @@ const REEL_CONTENT_SCHEMA = objectSchema({
   ...formatContentBaseProperties({ type: "string", const: "REEL" }),
   durationSeconds: { type: "number", minimum: 3, maximum: 180 },
   coverHeadline: stringSchema({ minLength: 1, maxLength: 80 }),
-  audioDirection: stringSchema({ minLength: 1, maxLength: 500 }),
+  audioDirection: stringSchema({ minLength: 1, maxLength: 700 }),
   scenes: arraySchema(reelSceneContentSchema, { minItems: 1, maxItems: 20 }),
   coverImagePrompt: stringSchema({ minLength: 1, maxLength: 3000 }),
   overlayInstructions: overlayInstructionsSchema,
@@ -377,7 +381,7 @@ const VIDEO_FEED_CONTENT_SCHEMA = objectSchema({
   ...formatContentBaseProperties({ type: "string", const: "VIDEO_FEED" }),
   durationSeconds: { type: "number", minimum: 3, maximum: 180 },
   coverHeadline: stringSchema({ minLength: 1, maxLength: 80 }),
-  audioDirection: stringSchema({ minLength: 1, maxLength: 500 }),
+  audioDirection: stringSchema({ minLength: 1, maxLength: 700 }),
   scenes: arraySchema(reelSceneContentSchema, { minItems: 1, maxItems: 20 }),
   coverImagePrompt: stringSchema({ minLength: 1, maxLength: 3000 }),
   overlayInstructions: overlayInstructionsSchema,
@@ -743,6 +747,12 @@ function validateWithSchema(schema, value, label = "Structured output") {
 
 function validateSocialPackage(value) {
   const result = validateWithSchema(FINAL_SOCIAL_PACKAGE_SCHEMA, value, "Social content package");
+  if (![0, 2].includes(result.alternativeRecommendations.length)) {
+    const error = new Error("Social content package alternativeRecommendations must contain either zero or exactly two items");
+    error.code = "structured_output_invalid";
+    error.validation_errors = ["$.alternativeRecommendations must contain either zero or exactly two items"];
+    throw error;
+  }
   const recommendations = [result.primaryRecommendation, ...result.alternativeRecommendations];
   for (const recommendation of recommendations) {
     validateFormatContent(recommendation.format, recommendation.formatContent);

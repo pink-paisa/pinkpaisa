@@ -76,12 +76,39 @@ const apiFetch = vi.fn(async (path: string, _options?: Record<string, unknown>) 
       draftDetailFailures[id] -= 1;
       throw new Error("Temporary draft detail failure");
     }
-    return { draft: customDetail };
+    return { draft: customDetail, generation_run: detailGenerationRun };
   }
   if (requestPath.includes("/drafts/draft-next-review")) return { draft: customDrafts?.find((draft) => draft._id === "draft-next-review") };
   if (requestPath.includes("/drafts/draft-queue-1")) return { draft: { ...queuedDraft, generation_run: detailGenerationRun } };
   if (requestPath.includes("manual-actions")) return { data: { actions: [] } };
   if (requestPath.includes("analytics/summary")) return { data: { summary: null } };
+  if (requestPath.includes("/archive-failure")) {
+    customDrafts = customDrafts?.filter((draft) => String(draft.generation_run_id || "") !== "run-failed") || null;
+    if (workSummaryResponse) {
+      const content = (workSummaryResponse.content || {}) as Record<string, unknown>;
+      workSummaryResponse = {
+        ...workSummaryResponse,
+        counts: { ...((workSummaryResponse.counts || {}) as Record<string, unknown>), content: 0 },
+        content: { ...content, actionable_count: 0, terminal_failure: 0, terminal_failure_items: [] },
+      };
+    }
+    return { generation_run: { id: "run-failed", status: "FAILED_IMAGE_GENERATION", recovery_archived_at: "2026-09-01T12:00:00.000Z" } };
+  }
+  if (requestPath.endsWith("/retry")) {
+    const removedCustomFailure = Boolean(customDrafts?.some((draft) => String(draft.generation_run_id || "") === "run-failed"));
+    if (removedCustomFailure) {
+      customDrafts = customDrafts?.filter((draft) => String(draft.generation_run_id || "") !== "run-failed") || null;
+      if (workSummaryResponse) {
+        const content = (workSummaryResponse.content || {}) as Record<string, unknown>;
+        workSummaryResponse = {
+          ...workSummaryResponse,
+          counts: { ...((workSummaryResponse.counts || {}) as Record<string, unknown>), content: 0 },
+          content: { ...content, actionable_count: 0, terminal_failure: 0, terminal_failure_items: [] },
+        };
+      }
+    }
+    return { generation_run: { _id: "run-retry", status: "PENDING", retry_of_generation_run_id: "run-failed" } };
+  }
   if (requestPath.includes("work-summary")) return workSummaryResponse || {};
   if (requestPath.includes("community")) return { data: { items: [] } };
   if (requestPath.includes("connections")) return { data: { connections: [] } };
@@ -159,6 +186,7 @@ describe("Social Media Manager workspace composition", () => {
           id: "run-failed",
           generation_run_id: "run-failed",
           status: "FAILED_IMAGE_GENERATION",
+          recovery_available: true,
           code: "image_provider_failed",
           message: "OpenAI image generation failed visibly.",
         }],
@@ -180,12 +208,21 @@ describe("Social Media Manager workspace composition", () => {
     render(<SocialMediaManager />);
 
     await user.click(await screen.findByRole("tab", { name: /Content\s*1/ }));
-    expect(await screen.findByRole("region", { name: "Unlinked creative failures" })).toBeVisible();
+    expect(await screen.findByRole("region", { name: "Creative failures needing recovery" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Retry generation" }));
     await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
       "/social-media-manager/admin/runs/run-failed/retry",
       expect.objectContaining({ method: "POST" }),
     ));
+    await user.click(screen.getByRole("button", { name: "Dismiss failure" }));
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith(
+      "/social-media-manager/admin/runs/run-failed/archive-failure",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ reason: "Dismissed from actionable recovery after administrator review." }),
+      }),
+    ));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Creative failures needing recovery" })).not.toBeInTheDocument());
 
     await user.click(screen.getByRole("tab", { name: /Results\s*1/ }));
     expect(await screen.findByRole("region", { name: "Publishing failures" })).toBeVisible();
@@ -205,6 +242,85 @@ describe("Social Media Manager workspace composition", () => {
         }),
       }),
     ));
+  });
+
+  it("removes a dismissed failed draft from both recovery actions and the attention queue", async () => {
+    customDrafts = [{
+      ...reviewReadyDraft("draft-failed", "Failed creative to dismiss", "weekly-failed"),
+      status: "FAILED",
+      generation_run_id: "run-failed",
+      last_error: { code: "social_image_generation_failed", message: "Image validation failed." },
+    }];
+    workSummaryResponse = {
+      counts: { content: 1 },
+      content: {
+        actionable_count: 1,
+        terminal_failure: 1,
+        terminal_failure_items: [{
+          type: "DRAFT",
+          id: "draft-failed",
+          draft_id: "draft-failed",
+          generation_run_id: "run-failed",
+          recovery_available: true,
+          status: "FAILED",
+          code: "social_image_generation_failed",
+          message: "Image validation failed.",
+        }],
+      },
+    };
+    const user = userEvent.setup();
+    render(<SocialMediaManager />);
+
+    await user.click(await screen.findByRole("tab", { name: /Content\s*1/ }));
+    expect(await screen.findByText("Failed creative to dismiss")).toBeVisible();
+    const recovery = await screen.findByRole("region", { name: "Creative failures needing recovery" });
+    await user.click(within(recovery).getByRole("button", { name: "Dismiss failure" }));
+
+    await waitFor(() => expect(screen.queryByText("Failed creative to dismiss")).not.toBeInTheDocument());
+    expect(screen.queryByRole("region", { name: "Creative failures needing recovery" })).not.toBeInTheDocument();
+  });
+
+  it("removes a superseded failed draft when retry is queued from its open review drawer", async () => {
+    customDrafts = [{
+      ...reviewReadyDraft("draft-failed-drawer", "Failed drawer creative", "weekly-failed-drawer"),
+      status: "FAILED",
+      generation_run_id: "run-failed",
+      last_error: { code: "social_image_generation_failed", message: "Image validation failed." },
+    }];
+    detailGenerationRun = {
+      _id: "run-failed",
+      status: "FAILED_IMAGE_GENERATION",
+      current_stage: "FAILED",
+      last_error: { code: "social_image_generation_failed", message: "Image validation failed." },
+    };
+    workSummaryResponse = {
+      counts: { content: 1 },
+      content: {
+        actionable_count: 1,
+        terminal_failure: 1,
+        terminal_failure_items: [{
+          type: "DRAFT",
+          id: "draft-failed-drawer",
+          draft_id: "draft-failed-drawer",
+          generation_run_id: "run-failed",
+          recovery_available: true,
+          status: "FAILED",
+          code: "social_image_generation_failed",
+          message: "Image validation failed.",
+        }],
+      },
+    };
+    const user = userEvent.setup();
+    render(<SocialMediaManager />);
+
+    await user.click(await screen.findByRole("tab", { name: /Content\s*1/ }));
+    await user.click((await screen.findAllByRole("button", { name: "Review creative" }))[0]);
+    expect(await screen.findByRole("dialog", { name: "Failed drawer creative" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Retry AI generation" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Failed drawer creative" })).not.toBeInTheDocument());
+    expect(screen.queryByText("Failed drawer creative")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Creative failures needing recovery" })).not.toBeInTheDocument();
   });
 
   it("keeps model, retry, full-AI and publishing overrides collapsed under Advanced", async () => {

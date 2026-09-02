@@ -64,6 +64,7 @@ function mapValidationStatus(value) {
 
 function freshnessFromHours(value, sourceType) {
   if (sourceType === "EVERGREEN") return "EVERGREEN";
+  if (value === null || value === undefined || value === "") return "UNKNOWN";
   const hours = Number(value);
   if (!Number.isFinite(hours) || hours < 0) return "UNKNOWN";
   if (hours <= 24) return "CURRENT";
@@ -84,7 +85,13 @@ function buildPersistenceRecord(source = {}, context = {}) {
   const idempotencyKey = String(source.idempotency_key || "").trim()
     || `social-source:${crypto.createHash("sha256").update(hashInput).digest("hex")}`;
   const injectionFlags = Array.isArray(source.prompt_injection_flags) ? source.prompt_injection_flags : [];
-  const freshnessHours = Number.isFinite(Number(source.freshness_hours)) ? Number(source.freshness_hours) : null;
+  const freshnessHours = source.freshness_hours === null
+    || source.freshness_hours === undefined
+    || source.freshness_hours === ""
+    ? null
+    : Number.isFinite(Number(source.freshness_hours))
+      ? Number(source.freshness_hours)
+      : null;
 
   return {
     ...source,

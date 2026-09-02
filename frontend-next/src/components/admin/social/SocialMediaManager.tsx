@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Archive,
   BarChart3,
   Check,
   Images,
@@ -57,6 +58,12 @@ import { SocialDraftReviewDrawer } from "./SocialDraftReviewDrawer";
 import { SocialAudioLibrary } from "./SocialAudioLibrary";
 import { SocialGeneratedContentCleanup } from "./SocialGeneratedContentCleanup";
 import { actionableDraftCount } from "./socialWorkflow";
+import {
+  acquirePaidMutationKey,
+  PaidMutationKeyLease,
+  releasePaidMutationKey,
+  shouldRetainPaidMutationKey,
+} from "./paidMutationIdempotency";
 import {
   DEFAULT_SOCIAL_SETTINGS,
   EMPTY_READINESS,
@@ -270,11 +277,13 @@ const SocialMediaManager = () => {
       to.setDate(to.getDate() + 180);
       const response = await apiFetch(`${API_BASE}/drafts?from=${from.toISOString().slice(0, 10)}&to=${to.toISOString().slice(0, 10)}&limit=250`);
       const items = normalizeDraftList(response);
-      setCalendarDrafts((current) => {
-        const selectedDraft = includeSelectedDraft && draft ? [draft] : [];
-        const merged = [...selectedDraft, ...items, ...current.filter((item) => !items.some((next) => next.id === item.id))];
-        return Array.from(new Map(merged.filter((item) => item.id).map((item) => [item.id, item])).values());
-      });
+      // Treat the server response as authoritative so archived/superseded
+      // failures disappear instead of being resurrected from stale UI state.
+      // A currently selected draft may be retained only when explicitly asked.
+      const selectedDraft = includeSelectedDraft && draft ? [draft] : [];
+      setCalendarDrafts(Array.from(new Map(
+        [...selectedDraft, ...items].filter((item) => item.id).map((item) => [item.id, item]),
+      ).values()));
       setCalendarLoaded(true);
     } catch (error) {
       const message = errorMessage(error, "Could not load the social agenda");
@@ -623,6 +632,8 @@ const SocialMediaManager = () => {
         if (nextRun) setGenerationRun(nextRun);
         const nextDraft = responseDraft(response);
         if (nextDraft) applyDraft(nextDraft);
+        await Promise.all([loadWorkSummary(), loadCalendar(false)]);
+        if (reviewDrawerOpen && !nextDraft) setReviewDrawerOpen(false);
         toast.success((response as Record<string, unknown>)?.message as string || "Generation retry queued");
       } catch (error) {
         toast.error(errorMessage(error, "Could not retry this generation run"));
@@ -691,14 +702,28 @@ const SocialMediaManager = () => {
     }
 
     setBusyAction(actionKey);
+    const paidMutation = ["regenerate", "render", "duplicate"].includes(action);
+    let paidMutationLease: PaidMutationKeyLease | null = null;
     try {
+      paidMutationLease = paidMutation
+        ? acquirePaidMutationKey({
+          actionKey,
+          draftId: draft.id,
+          revision: draft.revision,
+          body,
+        })
+        : null;
+      const idempotencyKey = action === "approve-and-schedule"
+        ? `${draft.id}:${draft.updatedAt || draft.createdAt}:${String(body.scheduled_for || "weekly-slot")}:${body.include_companion_story === true ? "with-companion" : "single"}`
+        : paidMutation
+          ? paidMutationLease?.key || ""
+          : "";
       const response = await apiFetch(`${API_BASE}/drafts/${encodeURIComponent(draft.id)}/${route}`, {
         method: "POST",
-        ...(action === "approve-and-schedule" ? {
-          headers: { "Idempotency-Key": `${draft.id}:${draft.updatedAt || draft.createdAt}:${String(body.scheduled_for || "weekly-slot")}:${body.include_companion_story === true ? "with-companion" : "single"}` },
-        } : {}),
+        ...(idempotencyKey ? { headers: { "Idempotency-Key": idempotencyKey } } : {}),
         body: JSON.stringify(body),
       });
+      if (paidMutationLease) releasePaidMutationKey(paidMutationLease);
       const nextDraft = responseDraft(response);
       const nextRun = responseRun(response);
       if (nextRun) setGenerationRun(nextRun);
@@ -747,6 +772,7 @@ const SocialMediaManager = () => {
       }
       toast.success((response as Record<string, unknown>)?.message as string || `${action.replace(/-/g, " ")} complete`);
     } catch (error) {
+      if (paidMutationLease && !shouldRetainPaidMutationKey(error)) releasePaidMutationKey(paidMutationLease);
       toast.error(errorMessage(error, `Could not ${action.replace(/-/g, " ")} this draft`));
     } finally {
       setBusyAction("");
@@ -1186,10 +1212,30 @@ const SocialMediaManager = () => {
       });
       const nextRun = normalizeGenerationRun(response);
       if (nextRun) setGenerationRun(nextRun);
-      await Promise.all([loadWorkSummary(), loadCalendar()]);
+      await Promise.all([loadWorkSummary(), loadCalendar(false)]);
       toast.success("The failed creative run was queued for a safe retry");
     } catch (error) {
       toast.error(errorMessage(error, "Could not retry the failed creative run"));
+    } finally {
+      setBusyAction("");
+    }
+  };
+
+  const archiveSummaryGenerationFailure = async (runId: string) => {
+    if (!runId) return;
+    const actionKey = `archive-summary-run:${runId}`;
+    setBusyAction(actionKey);
+    try {
+      await apiFetch(`${API_BASE}/runs/${encodeURIComponent(runId)}/archive-failure`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: "Dismissed from actionable recovery after administrator review.",
+        }),
+      });
+      await Promise.all([loadWorkSummary(), loadCalendar(false)]);
+      toast.success("The failure was dismissed; its audit history remains available");
+    } catch (error) {
+      toast.error(errorMessage(error, "Could not dismiss the failed creative run"));
     } finally {
       setBusyAction("");
     }
@@ -1363,11 +1409,7 @@ const SocialMediaManager = () => {
   const generatingWaitingCount = Number(contentBreakdown.generating_waiting || contentBreakdown.generatingWaiting || 0);
   const generationRecoveryDrafts = calendarDrafts.filter((item) => String(item.status).toUpperCase() === "DRAFT");
   const backgroundGeneratingCount = Math.max(0, generatingWaitingCount - generationRecoveryDrafts.length);
-  const knownDraftIds = new Set(calendarDrafts.map((item) => item.id));
-  const contentFailureItems = (workSummary?.terminalFailures.content || []).filter((item) => {
-    const linkedDraftId = item.draftId || (item.type === "DRAFT" ? item.id : "");
-    return !linkedDraftId || !knownDraftIds.has(linkedDraftId);
-  });
+  const contentFailureItems = workSummary?.terminalFailures.content || [];
   const resultFailureItems = workSummary?.terminalFailures.results || [];
   const countFor = (key: keyof SocialWorkSummary["counts"], fallback = 0) => workSummary ? workSummary.counts[key] : fallback;
   const tabItems: Array<{ value: WorkspaceTab; label: string; icon: typeof Sparkles; count?: number }> = [
@@ -1458,7 +1500,13 @@ const SocialMediaManager = () => {
           </div>
           {contentView === "list" ? <div className="space-y-8">
             <SocialApprovalQueueView drafts={calendarDrafts} loading={calendarLoading} error={calendarError} filter={approvalFilter} onFilterChange={setApprovalFilter} onReload={() => void loadCalendar()} onOpenDraft={(item) => void openDraft(item)} />
-            {contentFailureItems.length ? <section aria-label="Unlinked creative failures" className="border-t border-border pt-8"><Card className="rounded-3xl border-destructive/25 shadow-none"><CardHeader><div className="flex items-center gap-2 text-destructive"><AlertTriangle className="h-5 w-5" /><CardTitle className="font-serif text-2xl">Creative failures needing recovery</CardTitle></div><CardDescription>These failures do not yet have a draft card, so they remain visible here with their specific recovery action.</CardDescription></CardHeader><CardContent className="space-y-3">{contentFailureItems.map((item) => <div key={`${item.type}:${item.id}`} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-destructive/20 bg-destructive/[0.03] p-4"><div className="min-w-0 flex-1"><p className="font-medium">{item.code || `${item.type.replace(/_/g, " ")} failed`}</p><p className="mt-1 text-sm text-muted-foreground">{item.message || "The creative run ended without a completed draft."}</p><p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{item.generationRunId || item.id}</p></div><div className="flex gap-2">{item.draftId ? <Button variant="outline" onClick={() => void openDraftById(item.draftId)}>Open draft</Button> : null}{item.type === "GENERATION_RUN" ? <Button variant="outline" onClick={() => void retrySummaryGenerationRun(item.generationRunId || item.id)} disabled={busyAction === `retry-summary-run:${item.generationRunId || item.id}`}><RefreshCw className={busyAction === `retry-summary-run:${item.generationRunId || item.id}` ? "h-4 w-4 animate-spin" : "h-4 w-4"} /> Retry generation</Button> : null}</div></div>)}{workSummary?.terminalFailuresTruncated.content ? <p className="text-xs text-muted-foreground">Only the five most recent failures are shown. Older failures remain in audit history.</p> : null}</CardContent></Card></section> : null}
+            {contentFailureItems.length ? <section aria-label="Creative failures needing recovery" className="border-t border-border pt-8"><Card className="rounded-3xl border-destructive/25 shadow-none"><CardHeader><div className="flex items-center gap-2 text-destructive"><AlertTriangle className="h-5 w-5" /><CardTitle className="font-serif text-2xl">Creative failures needing recovery</CardTitle></div><CardDescription>Each unresolved failure remains actionable until it is retried or dismissed. Dismissal hides it from the queue while preserving its evidence and audit history.</CardDescription></CardHeader><CardContent className="space-y-3">{contentFailureItems.map((item) => {
+              const runId = item.generationRunId || item.id;
+              const canRecoverGeneration = item.recoveryAvailable === true;
+              const retrying = busyAction === `retry-summary-run:${runId}`;
+              const archiving = busyAction === `archive-summary-run:${runId}`;
+              return <div key={`${item.type}:${item.id}`} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-destructive/20 bg-destructive/[0.03] p-4"><div className="min-w-0 flex-1"><p className="font-medium">{item.code || `${item.type.replace(/_/g, " ")} failed`}</p><p className="mt-1 text-sm text-muted-foreground">{item.message || "The creative run ended without a completed draft."}</p><p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{runId}</p></div><div className="flex flex-wrap gap-2">{item.draftId ? <Button variant="outline" onClick={() => void openDraftById(item.draftId)}>Open draft</Button> : null}{canRecoverGeneration ? <><Button variant="outline" onClick={() => void retrySummaryGenerationRun(runId)} disabled={retrying || archiving}><RefreshCw className={retrying ? "h-4 w-4 animate-spin" : "h-4 w-4"} /> Retry generation</Button><Button variant="ghost" onClick={() => void archiveSummaryGenerationFailure(runId)} disabled={retrying || archiving}><Archive className="h-4 w-4" /> {archiving ? "Dismissing…" : "Dismiss failure"}</Button></> : null}</div></div>;
+            })}{workSummary?.terminalFailuresTruncated.content ? <p className="text-xs text-muted-foreground">Only the five most recent actionable failures are shown. Dismissed and older failures remain in append-only audit history.</p> : null}</CardContent></Card></section> : null}
             <div className="border-t border-border pt-8"><SocialManualActionsPanel actions={manualActions} loading={manualActionsLoading} error={manualActionsError} actionId={manualActionId} onReload={() => void loadManualActions()} onOpenDraft={(draftId) => void openDraftById(draftId)} onUpdate={updateManualAction} /></div>
             {generationRecoveryDrafts.length || backgroundGeneratingCount ? <section aria-label="Generation recovery" className="border-t border-border pt-8"><Card className="rounded-3xl shadow-none"><CardHeader><CardTitle className="font-serif text-2xl">Generating &amp; waiting</CardTitle><CardDescription>Low-priority recovery work appears after human review and manual actions.</CardDescription></CardHeader><CardContent className="space-y-3">{generationRecoveryDrafts.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/70 p-4"><div><p className="font-medium">{item.primary.internalTitle || item.primary.topic || "Creative awaiting generation"}</p><p className="mt-1 text-xs text-muted-foreground">A required creative generation action is waiting. Open the draft to generate fresh validated media.</p></div><Button variant="outline" onClick={() => void openDraft(item)}>Open generation action</Button></div>)}{backgroundGeneratingCount ? <div className="rounded-2xl border border-primary/20 bg-primary/[0.03] p-4 text-sm text-muted-foreground">{backgroundGeneratingCount} creative{backgroundGeneratingCount === 1 ? " is" : "s are"} generating or waiting for a required generation action. Ready items will move into the review queue automatically.</div> : null}</CardContent></Card></section> : null}
           </div> : null}
