@@ -1,6 +1,18 @@
+const configuredApiProxyTarget = (process.env.NEXT_API_PROXY_TARGET || "http://127.0.0.1:5001")
+  .replace(/\/+$/, "")
+  .replace(/\/api$/, "");
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${configuredApiProxyTarget}/api/:path*`,
+      },
+    ];
+  },
   turbopack: {
     // Keep the build scoped to this app even when a parent package-lock exists
     // on a small production host.
