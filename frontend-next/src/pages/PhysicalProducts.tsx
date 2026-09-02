@@ -1,60 +1,34 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { motion } from "framer-motion";
-import { Check, Heart, Search, ShoppingCart, SlidersHorizontal, Sparkles, Star } from "lucide-react";
-import { AffiliateCta } from "@/components/affiliate/AffiliateCta";
+import { ArrowRight, ChevronLeft, ChevronRight, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import Footer from "@/components/Footer";
 import Navbar from "@/components/Navbar";
+import EmptyResults, { type AppliedFilter } from "@/components/storefront/EmptyResults";
+import ProductCard from "@/components/storefront/ProductCard";
 import ProductFilters from "@/components/storefront/ProductFilters";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import QuickViewDialog from "@/components/storefront/QuickViewDialog";
+import SearchAutocomplete from "@/components/storefront/SearchAutocomplete";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useCart } from "@/contexts/CartContext";
 import { useCatalogFacets } from "@/hooks/useCatalogFacets";
-import {
-  useCatalogProducts,
-  type CatalogProduct,
-  type CatalogProductsResponse,
-} from "@/hooks/useCatalogProducts";
+import { useCatalogProducts, type CatalogProduct, type CatalogProductsResponse } from "@/hooks/useCatalogProducts";
 import { useProductTaxonomy } from "@/hooks/useProductTaxonomy";
 import { useWishlist, type WishlistProductSummary } from "@/hooks/useWishlist";
-import { formatAffiliateDataRefreshTime, hasVisibleAffiliatePrice } from "@/lib/affiliateProductData";
+import {
+  CATALOG_PAGE_SIZE,
+  DEFAULT_SORT,
+  SORT_OPTIONS,
+  activeFilterCount,
+  parseCatalogQuery,
+} from "@/lib/catalogQuery";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
-const SORT_OPTIONS = [
-  { value: "popular", label: "Popular" },
-  { value: "newest", label: "Newest" },
-  { value: "price_asc", label: "Price: Low to High" },
-  { value: "price_desc", label: "Price: High to Low" },
-];
-
-const formatPrice = (n: number) => `₹${n.toLocaleString("en-IN")}`;
-
-const getQueryValue = (value: string | string[] | undefined, fallback = "") =>
-  Array.isArray(value) ? value[0] || fallback : value || fallback;
-
-const parseQueryNumber = (value: string | string[] | undefined) => {
-  const normalized = Array.isArray(value) ? value[0] : value;
-  if (!normalized) return null;
-  const parsed = Number(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
-};
-
-const parseQueryBoolean = (value: string | string[] | undefined) => {
-  const normalized = Array.isArray(value) ? value[0] : value;
-  return normalized === "true";
-};
-
-const parseQueryBrands = (value: string | string[] | undefined) => {
-  const normalized = Array.isArray(value) ? value[0] : value;
-  return String(normalized || "")
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-};
+type FilterUpdates = Record<string, string | null>;
 
 const toWishlistProduct = (product: CatalogProduct): WishlistProductSummary => ({
   id: product.id,
@@ -74,156 +48,41 @@ const toWishlistProduct = (product: CatalogProduct): WishlistProductSummary => (
   affiliate_compliance_status: product.affiliate_compliance_status,
 });
 
-const ProductCard = ({
-  product,
-  wished,
-  cartQuantity,
-  onToggleWishlist,
+const Pill = ({
+  label,
+  count,
+  active,
+  onClick,
 }: {
-  product: CatalogProduct;
-  wished: boolean;
-  cartQuantity: number;
-  onToggleWishlist: (product: CatalogProduct) => void;
-}) => {
-  const { addItem } = useCart();
-  const isAffiliate = Boolean(product.is_affiliate && product.affiliate_url);
-  const showAffiliateApiPrice = hasVisibleAffiliatePrice(product);
-  const affiliatePriceRefreshedAt = formatAffiliateDataRefreshTime(product);
-  const isInCart = !isAffiliate && cartQuantity > 0;
-  const outOfStock = !isAffiliate && product.stock_quantity <= 0;
-  const quantityReachedCap = !isAffiliate && cartQuantity >= product.stock_quantity && product.stock_quantity > 0;
-
-  const handleAdd = () => {
-    if (isAffiliate || outOfStock || quantityReachedCap) return;
-    addItem(
-      {
-        id: product.id,
-        title: product.title,
-        price: product.sale_price ?? product.price,
-        priceMax: product.price,
-        format: "Physical Product",
-        image_url: product.featured_image,
-        slug: product.slug,
-        stock_quantity_at_add: product.stock_quantity,
-      },
-      1,
-    );
-    toast.success(`${product.title} added to cart`);
-  };
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-      className="group relative flex min-w-0 flex-col overflow-hidden rounded-lg border border-border bg-card shadow-sm transition-shadow hover:shadow-lg hover:shadow-primary/8"
-    >
-      <Link href={`/product/${product.slug}`} className="relative aspect-square overflow-hidden bg-accent/30">
-          {product.featured_image ? (
-            <img src={product.featured_image} alt={product.title} loading="lazy" decoding="async" className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
-          ) : (
-            <div className="flex h-full w-full items-center justify-center">
-              <Sparkles className="h-12 w-12 text-muted-foreground/30" />
-            </div>
-          )}
-          <div className="absolute left-2 top-2 flex flex-col gap-1.5 sm:left-3 sm:top-3">
-            {product.bestseller && !isAffiliate ? (
-              <span className="flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 text-[9px] font-bold text-primary-foreground sm:px-2.5 sm:py-1 sm:text-[10px]">
-                <Star className="h-3 w-3" /> Bestseller
-              </span>
-            ) : null}
-            {isAffiliate && product.is_featured_affiliate ? (
-              <span className="rounded-full bg-background/95 px-2 py-0.5 text-[9px] font-bold text-primary shadow-sm sm:px-2.5 sm:py-1 sm:text-[10px]">Editor&apos;s pick</span>
-            ) : null}
-            {product.featured && !product.bestseller && !isAffiliate ? (
-              <span className="rounded-full bg-background/95 px-2 py-0.5 text-[9px] font-bold text-primary shadow-sm sm:px-2.5 sm:py-1 sm:text-[10px]">Featured</span>
-            ) : null}
-            {!isAffiliate && product.sale_price ? (
-              <span className="rounded-full bg-destructive px-2 py-0.5 text-[9px] font-bold text-destructive-foreground sm:px-2.5 sm:py-1 sm:text-[10px]">Sale</span>
-            ) : null}
-            {isAffiliate ? (
-              <span className="rounded-full bg-background/95 px-2 py-0.5 text-[9px] font-bold text-primary shadow-sm sm:px-2.5 sm:py-1 sm:text-[10px]">Curated find</span>
-            ) : null}
-          </div>
-          {outOfStock ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
-              <span className="rounded-full bg-muted px-4 py-1.5 text-sm font-semibold text-muted-foreground">Out of Stock</span>
-            </div>
-          ) : null}
-        </Link>
-
-      <button
-        onClick={() => onToggleWishlist(product)}
-        aria-label={wished ? "Remove from wishlist" : "Add to wishlist"}
-        className={`absolute right-2 top-2 rounded-full border p-2 backdrop-blur-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-3 sm:top-3 sm:p-2.5 ${
-          wished ? "border-rose-200 bg-white text-rose-500" : "border-white/70 bg-white/85 text-muted-foreground hover:text-rose-500"
-        }`}
+  label: string;
+  count?: number;
+  active: boolean;
+  onClick: () => void;
+}) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-pressed={active}
+    className={cn(
+      "inline-flex min-h-9 shrink-0 items-center gap-2 rounded-full border px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      active
+        ? "border-primary bg-primary text-primary-foreground"
+        : "border-border bg-card text-foreground hover:bg-accent/60",
+    )}
+  >
+    {label}
+    {count != null ? (
+      <span
+        className={cn(
+          "rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums",
+          active ? "bg-white/25 text-primary-foreground" : "bg-accent text-accent-foreground",
+        )}
       >
-        <Heart className={`h-3.5 w-3.5 sm:h-4 sm:w-4 ${wished ? "fill-current" : ""}`} />
-      </button>
-
-      <div className="flex min-w-0 flex-1 flex-col p-3 sm:p-4">
-        <p className="mb-1 line-clamp-1 text-[9px] font-semibold uppercase tracking-[0.12em] text-primary sm:text-[10px]">
-          {product.category}
-          {product.subcategory ? ` · ${product.subcategory}` : ""}
-        </p>
-
-        <Link href={`/product/${product.slug}`}>
-          <h3 className="mb-1.5 line-clamp-2 min-h-[2.35rem] font-serif text-base leading-tight transition-colors hover:text-primary sm:min-h-[2.5rem] sm:text-lg">{product.title}</h3>
-        </Link>
-
-        {product.short_description ? <p className="mb-3 hidden line-clamp-2 text-sm text-muted-foreground sm:block">{product.short_description}</p> : null}
-
-        <div className={isAffiliate ? "mt-auto space-y-2 sm:space-y-3" : "mt-auto space-y-2 sm:flex sm:items-center sm:justify-between sm:gap-3 sm:space-y-0"}>
-          {isAffiliate ? (
-            showAffiliateApiPrice ? (
-              <div className="w-full">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <span className="font-serif text-base font-bold text-foreground sm:text-xl">{formatPrice(product.sale_price ?? product.price)}</span>
-                  {product.sale_price ? <span className="text-xs text-muted-foreground line-through sm:text-sm">{formatPrice(product.price)}</span> : null}
-                </div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  {affiliatePriceRefreshedAt ? `Updated ${affiliatePriceRefreshedAt}. ` : ""}Confirm on Amazon.
-                </p>
-              </div>
-            ) : (
-              <p className="text-xs leading-5 text-muted-foreground">Confirm price and availability on Amazon.</p>
-            )
-          ) : (
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-baseline gap-x-1.5">
-                <span className="font-serif text-base font-bold text-foreground sm:text-xl">{formatPrice(product.sale_price ?? product.price)}</span>
-                {product.sale_price ? <span className="text-xs text-muted-foreground line-through sm:text-sm">{formatPrice(product.price)}</span> : null}
-              </div>
-            </div>
-          )}
-
-          {isAffiliate ? (
-            <AffiliateCta product={product} label="View on Amazon" size="sm" variant="secondary" className="w-full rounded-full px-2 text-[11px] sm:px-3 sm:text-xs" />
-          ) : (
-            <Button
-              size="sm"
-              variant={isInCart ? "secondary" : "default"}
-              className="h-8 w-full rounded-full px-2.5 text-xs sm:h-9 sm:w-auto sm:px-3"
-              onClick={handleAdd}
-              disabled={outOfStock || quantityReachedCap}
-            >
-              {isInCart ? (
-                <>
-                  <Check className="h-3.5 w-3.5" /> {quantityReachedCap ? "Maxed" : "Added"}
-                </>
-              ) : (
-                <>
-                  <ShoppingCart className="h-3.5 w-3.5" /> Add
-                </>
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
-    </motion.div>
-  );
-};
+        {count}
+      </span>
+    ) : null}
+  </button>
+);
 
 const PhysicalProducts = ({
   initialCatalogResponse,
@@ -231,47 +90,47 @@ const PhysicalProducts = ({
   initialCatalogResponse?: CatalogProductsResponse;
 }) => {
   const router = useRouter();
-  const searchTerm = getQueryValue(router.query.search, "");
-  const categorySlug = getQueryValue(router.query.category, "all");
-  const subcategorySlug = getQueryValue(router.query.subcategory, "all");
-  const sort = getQueryValue(router.query.sort, "popular");
-  const page = Math.max(Number(getQueryValue(router.query.page, "1")) || 1, 1);
-  const minPrice = parseQueryNumber(router.query.min_price);
-  const maxPrice = parseQueryNumber(router.query.max_price);
-  const inStock = parseQueryBoolean(router.query.in_stock);
-  const onSale = parseQueryBoolean(router.query.on_sale);
-  const selectedBrands = parseQueryBrands(router.query.brand);
-
-  const [search, setSearch] = useState(searchTerm);
+  const state = useMemo(() => parseCatalogQuery(router.query), [router.query]);
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [quickViewProduct, setQuickViewProduct] = useState<CatalogProduct | null>(null);
 
   const { data: catalogResponse, isLoading } = useCatalogProducts(
     {
-      search: searchTerm,
-      categorySlug,
-      subcategorySlug,
-      sort,
-      minPrice,
-      maxPrice,
-      inStock,
-      onSale,
-      brands: selectedBrands,
-      page,
-      pageSize: 24,
+      search: state.search,
+      categorySlug: state.categorySlug,
+      subcategorySlug: state.subcategorySlug,
+      sort: state.sort,
+      minPrice: state.minPrice,
+      maxPrice: state.maxPrice,
+      inStock: state.inStock,
+      onSale: state.onSale,
+      brands: state.brands,
+      page: state.page,
+      pageSize: CATALOG_PAGE_SIZE,
     },
     initialCatalogResponse,
   );
   const { data: taxonomy } = useProductTaxonomy();
-  const { data: facets } = useCatalogFacets({
-    search: searchTerm,
-    categorySlug,
-    subcategorySlug,
-    minPrice,
-    maxPrice,
-    inStock,
-    onSale,
-    brands: selectedBrands,
+
+  // Facet counts are computed against whatever filter is applied, so a single
+  // call would zero out every category as soon as one is picked. Three scopes
+  // keep each control showing counts for the dimension it controls; React Query
+  // collapses them into one request whenever the scopes coincide.
+  const { data: globalFacets } = useCatalogFacets({});
+  const { data: categoryFacets } = useCatalogFacets({
+    search: state.search,
+    inStock: state.inStock,
+    onSale: state.onSale,
+    brands: state.brands,
   });
+  const { data: scopedFacets } = useCatalogFacets({
+    search: state.search,
+    categorySlug: state.categorySlug,
+    inStock: state.inStock,
+    onSale: state.onSale,
+    brands: state.brands,
+  });
+
   const { items } = useCart();
   const { toggleWishlist, isWishlisted } = useWishlist();
 
@@ -283,8 +142,36 @@ const PhysicalProducts = ({
     () => (taxonomy ?? []).filter((item) => item.slug !== "uncategorized" && item.is_active),
     [taxonomy],
   );
-  const activeCategory = categories.find((item) => item.slug === categorySlug);
-  const visibleSubcategories = activeCategory?.subcategories ?? [];
+  const activeCategory = categories.find((item) => item.slug === state.categorySlug);
+  const activeSubcategory = activeCategory?.subcategories.find((item) => item.slug === state.subcategorySlug);
+
+  const categoryCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    (categoryFacets?.categories ?? []).forEach((entry) => {
+      if (entry.id) map.set(entry.id, entry.count);
+      map.set(entry.name.toLowerCase(), entry.count);
+    });
+    return map;
+  }, [categoryFacets?.categories]);
+
+  const subcategoryCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    (scopedFacets?.subcategories ?? []).forEach((entry) => {
+      if (entry.id) map.set(entry.id, entry.count);
+      map.set(entry.name.toLowerCase(), entry.count);
+    });
+    return map;
+  }, [scopedFacets?.subcategories]);
+
+  const catalogTotal = useMemo(
+    () => (globalFacets?.categories ?? []).reduce((sum, entry) => sum + entry.count, 0),
+    [globalFacets?.categories],
+  );
+  const allProductsCount = useMemo(
+    () => (categoryFacets?.categories ?? []).reduce((sum, entry) => sum + entry.count, 0),
+    [categoryFacets?.categories],
+  );
+
   const cartQuantities = useMemo(
     () =>
       items.reduce<Record<string, number>>((acc, item) => {
@@ -294,72 +181,48 @@ const PhysicalProducts = ({
     [items],
   );
 
-  const hasActiveFilters = Boolean(
-    searchTerm ||
-      categorySlug !== "all" ||
-      subcategorySlug !== "all" ||
-      sort !== "popular" ||
-      minPrice != null ||
-      maxPrice != null ||
-      inStock ||
-      onSale ||
-      selectedBrands.length,
-  );
+  const appliedCount = activeFilterCount(state);
+  const hasAnyFilter = appliedCount > 0 || state.sort !== DEFAULT_SORT;
 
   const updateParams = useCallback(
-    (updates: Record<string, string | null>) => {
+    (updates: FilterUpdates, options?: { replace?: boolean }) => {
       const nextQuery: Record<string, string> = {};
-
       Object.entries(router.query).forEach(([key, value]) => {
         const normalized = Array.isArray(value) ? value[0] : value;
         if (typeof normalized === "string" && normalized) nextQuery[key] = normalized;
       });
-
       Object.entries(updates).forEach(([key, value]) => {
         if (!value || value === "all") delete nextQuery[key];
         else nextQuery[key] = value;
       });
-
-      router.push({ pathname: "/products", query: nextQuery }, undefined, { shallow: true });
+      const navigate = options?.replace ? router.replace : router.push;
+      void navigate.call(router, { pathname: "/products", query: nextQuery }, undefined, { shallow: true });
     },
     [router],
   );
 
-  useEffect(() => {
-    setSearch(searchTerm);
-  }, [searchTerm]);
+  const clearFilters = useCallback(() => {
+    void router.push({ pathname: "/products", query: {} }, undefined, { shallow: true });
+  }, [router]);
 
-  useEffect(() => {
-    const normalizedSearch = search.trim();
-    if (normalizedSearch === searchTerm) return;
-    const timer = window.setTimeout(() => {
-      updateParams({ search: normalizedSearch || null, page: null });
-    }, 300);
-    return () => window.clearTimeout(timer);
-  }, [search, searchTerm, updateParams]);
+  const toggleBrand = useCallback(
+    (brandName: string) => {
+      const next = state.brands.includes(brandName)
+        ? state.brands.filter((brand) => brand !== brandName)
+        : [...state.brands, brandName];
+      updateParams({ brand: next.length ? next.join(",") : null, page: null });
+    },
+    [state.brands, updateParams],
+  );
 
+  // A stale `page` beyond the last page renders an empty grid that looks like a
+  // no-results state, so pull it back once the response says how many exist.
   useEffect(() => {
     if (isLoading || !catalogResponse) return;
-    if (totalResults > 0 && page > totalPages) {
-      updateParams({ page: totalPages > 1 ? String(totalPages) : null });
+    if (totalResults > 0 && state.page > totalPages) {
+      updateParams({ page: totalPages > 1 ? String(totalPages) : null }, { replace: true });
     }
-  }, [catalogResponse, isLoading, page, totalPages, totalResults, updateParams]);
-
-  const goToPage = (nextPage: number) => {
-    updateParams({ page: nextPage > 1 ? String(nextPage) : null });
-  };
-
-  const toggleBrand = (brandName: string) => {
-    const nextBrands = selectedBrands.includes(brandName)
-      ? selectedBrands.filter((brand) => brand !== brandName)
-      : [...selectedBrands, brandName];
-    updateParams({ brand: nextBrands.length ? nextBrands.join(",") : null, page: null });
-  };
-
-  const clearFilters = () => {
-    setSearch("");
-    router.push({ pathname: "/products", query: {} }, undefined, { shallow: true });
-  };
+  }, [catalogResponse, isLoading, state.page, totalPages, totalResults, updateParams]);
 
   const handleToggleWishlist = async (product: CatalogProduct) => {
     try {
@@ -370,155 +233,299 @@ const PhysicalProducts = ({
     }
   };
 
+  const appliedFilters = useMemo<AppliedFilter[]>(() => {
+    const chips: AppliedFilter[] = [];
+    if (state.search) chips.push({ key: "search", label: `“${state.search}”`, updates: { search: null } });
+    if (activeCategory) {
+      chips.push({
+        key: "category",
+        label: activeCategory.name,
+        updates: { category: null, subcategory: null },
+      });
+    }
+    if (activeSubcategory) {
+      chips.push({ key: "subcategory", label: activeSubcategory.name, updates: { subcategory: null } });
+    }
+    state.brands.forEach((brand) =>
+      chips.push({
+        key: `brand:${brand}`,
+        label: brand,
+        updates: { brand: state.brands.filter((entry) => entry !== brand).join(",") || null },
+      }),
+    );
+    if (state.inStock) chips.push({ key: "in_stock", label: "In stock", updates: { in_stock: null } });
+    if (state.onSale) chips.push({ key: "on_sale", label: "On sale", updates: { on_sale: null } });
+    if (state.minPrice != null) {
+      chips.push({ key: "min_price", label: `Min ₹${state.minPrice}`, updates: { min_price: null } });
+    }
+    if (state.maxPrice != null) {
+      chips.push({ key: "max_price", label: `Max ₹${state.maxPrice}`, updates: { max_price: null } });
+    }
+    return chips;
+  }, [activeCategory, activeSubcategory, state]);
+
+  const filterPanel = (
+    <ProductFilters
+      taxonomy={taxonomy}
+      categoryFacets={categoryFacets}
+      scopedFacets={scopedFacets}
+      state={state}
+      onUpdate={updateParams}
+      onToggleBrand={toggleBrand}
+      onClear={clearFilters}
+    />
+  );
+
+  const rangeStart = totalResults === 0 ? 0 : (state.page - 1) * CATALOG_PAGE_SIZE + 1;
+  const rangeEnd = Math.min(state.page * CATALOG_PAGE_SIZE, totalResults);
+
   return (
-    <div className="min-h-screen overflow-x-hidden bg-background">
+    <div className="min-h-screen bg-background">
       <Navbar />
-      <div className="container mx-auto max-w-full py-6 md:py-10">
-        <div className="mb-6 max-w-3xl">
-          <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-primary md:text-sm">Wellness Products</p>
-          <h1 className="mb-2 max-w-full font-serif text-2xl leading-tight md:text-4xl">Curated Products for Your Journey</h1>
-          <p className="max-w-2xl text-base leading-7 text-muted-foreground md:text-lg">Wellness, self-growth & financial empowerment - handpicked for you.</p>
-          <Link href="/wellness" className="mt-3 inline-flex text-sm font-semibold text-primary hover:underline">
-            Explore Pink Paisa Wellness guides
-          </Link>
-        </div>
 
-        <div className="mb-4 grid gap-3 lg:grid-cols-[minmax(18rem,28rem)_auto] lg:items-center lg:justify-between">
-          <div className="relative min-w-0">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search products..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 lg:flex">
-            <Button variant="outline" className="h-10 rounded-full px-4 lg:hidden" onClick={() => setFiltersOpen(true)}>
-              <SlidersHorizontal className="mr-2 h-4 w-4" />
-              Filters
-            </Button>
-            <Select value={sort} onValueChange={(value) => updateParams({ sort: value === "popular" ? null : value, page: null })}>
-              <SelectTrigger className="w-full rounded-full lg:w-52">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {SORT_OPTIONS.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+      <div className="border-b border-border bg-accent">
+        <div className="container mx-auto flex items-center justify-center gap-2 py-2.5 text-center">
+          <ShieldCheck className="hidden h-3.5 w-3.5 shrink-0 text-accent-foreground sm:block" aria-hidden />
+          <p className="text-[11px] font-medium leading-4 text-accent-foreground sm:text-xs">
+            Pink Paisa is an Amazon Associate — we earn from qualifying purchases. Live price and availability are always
+            confirmed on Amazon.
+          </p>
         </div>
+      </div>
 
-        <div className="-mx-4 mb-4 overflow-x-auto px-4 pb-1 scrollbar-hidden sm:-mx-6 sm:px-6 lg:mx-0 lg:px-0">
-          <div className="flex w-max gap-2 lg:w-auto lg:flex-wrap">
-            <button
-              onClick={() => updateParams({ category: null, subcategory: null, page: null })}
-              aria-pressed={categorySlug === "all"}
-              className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                categorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
-              }`}
+      <div className="container mx-auto max-w-full">
+        <header className="py-7 md:py-9">
+          <nav aria-label="Breadcrumb" className="mb-3.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <Link href="/" className="transition-colors hover:text-foreground">
+              Home
+            </Link>
+            <span aria-hidden className="text-border">/</span>
+            {activeCategory ? (
+              <>
+                <Link href="/products" className="transition-colors hover:text-foreground">
+                  Wellness Products
+                </Link>
+                <span aria-hidden className="text-border">/</span>
+                {activeSubcategory ? (
+                  <>
+                    <Link
+                      href={`/products?category=${encodeURIComponent(activeCategory.slug)}`}
+                      className="transition-colors hover:text-foreground"
+                    >
+                      {activeCategory.name}
+                    </Link>
+                    <span aria-hidden className="text-border">/</span>
+                    <span className="font-medium text-foreground">{activeSubcategory.name}</span>
+                  </>
+                ) : (
+                  <span className="font-medium text-foreground">{activeCategory.name}</span>
+                )}
+              </>
+            ) : (
+              <span className="font-medium text-foreground">Wellness Products</span>
+            )}
+          </nav>
+
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.16em] text-primary md:text-xs">
+            {activeCategory ? activeCategory.name : "Curated wellness edit"}
+          </p>
+          <h1 className="mb-2.5 max-w-3xl font-serif text-3xl leading-tight md:text-[2.75rem]">
+            {activeSubcategory?.name || activeCategory?.name || "Curated Products for Your Journey"}
+          </h1>
+          <p className="max-w-2xl text-base leading-7 text-muted-foreground">
+            {activeSubcategory?.description ||
+              activeCategory?.description ||
+              "Wellness, self-growth and financial empowerment — hand-picked for women, reviewed by the Pink Paisa team."}
+          </p>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {catalogTotal > 0 ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary" aria-hidden />
+                {catalogTotal} hand-picked products
+              </span>
+            ) : null}
+            {globalFacets?.brands?.length ? (
+              <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium">
+                <span className="h-1.5 w-1.5 rounded-full bg-sage" aria-hidden />
+                {globalFacets.brands.length} brands
+              </span>
+            ) : null}
+            <Link
+              href="/wellness"
+              className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:underline"
             >
-              All
-            </button>
-            {categories.map((category) => (
-              <button
-                key={category.id}
-                onClick={() => updateParams({ category: category.slug, subcategory: null, page: null })}
-                aria-pressed={categorySlug === category.slug}
-                className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                  categorySlug === category.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
-                }`}
+              Explore wellness guides <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
+          </div>
+        </header>
+
+        <div className="sticky top-14 z-30 -mx-4 border-y border-border bg-card/95 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+          <div className="grid gap-3 lg:grid-cols-[minmax(18rem,32rem)_auto] lg:items-center lg:justify-between">
+            <SearchAutocomplete
+              value={state.search}
+              taxonomy={taxonomy}
+              placeholder={
+                activeCategory
+                  ? `Search within ${activeCategory.name}...`
+                  : catalogTotal
+                    ? `Search ${catalogTotal} wellness products, brands or concerns...`
+                    : "Search wellness products, brands or concerns..."
+              }
+              onSearch={(term) => updateParams({ search: term || null, page: null }, { replace: true })}
+              onNavigate={(updates) => updateParams(updates)}
+            />
+            <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-2 lg:flex">
+              <Button
+                variant="outline"
+                className={cn(
+                  "h-10 shrink-0 rounded-full px-4 lg:hidden",
+                  appliedCount > 0 && "border-primary text-primary",
+                )}
+                onClick={() => setFiltersOpen(true)}
               >
-                {category.name}
-              </button>
+                <SlidersHorizontal className="mr-2 h-4 w-4" />
+                Filters
+                {appliedCount > 0 ? (
+                  <span className="ml-2 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+                    {appliedCount}
+                  </span>
+                ) : null}
+              </Button>
+              <Select
+                value={state.sort}
+                onValueChange={(value) => updateParams({ sort: value === DEFAULT_SORT ? null : value, page: null })}
+              >
+                <SelectTrigger className="w-full rounded-full lg:w-52" aria-label="Sort products">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SORT_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </div>
+
+        <div className="-mx-4 mt-5 overflow-x-auto px-4 pb-1 scrollbar-hidden sm:-mx-6 sm:px-6 lg:mx-0 lg:px-0">
+          <div className="flex w-max gap-2 lg:w-auto lg:flex-wrap">
+            <Pill
+              label="All products"
+              count={allProductsCount || undefined}
+              active={state.categorySlug === "all"}
+              onClick={() => updateParams({ category: null, subcategory: null, page: null })}
+            />
+            {categories.map((category) => (
+              <Pill
+                key={category.id}
+                label={category.name}
+                count={categoryCounts.get(category.id) ?? categoryCounts.get(category.name.toLowerCase())}
+                active={state.categorySlug === category.slug}
+                onClick={() => updateParams({ category: category.slug, subcategory: null, page: null })}
+              />
             ))}
           </div>
         </div>
 
-        {activeCategory && visibleSubcategories.length > 0 ? (
-          <div className="mb-5 rounded-lg border border-border bg-card p-3">
-            <p className="mb-3 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-              Subcategories in {activeCategory.name}
+        {activeCategory && activeCategory.subcategories.length > 0 ? (
+          <div className="mt-4 rounded-2xl border border-border bg-card p-3.5">
+            <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.13em] text-muted-foreground">
+              Browse {activeCategory.name}
             </p>
             <div className="-mx-3 overflow-x-auto px-3 pb-1 scrollbar-hidden">
               <div className="flex w-max gap-2 lg:w-auto lg:flex-wrap">
-                <button
+                <Pill
+                  label={`All ${activeCategory.name}`}
+                  count={categoryCounts.get(activeCategory.id) ?? undefined}
+                  active={state.subcategorySlug === "all"}
                   onClick={() => updateParams({ subcategory: null, page: null })}
-                  aria-pressed={subcategorySlug === "all"}
-                  className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                    subcategorySlug === "all" ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
-                  }`}
-                >
-                  All {activeCategory.name}
-                </button>
-                {visibleSubcategories.map((subcategory) => (
-                  <button
-                    key={subcategory.id}
-                    onClick={() => updateParams({ subcategory: subcategory.slug, page: null })}
-                    aria-pressed={subcategorySlug === subcategory.slug}
-                    className={`min-h-9 shrink-0 rounded-full px-4 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                      subcategorySlug === subcategory.slug ? "bg-primary text-primary-foreground" : "bg-accent text-accent-foreground hover:bg-accent/80"
-                    }`}
-                  >
-                    {subcategory.name}
-                  </button>
-                ))}
+                />
+                {activeCategory.subcategories
+                  .filter((subcategory) => subcategory.is_active)
+                  .map((subcategory) => (
+                    <Pill
+                      key={subcategory.id}
+                      label={subcategory.name}
+                      count={
+                        subcategoryCounts.get(subcategory.id) ?? subcategoryCounts.get(subcategory.name.toLowerCase())
+                      }
+                      active={state.subcategorySlug === subcategory.slug}
+                      onClick={() => updateParams({ subcategory: subcategory.slug, page: null })}
+                    />
+                  ))}
               </div>
             </div>
           </div>
         ) : null}
 
-        <div className="grid min-w-0 gap-6 lg:grid-cols-[240px,minmax(0,1fr)]">
-          <aside className="hidden self-start rounded-lg border border-border bg-card p-4 lg:sticky lg:top-20 lg:block">
-            <ProductFilters
-              facets={facets}
-              minPrice={minPrice}
-              maxPrice={maxPrice}
-              inStock={inStock}
-              onSale={onSale}
-              selectedBrands={selectedBrands}
-              hasActiveFilters={hasActiveFilters}
-              onMinPriceChange={(value) => updateParams({ min_price: value != null ? String(value) : null, page: null })}
-              onMaxPriceChange={(value) => updateParams({ max_price: value != null ? String(value) : null, page: null })}
-              onInStockChange={(value) => updateParams({ in_stock: value ? "true" : null, page: null })}
-              onOnSaleChange={(value) => updateParams({ on_sale: value ? "true" : null, page: null })}
-              onToggleBrand={toggleBrand}
-              onClear={clearFilters}
-            />
+        <div className="mt-6 grid min-w-0 gap-7 pb-14 lg:grid-cols-[264px,minmax(0,1fr)]">
+          <aside className="hidden self-start rounded-2xl border border-border bg-card p-4 lg:sticky lg:top-32 lg:block">
+            {filterPanel}
           </aside>
 
           <div className="min-w-0">
-            <div className="mb-4 flex items-center justify-between">
-              <p className="text-sm text-muted-foreground">
-                {isLoading ? "Loading products..." : `${totalResults} products found`}
-              </p>
-              {hasActiveFilters ? (
-                <Button variant="ghost" size="sm" className="rounded-full lg:hidden" onClick={clearFilters}>
-                  Clear filters
-                </Button>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold">
+                  {isLoading
+                    ? "Loading products..."
+                    : totalResults === 0
+                      ? "No products found"
+                      : `Showing ${rangeStart}–${rangeEnd} of ${totalResults} products`}
+                </p>
+                {!isLoading && totalResults > 0 ? (
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {appliedCount > 0
+                      ? `Narrowed from ${catalogTotal || totalResults} by ${appliedCount} ${appliedCount === 1 ? "filter" : "filters"}`
+                      : "Every pick links out to Amazon.in for live pricing"}
+                  </p>
+                ) : null}
+              </div>
+
+              {appliedFilters.length > 0 ? (
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  {appliedFilters.map((filter) => (
+                    <button
+                      key={filter.key}
+                      type="button"
+                      onClick={() => updateParams({ ...filter.updates, page: null })}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-accent px-2.5 py-1.5 text-[11px] font-medium text-accent-foreground transition-colors hover:bg-accent/70"
+                    >
+                      {filter.label}
+                      <X className="h-3 w-3" aria-hidden />
+                      <span className="sr-only">Remove filter</span>
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={clearFilters}
+                    className="text-[11px] font-semibold text-primary hover:underline"
+                  >
+                    Clear all
+                  </button>
+                </div>
               ) : null}
             </div>
 
             {isLoading ? (
               <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-                {[1, 2, 3, 4, 5, 6].map((item) => (
-                  <Skeleton key={item} className="h-72 rounded-lg sm:h-80" />
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <Skeleton key={index} className="h-80 rounded-2xl" />
                 ))}
               </div>
             ) : products.length === 0 ? (
-              <div className="py-20 text-center text-muted-foreground">
-                <Sparkles className="mx-auto mb-3 h-12 w-12 opacity-30" />
-                <p>No products found</p>
-                {hasActiveFilters ? (
-                  <Button variant="outline" className="mt-4 rounded-xl" onClick={clearFilters}>
-                    Clear filters
-                  </Button>
-                ) : null}
-              </div>
+              <EmptyResults
+                state={state}
+                appliedFilters={appliedFilters}
+                taxonomy={taxonomy}
+                globalFacets={globalFacets}
+                onUpdate={updateParams}
+                onClear={clearFilters}
+              />
             ) : (
               <>
                 <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
@@ -529,22 +536,63 @@ const PhysicalProducts = ({
                       wished={isWishlisted(product.id)}
                       cartQuantity={cartQuantities[product.id] || 0}
                       onToggleWishlist={handleToggleWishlist}
+                      onQuickView={setQuickViewProduct}
                     />
                   ))}
+
+                  {/* A handful of results usually means the filters are too tight —
+                      offer the way back out rather than a half-empty row. */}
+                  {hasAnyFilter && totalResults > 0 && totalResults < 4 ? (
+                    <div className="flex flex-col justify-center gap-2.5 rounded-2xl border border-dashed border-border bg-background p-5">
+                      <p className="text-sm font-semibold">Only {totalResults} matches</p>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Widen your search to see more of the catalog.
+                      </p>
+                      {activeSubcategory && activeCategory ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="w-full rounded-full bg-card text-xs"
+                          onClick={() => updateParams({ subcategory: null, page: null })}
+                        >
+                          All {activeCategory.name}
+                          {categoryCounts.get(activeCategory.id) ? ` (${categoryCounts.get(activeCategory.id)})` : ""}
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full rounded-full bg-card text-xs"
+                        onClick={clearFilters}
+                      >
+                        Clear all filters{catalogTotal ? ` (${catalogTotal})` : ""}
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
 
                 {totalPages > 1 ? (
-                  <div className="mt-8 flex items-center justify-center gap-3">
-                    <Button variant="outline" className="rounded-xl" disabled={page <= 1} onClick={() => goToPage(page - 1)}>
-                      Previous
+                  <nav className="mt-9 flex items-center justify-center gap-2" aria-label="Pagination">
+                    <Button
+                      variant="outline"
+                      className="rounded-full"
+                      disabled={state.page <= 1}
+                      onClick={() => updateParams({ page: state.page > 2 ? String(state.page - 1) : null })}
+                    >
+                      <ChevronLeft className="h-4 w-4" /> Previous
                     </Button>
-                    <span className="text-sm text-muted-foreground">
-                      Page {page} of {totalPages}
+                    <span className="px-2 text-sm text-muted-foreground">
+                      Page {state.page} of {totalPages}
                     </span>
-                    <Button variant="outline" className="rounded-xl" disabled={page >= totalPages} onClick={() => goToPage(page + 1)}>
-                      Next
+                    <Button
+                      variant="outline"
+                      className="rounded-full"
+                      disabled={state.page >= totalPages}
+                      onClick={() => updateParams({ page: String(state.page + 1) })}
+                    >
+                      Next <ChevronRight className="h-4 w-4" />
                     </Button>
-                  </div>
+                  </nav>
                 ) : null}
               </>
             )}
@@ -553,29 +601,38 @@ const PhysicalProducts = ({
       </div>
 
       <Sheet open={filtersOpen} onOpenChange={setFiltersOpen}>
-        <SheetContent side="left" className="w-full sm:max-w-sm">
-          <SheetHeader>
-            <SheetTitle>Filter products</SheetTitle>
+        <SheetContent side="bottom" className="flex max-h-[85dvh] flex-col rounded-t-3xl p-0 sm:max-w-none">
+          <SheetHeader className="border-b border-border px-4 py-4 text-left">
+            <SheetTitle className="flex items-center gap-2">
+              Filters
+              {appliedCount > 0 ? (
+                <span className="rounded-full bg-accent px-2 py-0.5 text-xs font-semibold text-accent-foreground">
+                  {appliedCount} applied
+                </span>
+              ) : null}
+            </SheetTitle>
           </SheetHeader>
-          <div className="mt-6 pb-6">
-            <ProductFilters
-              facets={facets}
-              minPrice={minPrice}
-              maxPrice={maxPrice}
-              inStock={inStock}
-              onSale={onSale}
-              selectedBrands={selectedBrands}
-              hasActiveFilters={hasActiveFilters}
-              onMinPriceChange={(value) => updateParams({ min_price: value != null ? String(value) : null, page: null })}
-              onMaxPriceChange={(value) => updateParams({ max_price: value != null ? String(value) : null, page: null })}
-              onInStockChange={(value) => updateParams({ in_stock: value ? "true" : null, page: null })}
-              onOnSaleChange={(value) => updateParams({ on_sale: value ? "true" : null, page: null })}
-              onToggleBrand={toggleBrand}
-              onClear={clearFilters}
-            />
+          <div className="flex-1 overflow-y-auto px-4 py-4">{filterPanel}</div>
+          <div className="flex items-center gap-2.5 border-t border-border px-4 py-3.5">
+            <Button variant="outline" className="rounded-full" onClick={clearFilters} disabled={appliedCount === 0}>
+              Clear all
+            </Button>
+            <Button className="flex-1 rounded-full" onClick={() => setFiltersOpen(false)}>
+              Show {totalResults} {totalResults === 1 ? "product" : "products"}
+            </Button>
           </div>
         </SheetContent>
       </Sheet>
+
+      <QuickViewDialog
+        product={quickViewProduct}
+        open={Boolean(quickViewProduct)}
+        onOpenChange={(open) => {
+          if (!open) setQuickViewProduct(null);
+        }}
+        wished={quickViewProduct ? isWishlisted(quickViewProduct.id) : false}
+        onToggleWishlist={handleToggleWishlist}
+      />
 
       <Footer />
     </div>

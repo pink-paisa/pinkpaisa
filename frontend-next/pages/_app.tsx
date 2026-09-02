@@ -13,6 +13,7 @@ import AnalyticsConsentBanner from "@/components/analytics/AnalyticsConsentBanne
 import { persistAffiliateAttribution } from "@/lib/affiliateTracking";
 import { persistMarketingAttribution } from "@/lib/marketingAttribution";
 import { isClarityBlockedPath } from "@/lib/microsoftClarity";
+import { fontFaceVariables } from "@/lib/fonts";
 
 export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
   const router = useRouter();
@@ -28,6 +29,13 @@ export default function PinkPaisaNextApp({ Component, pageProps }: AppProps) {
       <Head>
         <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
       </Head>
+      {/* Declared on :root so portalled UI (dialogs, sheets, toasts) inherits the type system. */}
+      <style jsx global>{`
+        :root {
+          --font-dm-sans: ${fontFaceVariables["--font-dm-sans"]};
+          --font-dm-serif: ${fontFaceVariables["--font-dm-serif"]};
+        }
+      `}</style>
       <MicrosoftClarity />
       <GoogleAnalytics />
       {maskPageForClarity ? (
