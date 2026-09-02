@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/router";
-import { ArrowRight, ChevronLeft, ChevronRight, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, SlidersHorizontal, X } from "lucide-react";
 import Footer from "@/components/Footer";
 import Navbar from "@/components/Navbar";
 import EmptyResults, { type AppliedFilter } from "@/components/storefront/EmptyResults";
@@ -282,16 +282,6 @@ const PhysicalProducts = ({
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
-
-      <div className="border-b border-border bg-accent">
-        <div className="container mx-auto flex items-center justify-center gap-2 py-2.5 text-center">
-          <ShieldCheck className="hidden h-3.5 w-3.5 shrink-0 text-accent-foreground sm:block" aria-hidden />
-          <p className="text-[11px] font-medium leading-4 text-accent-foreground sm:text-xs">
-            Pink Paisa is an Amazon Associate — we earn from qualifying purchases. Live price and availability are always
-            confirmed on Amazon.
-          </p>
-        </div>
-      </div>
 
       <div className="container mx-auto max-w-full">
         <header className="py-7 md:py-9">
