@@ -59,7 +59,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   candidates: {
-    version: "social-candidates-v3",
+    version: "social-candidates-v4",
     instructions: [
       "You are Pink Paisa's social content strategist.",
       "Generate five to eight materially different Instagram ideas from the supplied daily analysis, verified internal signals, and validated research evidence.",
@@ -96,7 +96,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   format_copy: {
-    version: "social-format-copy-v5",
+    version: "social-format-copy-v6",
     instructions: [
       "You are Pink Paisa's senior Instagram copywriter. Write one complete package in the selected format's exact schema.",
       "The strategy has already selected the topic, objective, pillar, audience, format, destination, and evidence. Preserve them; do not substitute another idea or format.",
@@ -133,7 +133,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   revision: {
-    version: "social-revision-v4",
+    version: "social-revision-v5",
     instructions: [
       "You are Pink Paisa's compliance revision editor.",
       "Revise only the fields identified by the independent compliance feedback and preserve all verified facts, identifiers, sources, destination, format, and unaffected approved copy.",
@@ -155,7 +155,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   visual_brief: {
-    version: "social-visual-brief-v7",
+    version: "social-visual-brief-v8",
     instructions: [
       "You are Pink Paisa's creative director. Produce one production-ready, format-specific visual brief for the approved content package.",
       "The OpenAI image model, not an application template, will create the original subject, scene, composition, lighting, background, illustration, or product environment.",
@@ -171,7 +171,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   formatRewrite: {
-    version: "social-format-rewrite-v4",
+    version: "social-format-rewrite-v5",
     instructions: [
       "Rewrite one complete Pink Paisa content package for the requested new format's exact schema.",
       "Do not merely move existing copy between fields. Rebuild hooks, on-post structure, pacing, caption, CTA, accessibility text, and visual instructions so they are native to the requested format.",
@@ -278,7 +278,7 @@ const SOCIAL_PROMPTS = Object.freeze({
     ].join("\n"),
   },
   assembly: {
-    version: "social-assembly-v4",
+    version: "social-assembly-v5",
     instructions: [
       "Assemble the supplied validated strategy, copy, visual direction, compliance findings, destinations, UTMs, and sources into the exact Pink Paisa daily package schema.",
       "Do not invent, reinterpret, or add claims. Preserve exact approved copy and numeric scores.",

@@ -17,7 +17,12 @@ const {
 } = require("../services/social/openAiSocialProvider");
 
 test("FULL_AI_GRAPHIC prompts preserve the complete native text contract", () => {
-  assert.equal(SOCIAL_PROMPTS.visual_brief.version, "social-visual-brief-v7");
+  assert.equal(SOCIAL_PROMPTS.candidates.version, "social-candidates-v4");
+  assert.equal(SOCIAL_PROMPTS.format_copy.version, "social-format-copy-v6");
+  assert.equal(SOCIAL_PROMPTS.revision.version, "social-revision-v5");
+  assert.equal(SOCIAL_PROMPTS.visual_brief.version, "social-visual-brief-v8");
+  assert.equal(SOCIAL_PROMPTS.formatRewrite.version, "social-format-rewrite-v5");
+  assert.equal(SOCIAL_PROMPTS.assembly.version, "social-assembly-v5");
   assert.match(SOCIAL_PROMPTS.visual_brief.instructions, /complete server-approved ordered visible-text contract/i);
   assert.match(SOCIAL_PROMPTS.visual_brief.instructions, /supporting or interaction copy/i);
   assert.match(SOCIAL_PROMPTS.visual_brief.instructions, /no branded finish or post-generation text\/logo overlay/i);

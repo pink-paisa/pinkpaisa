@@ -1546,7 +1546,7 @@ test("failed paid structured calls retain prompt, usage, and validation evidence
     social_stage: "format_copy",
     provider: "openai",
     model: "gpt-5.6-luna",
-    prompt_version: "social-format-copy-v5",
+    prompt_version: "social-format-copy-v6",
     response_id: "resp-invalid-format-copy",
     attempt_count: 1,
     started_at: "2026-08-22T08:00:05.000Z",
@@ -1620,7 +1620,7 @@ test("failed paid structured calls retain prompt, usage, and validation evidence
   assert.equal(JSON.stringify(run).includes("is incomplete"), false);
   assert.equal(run.stage_executions[2].response_metadata.raw_output_retained, false);
   assert.equal(Object.hasOwn(run.stage_executions[2].response_metadata, "raw_output"), false);
-  assert.equal(run.last_error.details.provider_call.prompt_version, "social-format-copy-v5");
+  assert.equal(run.last_error.details.provider_call.prompt_version, "social-format-copy-v6");
   assert.equal(run.last_error.details.provider_call.raw_output_retained, false);
   assert.equal(run.last_error.details.provider_call.usage.total_tokens, 125);
   assert.match(run.last_error.details.provider_call.output_fingerprint, /^[a-f0-9]{64}$/);
