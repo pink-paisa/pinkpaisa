@@ -34,6 +34,7 @@ export default function HomePage({ initialProducts, initialCatalogResponse }: Ho
     "@type": "Organization",
     name: "Pink Paisa",
     url: getSiteUrl(),
+    logo: `${getSiteUrl()}/pink-paisa-logo.png`,
     sameAs: [PINK_PAISA_BRAND.instagramUrl],
   };
 

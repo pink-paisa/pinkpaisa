@@ -54,6 +54,7 @@ import AdminMarketingLeads from "@/components/admin/AdminMarketingLeads";
 import { SocialMediaManager } from "@/components/admin/social";
 import { API_URL, apiFetch } from "@/lib/api";
 import ErrorBoundary from "@/components/ui/error-boundary";
+import pinkPaisaLogo from "@/assets/pink-paisa-logo.png";
 
 type Section =
   | "dashboard"
@@ -380,10 +381,8 @@ const Admin = () => {
             >
               <div className="flex h-16 items-center justify-between border-b border-border px-4">
                 <div className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                    <Package className="h-4 w-4 text-primary" />
-                  </div>
-                  <span className="font-serif text-base font-semibold">Admin</span>
+                  <img src={pinkPaisaLogo.src} alt="Pink Paisa" width={36} height={36} className="h-9 w-9 object-contain" />
+                  <span className="font-serif text-base font-semibold">Pink Paisa Admin</span>
                 </div>
                 <button
                   type="button"
@@ -479,10 +478,8 @@ const Admin = () => {
         <div className="flex h-16 items-center justify-between border-b border-border px-4">
           {!sidebarCollapsed && (
             <div className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                <Package className="h-4 w-4 text-primary" />
-              </div>
-              <span className="font-serif text-base font-semibold">Admin</span>
+              <img src={pinkPaisaLogo.src} alt="Pink Paisa" width={36} height={36} className="h-9 w-9 object-contain" />
+              <span className="font-serif text-base font-semibold">Pink Paisa Admin</span>
             </div>
           )}
           <button

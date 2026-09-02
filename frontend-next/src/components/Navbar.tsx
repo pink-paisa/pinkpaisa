@@ -49,7 +49,13 @@ const Navbar = () => {
     <header className="sticky top-0 z-50 border-b border-border/50 bg-background/80 backdrop-blur-md">
       <div className="container mx-auto flex h-14 items-center justify-between px-4">
         <Link href="/" className="flex items-center gap-2" onClick={() => setMobileOpen(false)}>
-          <img src={pinkPaisaLogo.src} alt="Pink Paisa" className="h-7" />
+          <img
+            src={pinkPaisaLogo.src}
+            alt="Pink Paisa"
+            width={40}
+            height={40}
+            className="h-10 w-10 shrink-0 object-contain"
+          />
         </Link>
 
         <nav className="hidden items-center gap-4 lg:flex">
