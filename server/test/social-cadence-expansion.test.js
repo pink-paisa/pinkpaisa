@@ -8,6 +8,7 @@ const {
   SOCIAL_SERIES_KEYS,
   getSocialManagerDefaults,
   normaliseSocialManagerSettings,
+  validateSocialManagerSettings,
 } = require("../utils/socialManagerSettings");
 
 const EXPECTED_SLOTS = [
@@ -18,10 +19,10 @@ const EXPECTED_SLOTS = [
   ["FRIDAY", 11, 0],
 ];
 
-test("Social Manager v4 defaults to five weekday feeds and the approved four-week content contract", () => {
+test("Social Manager v5 defaults to five weekday feeds and the approved four-week content contract", () => {
   const settings = getSocialManagerDefaults();
 
-  assert.equal(settings.settings_version, 4);
+  assert.equal(settings.settings_version, 5);
   assert.equal(settings.weekly_planning.maximum_feed_posts, 5);
   assert.equal(settings.weekly_planning.max_feed_posts_per_week, 5);
   assert.equal(settings.weekly_planning.companion_stories_enabled, true);
@@ -50,7 +51,7 @@ test("stored v2/v3 settings migrate to the five-feed cadence without invalidatin
       ],
     },
   });
-  assert.equal(migrated.settings_version, 4);
+  assert.equal(migrated.settings_version, 5);
   assert.equal(migrated.weekly_planning.maximum_feed_posts, 5);
   assert.equal(migrated.weekly_planning.companion_stories_enabled, true);
   assert.deepEqual(
@@ -93,4 +94,20 @@ test("persisted weekly plans can be revalidated without rewriting their fixed ti
 
   assert.equal(persisted.timezone, "Asia/Kolkata");
   assert.equal(persisted.isModified("timezone"), false);
+});
+
+test("legacy artwork-only settings migrate to mandatory branded artwork and cannot be saved again", () => {
+  const migrated = normaliseSocialManagerSettings({
+    settings_version: 4,
+    generation: { default_visual_mode: "AI_ARTWORK_ONLY" },
+  });
+
+  assert.equal(migrated.settings_version, 5);
+  assert.equal(migrated.generation.default_visual_mode, "AI_BRANDED_ARTWORK");
+  assert.throws(
+    () => validateSocialManagerSettings({
+      generation: { default_visual_mode: "AI_ARTWORK_ONLY" },
+    }, { partial: true }),
+    /BRAND_LOGO_REQUIRED/
+  );
 });

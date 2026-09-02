@@ -40,6 +40,16 @@ import {
   deriveDraftWorkflow,
   isAiNativeFullGraphicAsset,
 } from "./socialWorkflow";
+import {
+  aggregateBrandLogoEvidence,
+  assetBrandLogoState,
+  brandLogoAssetSequenceLabel,
+  brandLogoContractReady,
+  brandLogoSceneEvidenceState,
+  INVALID_AI_LOGO_LABEL,
+  isFinalVideoBrandAsset,
+  isPublishableSocialAsset,
+} from "./socialBrandLogo";
 import { artworkOnlyEligibility } from "./socialVisualMode";
 import {
   SocialDraft,
@@ -121,10 +131,18 @@ const OBJECTIVE_OPTIONS = [
   { value: "LEADS", label: "Leads" },
 ] as const;
 
+const BRANDED_ARTWORK_FORMATS = new Set<SocialFormatPreference>(["SINGLE_IMAGE", "CAROUSEL"]);
+const BRANDED_ARTWORK_OBJECTIVES = new Set(["AWARENESS", "EDUCATION", "ENGAGEMENT", "COMMUNITY_BUILDING"]);
+const EXACT_OVERLAY_FORMATS = new Set<SocialFormatPreference>([
+  "PRODUCT_FEATURE",
+  "RESOURCE_PROMOTION",
+  "WORKSHOP_PROMOTION",
+]);
+
 const requestVisualMode = (value: SocialDraft["visualMode"] | SocialVisualMode): SocialVisualMode => (
-  ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC"].includes(String(value))
+  ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_BRANDED_ARTWORK", "FULL_AI_GRAPHIC"].includes(String(value))
     ? value as SocialVisualMode
-    : "AI_VISUAL_WITH_EXACT_OVERLAY"
+    : "AI_BRANDED_ARTWORK"
 );
 
 const isVideoAsset = (asset: SocialAsset | undefined) => Boolean(asset && (
@@ -135,9 +153,7 @@ const isVideoAsset = (asset: SocialAsset | undefined) => Boolean(asset && (
 ));
 
 const isReviewableMediaAsset = (asset: SocialAsset) => {
-  const role = asset.role.toUpperCase();
-  if (!["FINAL_COMPOSED", "FINAL_VIDEO"].includes(role) || asset.mediaKind.toUpperCase() === "SUBTITLE") return false;
-  return Boolean(asset.finalUrl || asset.previewUrl || asset.url)
+  return isPublishableSocialAsset(asset)
     && (isVideoAsset(asset) || !asset.mimeType || asset.mimeType.toLowerCase().startsWith("image/") || asset.mediaKind.toUpperCase() === "IMAGE");
 };
 
@@ -249,11 +265,14 @@ const GenerationControls = ({
   onInstructionsChange: (value: string) => void;
   onGenerate: SocialTodayProps["onGenerate"];
 }) => {
-  const artworkEligibility = artworkOnlyEligibility({ format: formatPreference, objective: objectivePreference });
-  const exactOverlayRequired = formatPreference === "PRODUCT_FEATURE";
-  const effectiveVisualMode = exactOverlayRequired || (visualMode === "AI_ARTWORK_ONLY" && !artworkEligibility.eligible)
+  const exactOverlayRequired = EXACT_OVERLAY_FORMATS.has(formatPreference);
+  const brandedArtworkEligible = BRANDED_ARTWORK_FORMATS.has(formatPreference)
+    && BRANDED_ARTWORK_OBJECTIVES.has(objectivePreference);
+  const effectiveVisualMode = exactOverlayRequired
     ? "AI_VISUAL_WITH_EXACT_OVERLAY"
-    : visualMode;
+    : visualMode === "AI_BRANDED_ARTWORK" && !brandedArtworkEligible
+      ? "FULL_AI_GRAPHIC"
+      : visualMode;
   const request = (generationType: SocialGenerationRequest["generation_type"], preference: SocialFormatPreference) => onGenerate({
     generation_type: generationType,
     requested_format: preference,
@@ -276,7 +295,7 @@ const GenerationControls = ({
               {FORMAT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </Field>
-          <Field label="Objective" hint="Select an eligible objective before using artwork-only mode.">
+          <Field label="Objective">
             <select value={objectivePreference} onChange={(event) => onObjectivePreferenceChange(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
               {OBJECTIVE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
@@ -288,11 +307,15 @@ const GenerationControls = ({
         <details className="rounded-2xl border bg-background/70 p-4">
           <summary className="cursor-pointer text-sm font-medium">Advanced visual mode</summary>
           <div className="mt-3 max-w-md">
-            <Field label="Visual treatment" hint={exactOverlayRequired ? "This format requires verified overlays." : !artworkEligibility.eligible ? artworkEligibility.message : "The complete AI-native graphic is the recommended default; no manual pixel overlay is added."}>
+            <Field label="Visual treatment" hint={exactOverlayRequired
+              ? "This product or promotion format requires verified text overlays; its logo must still satisfy the mandatory approved-reference contract. Legacy artwork-only is unavailable for new generation."
+              : !brandedArtworkEligible
+                ? "Logo-only AI-branded artwork is available only for Single Image or Carousel with an explicit awareness, education, engagement, or community-building objective. This selection uses the AI-native complete graphic instead. Legacy artwork-only is unavailable for new generation."
+                : "Every new option requires the approved Pink Paisa logo. Legacy artwork-only is unavailable for new generation."}>
               <select value={effectiveVisualMode} onChange={(event) => onVisualModeChange(event.target.value as SocialVisualMode)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
-                <option value="AI_VISUAL_WITH_EXACT_OVERLAY">AI artwork + verified overlay — Required for protected formats</option>
-                <option value="AI_ARTWORK_ONLY" disabled={!artworkEligibility.eligible}>AI artwork only — No overlay{!artworkEligibility.eligible ? " (not eligible yet)" : ""}</option>
-                <option value="FULL_AI_GRAPHIC" disabled={exactOverlayRequired}>AI-native complete graphic — Recommended, no overlay</option>
+                <option value="AI_BRANDED_ARTWORK" disabled={!brandedArtworkEligible}>AI-branded artwork — Approved logo reference, no logo overlay</option>
+                <option value="FULL_AI_GRAPHIC" disabled={exactOverlayRequired}>AI-native complete graphic — Approved logo reference, no logo overlay</option>
+                <option value="AI_VISUAL_WITH_EXACT_OVERLAY">AI artwork + verified text overlay — Protected formats</option>
               </select>
             </Field>
           </div>
@@ -609,6 +632,7 @@ const CreativePreview = ({
   const finalAssets = draft.assets
     .filter(isReviewableMediaAsset)
     .sort((left, right) => Number(isVideoAsset(right)) - Number(isVideoAsset(left)) || (left.slideNumber || 0) - (right.slideNumber || 0));
+  const finalVideoLogoAssets = finalAssets.filter(isFinalVideoBrandAsset);
   const videoFormat = ["REEL", "VIDEO_FEED"].includes(String(recommendation.format).toUpperCase());
   const previewAsset = (videoFormat ? finalAssets.find(isVideoAsset) : null) || finalAssets[0] || draft.assets.find((asset) => asset.previewUrl || asset.url);
   const originalUrl = originalAsset?.originalUrl || (originalAsset?.role.toUpperCase().includes("ORIGINAL") ? originalAsset.url : "") || previewAsset?.originalUrl || "";
@@ -625,8 +649,11 @@ const CreativePreview = ({
     : draft.captionContract?.caption ?? localCaptionFallback(recommendation);
   const visualMode = String(draft.visualMode || previewAsset?.visualMode || "AI_VISUAL_WITH_EXACT_OVERLAY").toUpperCase();
   const aiNativeFullGraphic = visualMode === "FULL_AI_GRAPHIC" && isAiNativeFullGraphicAsset(previewAsset);
+  const brandLogoAggregate = aggregateBrandLogoEvidence(draft.assets, draft.brandLogoContract);
   const finalCreativeLabel = visualMode === "AI_ARTWORK_ONLY"
     ? "Normalized final · no overlay"
+    : visualMode === "AI_BRANDED_ARTWORK"
+      ? "AI-branded artwork · approved logo reference baked in"
     : visualMode === "FULL_AI_GRAPHIC"
       ? aiNativeFullGraphic ? AI_NATIVE_FULL_GRAPHIC_LABEL : "AI-rendered headline · branded finish"
       : visualMode === "MANUAL_TEMPLATE"
@@ -634,15 +661,19 @@ const CreativePreview = ({
         : "Final creative · verified text overlay";
   const visualDescription = visualMode === "AI_ARTWORK_ONLY"
     ? "The OpenAI original is retained; the final asset is crop/resize/encoding only, with no composited text or branding."
+    : visualMode === "AI_BRANDED_ARTWORK"
+      ? "The approved Pink Paisa badge is supplied as a high-fidelity AI reference, rendered inside the artwork and independently validated. No post-generation logo overlay is applied."
     : visualMode === "FULL_AI_GRAPHIC"
       ? aiNativeFullGraphic
         ? "The complete artwork and approved text are baked into the validated OpenAI image; no programmatic pixel overlay or logo composite is applied."
         : "The headline is rendered by AI and validated; only the branded finish is composited afterward."
       : visualMode === "MANUAL_TEMPLATE"
         ? "This historical asset used the retired manual-template pipeline and remains readable for compatibility."
-        : "The OpenAI original is retained separately from the exact programmatic headline, supporting copy and brand overlay.";
+        : "The OpenAI artwork already contains the independently validated Pink Paisa badge. Exact headline and supporting copy are added programmatically; no second logo is composited.";
   const visualProvenanceLabel = visualMode === "AI_ARTWORK_ONLY"
     ? "Artwork · AI — No overlay"
+    : visualMode === "AI_BRANDED_ARTWORK"
+      ? "Artwork · AI — Approved logo reference baked in"
     : visualMode === "FULL_AI_GRAPHIC"
       ? aiNativeFullGraphic ? AI_NATIVE_FULL_GRAPHIC_LABEL : "Headline · AI-rendered and validated"
       : visualMode === "MANUAL_TEMPLATE"
@@ -671,6 +702,7 @@ const CreativePreview = ({
           <div className="flex flex-wrap gap-2">
             {previewAsset ? <Badge variant={previewAsset.status.toLowerCase() === "valid" ? "default" : "secondary"}>{titleCase(previewAsset.status)}</Badge> : null}
             <Badge variant="outline">{previewAsset?.aspectRatio || recommendation.visualConcept.aspect_ratio || recommendation.visualConcept.aspectRatio || "4:5"}</Badge>
+            {brandLogoAggregate.labels.map((label) => <Badge key={label} variant={label === INVALID_AI_LOGO_LABEL ? "destructive" : "outline"}>{label}</Badge>)}
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -708,16 +740,84 @@ const CreativePreview = ({
             <div>
               <p className="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Final asset set ({finalAssets.length})</p>
               <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-                {finalAssets.map((asset, index) => <div key={asset.id || `${asset.url}-${index}`} className="space-y-1"><div className={`${isVideoAsset(asset) || asset.aspectRatio === "9:16" ? "aspect-[9/16]" : "aspect-[4/5]"} overflow-hidden rounded-xl border border-border`}>{isVideoAsset(asset) ? <video src={asset.finalUrl || asset.previewUrl || asset.url} controls playsInline preload="metadata" aria-label={`${recommendation.altText || "Generated video"} ${index + 1}`} className="h-full w-full bg-black object-contain" /> : <img src={asset.finalUrl || asset.previewUrl || asset.url} alt={`${recommendation.altText || "Generated creative"} ${index + 1}`} className="h-full w-full object-cover" />}</div><p className="text-center text-[10px] text-muted-foreground">{isVideoAsset(asset) ? "Final video" : asset.slideNumber ? `Slide ${asset.slideNumber}` : `Asset ${index + 1}`}</p></div>)}
+                {finalAssets.map((asset, index) => {
+                  const logoState = assetBrandLogoState(asset, draft.brandLogoContract);
+                  const sequenceLabel = brandLogoAssetSequenceLabel(asset, recommendation.format, index);
+                  const assetSequence = asset.slideNumber || index + 1;
+                  const canRegenerateSequence = !isVideoAsset(asset) || Boolean(asset.slideNumber);
+                  return <div key={asset.id || `${asset.url}-${index}`} className="space-y-1.5"><div className={`${isVideoAsset(asset) || asset.aspectRatio === "9:16" ? "aspect-[9/16]" : "aspect-[4/5]"} overflow-hidden rounded-xl border border-border`}>{isVideoAsset(asset) ? <video src={asset.finalUrl || asset.previewUrl || asset.url} controls playsInline preload="metadata" aria-label={`${recommendation.altText || "Generated video"} ${index + 1}`} className="h-full w-full bg-black object-contain" /> : <img src={asset.finalUrl || asset.previewUrl || asset.url} alt={`${recommendation.altText || "Generated creative"} ${index + 1}`} className="h-full w-full object-cover" />}</div><p className="text-center text-[10px] text-muted-foreground">{isVideoAsset(asset) ? "Final video" : sequenceLabel}</p>{!logoState.legacy ? <div className="space-y-1">{logoState.labels.map((label) => <Badge key={label} className="h-auto w-full justify-center whitespace-normal text-center text-[9px]" variant={label === INVALID_AI_LOGO_LABEL ? "destructive" : "outline"}>{label}</Badge>)}</div> : null}{!readOnly && !logoState.passed && regenerationAllowed && canRegenerateSequence ? <Button type="button" size="sm" variant="outline" className="h-auto w-full whitespace-normal text-[10px]" onClick={() => onAction("regenerate", { scope: "image", asset_sequence: assetSequence, visual_mode: requestVisualMode(draft.visualMode) })}>Regenerate {sequenceLabel.toLowerCase()} with approved logo</Button> : null}</div>;
+                })}
               </div>
-              {recommendation.format === "CAROUSEL" && regenerationAllowed ? <details className="mt-3 rounded-xl border border-border/70 p-3 text-xs"><summary className="cursor-pointer font-medium text-primary">Advanced · regenerate one slide</summary><div className="mt-3 flex flex-wrap gap-2">{finalAssets.map((asset, index) => <Button key={asset.id || index} type="button" size="sm" variant="outline" onClick={() => onAction("regenerate", { scope: "image", asset_sequence: asset.slideNumber || index + 1, visual_mode: requestVisualMode(draft.visualMode) })}>Slide {asset.slideNumber || index + 1}</Button>)}</div></details> : null}
+              {!readOnly && recommendation.format === "CAROUSEL" && regenerationAllowed ? <details className="mt-3 rounded-xl border border-border/70 p-3 text-xs"><summary className="cursor-pointer font-medium text-primary">Advanced · regenerate one slide</summary><div className="mt-3 flex flex-wrap gap-2">{finalAssets.map((asset, index) => <Button key={asset.id || index} type="button" size="sm" variant="outline" onClick={() => onAction("regenerate", { scope: "image", asset_sequence: asset.slideNumber || index + 1, visual_mode: requestVisualMode(draft.visualMode) })}>Slide {asset.slideNumber || index + 1}</Button>)}</div></details> : null}
             </div>
           ) : null}
+          {finalVideoLogoAssets.map((videoAsset, videoAssetIndex) => {
+            const evidence = videoAsset.brandLogoEvidence;
+            const recordedScenes = evidence?.sceneEvidence || [];
+            const expectedSceneCount = Number.isInteger(evidence?.expectedSceneCount) && Number(evidence?.expectedSceneCount) > 0
+              ? Number(evidence?.expectedSceneCount)
+              : Math.max(recordedScenes.length, 1);
+            const sceneRows = Array.from({ length: expectedSceneCount }, (_, sceneIndex) => (
+              recordedScenes.find((scene) => scene.sceneIndex === sceneIndex)
+            ));
+            return (
+              <section key={videoAsset.id || `final-video-logo-${videoAssetIndex}`} aria-label="Final video logo validation" className="rounded-2xl border border-border/70 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">Final video logo validation</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Every scene is checked again after final FFmpeg scale and crop.</p>
+                  </div>
+                  <Badge variant={evidence?.allScenesPassed === true && evidence.validatedSceneCount === expectedSceneCount ? "outline" : "destructive"}>
+                    {evidence?.validatedSceneCount ?? recordedScenes.length} / {expectedSceneCount} scenes validated
+                  </Badge>
+                </div>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {sceneRows.map((scene, sceneIndex) => {
+                    const state = scene ? brandLogoSceneEvidenceState(scene, draft.brandLogoContract) : { passed: false, label: INVALID_AI_LOGO_LABEL };
+                    // Sequence 1 is the Reel/Video cover. Storyboard scenes begin
+                    // at 2; prefer the persisted scene-to-source mapping so a
+                    // targeted retry always replaces the exact failing frame.
+                    const sourceAssetSequence = Number.isInteger(scene?.sourceAssetSequence) && Number(scene?.sourceAssetSequence) >= 2
+                      ? Number(scene?.sourceAssetSequence)
+                      : sceneIndex + 2;
+                    const failureDetails = scene ? [
+                      ...(scene.registeredMarkRecognizable === false ? ["The registered mark is not recognizable."] : []),
+                      ...(scene.protectedContentOverlapPresent === true ? ["The badge overlaps protected copy, product details, or sequence content."] : []),
+                      ...(scene.issues || []),
+                    ] : [];
+                    return (
+                      <div key={`${videoAsset.id || videoAssetIndex}-logo-scene-${sceneIndex}`} className="rounded-xl border border-border/70 p-3 text-xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-medium">Scene {sceneIndex + 1}</span>
+                          <Badge variant={state.passed ? "outline" : "destructive"}>{state.label}</Badge>
+                        </div>
+                        {scene ? <>
+                          <p className="mt-2 text-muted-foreground">Requested / observed: {scene.requestedCorner || "—"} / {scene.observedCorner || "—"}</p>
+                          <p className="mt-1 text-muted-foreground">Checked at {scene.extractedAtSeconds === null ? "an unrecorded timestamp" : `${scene.extractedAtSeconds}s`}</p>
+                          {scene.validatorModel ? <p className="mt-1 text-muted-foreground">Validator: {scene.validatorModel}</p> : null}
+                          {!state.passed && failureDetails.length ? <p className="mt-2 text-destructive">{Array.from(new Set(failureDetails)).join(" · ")}</p> : null}
+                          {!readOnly && !state.passed && regenerationAllowed ? <Button type="button" size="sm" variant="outline" className="mt-3 h-auto w-full whitespace-normal" onClick={() => onAction("regenerate", { scope: "image", asset_sequence: sourceAssetSequence, visual_mode: requestVisualMode(draft.visualMode) })}>Regenerate scene {sceneIndex + 1} with approved logo</Button> : null}
+                        </> : <p className="mt-2 text-destructive">No final-frame logo evidence was returned for this scene.</p>}
+                        {!scene && !readOnly && regenerationAllowed ? <Button type="button" size="sm" variant="outline" className="mt-3 h-auto w-full whitespace-normal" onClick={() => onAction("regenerate", { scope: "image", asset_sequence: sourceAssetSequence, visual_mode: requestVisualMode(draft.visualMode) })}>Regenerate scene {sceneIndex + 1} with approved logo</Button> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          })}
           {showProvenance && (previewAsset?.provider || previewAsset?.model || previewAsset?.sourceProvenance || previewAsset?.prompt || recommendation.imageGenerationPrompt) ? <details className="rounded-xl border border-border/70 p-3 text-xs"><summary className="cursor-pointer font-medium text-primary">Advanced · AI provenance and prompt</summary><div className="mt-3 flex flex-wrap gap-2">{previewAsset?.provider ? <Badge variant="secondary">Artwork · AI — {previewAsset.provider}{previewAsset.model ? `/${previewAsset.model}` : ""}</Badge> : null}<Badge variant="outline">{visualProvenanceLabel}</Badge>{previewAsset?.sourceProvenance ? <Badge variant="outline">{titleCase(previewAsset.sourceProvenance)}</Badge> : null}{previewAsset?.generationAttempts ? <Badge variant="outline">{previewAsset.generationAttempts} image attempt{previewAsset.generationAttempts === 1 ? "" : "s"}</Badge> : null}</div>{previewAsset?.prompt || recommendation.imageGenerationPrompt ? <p className="mt-3 whitespace-pre-wrap leading-5 text-muted-foreground">{previewAsset?.prompt || recommendation.imageGenerationPrompt}</p> : null}</details> : null}
           {previewAsset?.validationFlags.length ? (
             <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               <p className="font-medium">Visual review still has {previewAsset.validationFlags.length} flag(s)</p>
               <p className="mt-1 text-xs">{previewAsset.validationFlags.join(" · ")}</p>
+            </div>
+          ) : null}
+          {brandLogoAggregate.required && !brandLogoAggregate.passed ? (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/[0.04] p-3 text-sm text-destructive">
+              <p className="font-medium">{INVALID_AI_LOGO_LABEL}</p>
+              <p className="mt-1 text-xs">Every publishable slide or frame must contain one independently validated rendering of the approved Pink Paisa reference.</p>
+              {!readOnly && regenerationAllowed && brandLogoAggregate.failedAssets.length === 1 ? <Button type="button" size="sm" variant="outline" className="mt-3" onClick={() => { const failed = brandLogoAggregate.failedAssets[0]; onAction("regenerate", { scope: "image", ...(failed.slideNumber ? { asset_sequence: failed.slideNumber } : {}), visual_mode: requestVisualMode(draft.visualMode) }); }}>Regenerate this image with approved logo</Button> : null}
             </div>
           ) : null}
         </CardContent>
@@ -756,9 +856,12 @@ const CreativeProvenancePanel = ({ draft }: { draft: SocialDraft }) => {
     || draft.assets[0];
   const mode = String(draft.visualMode || asset?.visualMode || "AI_VISUAL_WITH_EXACT_OVERLAY").toUpperCase();
   const aiNativeFullGraphic = mode === "FULL_AI_GRAPHIC" && isAiNativeFullGraphicAsset(asset);
+  const brandLogoAggregate = aggregateBrandLogoEvidence(draft.assets, draft.brandLogoContract);
   const visualProvenanceLabel = mode === "AI_ARTWORK_ONLY"
     ? "Artwork · AI — No overlay"
-    : mode === "FULL_AI_GRAPHIC"
+    : mode === "AI_BRANDED_ARTWORK"
+      ? "Artwork · AI — Approved logo reference baked in"
+      : mode === "FULL_AI_GRAPHIC"
       ? aiNativeFullGraphic ? AI_NATIVE_FULL_GRAPHIC_LABEL : "Headline · AI-rendered and validated"
       : mode === "MANUAL_TEMPLATE"
         ? "Legacy · Manual template"
@@ -776,7 +879,9 @@ const CreativeProvenancePanel = ({ draft }: { draft: SocialDraft }) => {
           {asset?.sourceProvenance ? <Badge variant="outline">{titleCase(asset.sourceProvenance)}</Badge> : null}
           {asset?.renderer ? <Badge variant="outline">Renderer · {titleCase(asset.renderer)}</Badge> : null}
           {asset?.generationAttempts ? <Badge variant="outline">{asset.generationAttempts} image attempt{asset.generationAttempts === 1 ? "" : "s"}</Badge> : null}
+          {brandLogoAggregate.labels.map((label) => <Badge key={label} variant={label === INVALID_AI_LOGO_LABEL ? "destructive" : "outline"}>{label}</Badge>)}
         </div>
+        {!brandLogoAggregate.legacy ? <div className="grid gap-2 sm:grid-cols-2">{brandLogoAggregate.publishableAssets.map((item, index) => { const evidence = item.brandLogoEvidence; const state = assetBrandLogoState(item, draft.brandLogoContract); return <div key={item.id || `${item.url}-${index}`} className="rounded-xl border border-border/70 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{brandLogoAssetSequenceLabel(item, draft.primary.format, index)}</span>{state.labels.map((label) => <Badge key={label} variant={label === INVALID_AI_LOGO_LABEL ? "destructive" : "outline"}>{label}</Badge>)}</div><p className="mt-2 text-muted-foreground">Reference: {evidence?.referenceAssetId || "Not recorded"}</p><p className="mt-1 text-muted-foreground">Requested / observed: {evidence?.requestedCorner || "—"} / {evidence?.observedCorner || "—"}</p>{evidence?.validatorModel ? <p className="mt-1 text-muted-foreground">Validator: {evidence.validatorModel}</p> : null}</div>; })}</div> : null}
         {prompt ? <p className="whitespace-pre-wrap rounded-xl bg-muted/40 p-3 leading-5 text-muted-foreground">{prompt}</p> : <p className="text-muted-foreground">No image prompt was returned for this historical asset.</p>}
       </div>
     </details>
@@ -1062,12 +1167,15 @@ const LifecycleActions = ({
     contentPillar: draft.primary.contentPillar,
     verifiedProductId: draft.primary.verifiedProductId,
   });
+  const brandLogoAggregate = aggregateBrandLogoEvidence(draft.assets, draft.brandLogoContract);
   const creativeBlockers = [
     ...(!draft.assets.length || !hasFinalMedia ? ["A validated final creative asset is required"] : []),
     ...(!hasOriginalAiVisual ? ["Traceable original AI artwork is required"] : []),
     ...(draft.assets.some((asset) => asset.status.toLowerCase() === "invalid") ? ["A creative asset failed validation"] : []),
     ...(draft.assets.some((asset) => asset.manualReviewStatus.toLowerCase() === "rejected") ? ["A creative asset was rejected during visual review"] : []),
     ...(draft.visualMode === "AI_ARTWORK_ONLY" && !artworkEligibility.eligible ? [artworkEligibility.message || "Artwork-only is not eligible for this draft"] : []),
+    ...(draft.brandLogoContract && !brandLogoContractReady(draft.brandLogoContract, true) ? ["The mandatory approved-logo contract is not ready or has no locked corner"] : []),
+    ...(brandLogoAggregate.required && !brandLogoAggregate.passed ? ["Every publishable asset needs a validated Pink Paisa logo rendered from the approved reference"] : []),
   ];
   const approvalBlockers = [
     ...contentBlockers,
@@ -1209,7 +1317,7 @@ export const SocialToday = ({
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "strategy", instructions: generationInstructions.trim() || undefined })} disabled={Boolean(busyAction)}><Sparkles className="h-4 w-4" /> Regenerate Strategy</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "copy", instructions: generationInstructions.trim() || undefined })} disabled={Boolean(busyAction)}><MessageSquareText className="h-4 w-4" /> Regenerate Copy</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: visualMode, instructions: generationInstructions.trim() || undefined })} disabled={Boolean(busyAction)}><ImageIcon className="h-4 w-4" /> Regenerate Image</Button>
-      {aiNativeStoryConversionAvailable ? <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: "FULL_AI_GRAPHIC" })} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Regenerate as AI-native — no overlay</Button> : null}
+      {aiNativeStoryConversionAvailable ? <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: "FULL_AI_GRAPHIC" })} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Regenerate as AI-native with approved logo</Button> : null}
       <Button variant="outline" onClick={changeFormatWithAi} disabled={Boolean(busyAction)}><Layers3 className="h-4 w-4" /> Change Format With AI</Button>
       <Button variant="outline" onClick={reviseWithInstructions} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Revise With Instructions</Button>
       <Button variant="outline" onClick={() => onAction("regenerate", { scope: "compliance" })} disabled={Boolean(busyAction)}><FileCheck2 className="h-4 w-4" /> Run Compliance Again</Button>
@@ -1221,7 +1329,7 @@ export const SocialToday = ({
       <p className="mb-4 text-xs leading-5 text-muted-foreground">
         Regenerating this scheduled Story preserves its frozen weekly slot, clears the current approval and schedule, and returns the replacement to review. It will not publish automatically.
       </p>
-      <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: "FULL_AI_GRAPHIC" })} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Regenerate as AI-native — no overlay</Button>
+      <Button variant="outline" onClick={() => onAction("regenerate", { scope: "image", visual_mode: "FULL_AI_GRAPHIC" })} disabled={Boolean(busyAction)}><WandSparkles className="h-4 w-4" /> Regenerate as AI-native with approved logo</Button>
     </CardContent>
   </details> : null;
   if (loading && !draft) {

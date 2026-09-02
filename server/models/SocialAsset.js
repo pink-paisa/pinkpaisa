@@ -129,11 +129,12 @@ const SocialAssetSchema = new mongoose.Schema({
   },
   visual_mode: {
     type: String,
-    enum: ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC", "MANUAL_TEMPLATE"],
+    enum: ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_BRANDED_ARTWORK", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC", "MANUAL_TEMPLATE"],
     default: "AI_VISUAL_WITH_EXACT_OVERLAY",
     required: true,
     index: true,
   },
+  brand_logo_evidence: { type: mongoose.Schema.Types.Mixed, default: null },
   canvas_format: {
     type: String,
     enum: ["FEED_4_5", "SQUARE_1_1", "VERTICAL_9_16", null],

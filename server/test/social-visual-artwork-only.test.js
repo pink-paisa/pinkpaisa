@@ -18,10 +18,51 @@ const {
   assertSocialVisualModeEligible,
   resolveSocialVisualMode,
 } = require("../services/social/socialVisualPolicy");
+const {
+  buildBrandLogoContract,
+  serializeBrandLogoContract,
+} = require("../services/social/socialBrandLogoPolicy");
 const { getSocialManagerDefaults } = require("../utils/socialManagerSettings");
 
 function checksum(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function passingBrandLogoValidation(contract, overrides = {}) {
+  const box = contract.safe_corner.target_box;
+  return {
+    decision: "PASS",
+    badgeId: contract.reference_asset_id,
+    referenceChecksumSha256: contract.reference_checksum_sha256,
+    approvedLogoPresent: true,
+    referenceIdentityMatch: true,
+    wordmarkExactMatch: true,
+    iconGeometryMatch: true,
+    brandColourMatch: true,
+    registeredMarkRecognizable: true,
+    singleBadgeOccurrence: true,
+    observedBadgeCount: 1,
+    observedBadgeWidthPx: 210,
+    safeCornerMatch: true,
+    fullyInsideSafeBox: true,
+    acceptedWidthRange: true,
+    observedCorner: contract.locked_corner,
+    normalizedBoundingBox: {
+      x: box.left / box.canvas_width,
+      y: box.top / box.canvas_height,
+      width: box.width / box.canvas_width,
+      height: box.height / box.canvas_height,
+    },
+    mobileLegible: true,
+    protectedContentOverlapPresent: false,
+    unapprovedTextPresent: false,
+    observedUnapprovedText: null,
+    unrelatedLogoOrWatermarkPresent: false,
+    post_generation_logo_overlay_applied: false,
+    issues: [],
+    response_id: "brand-logo-validator-pass",
+    ...overrides,
+  };
 }
 
 function memoryStore(records, prefix) {
@@ -105,7 +146,7 @@ function recommendation({ format = "SINGLE_IMAGE", objective = "EDUCATION" } = {
       visualBrief: {
         id: base.id,
         format,
-        visualMode: "AI_ARTWORK_ONLY",
+        visualMode: "AI_BRANDED_ARTWORK",
         textSafeRegions: [],
         assets: slides.map((slide, index) => ({
           sequence: index + 1,
@@ -144,7 +185,7 @@ function recommendation({ format = "SINGLE_IMAGE", objective = "EDUCATION" } = {
     visualBrief: {
       id: base.id,
       format,
-      visualMode: "AI_ARTWORK_ONLY",
+      visualMode: "AI_BRANDED_ARTWORK",
       textSafeRegions: [],
       assets: [{
         sequence: 1,
@@ -200,15 +241,43 @@ test("the native default allows non-promotional Stories and still protects authe
   }
 });
 
-test("visual policy allows artwork-only only for the approved format/objective matrix", () => {
+test("visual policy exposes branded artwork for the approved matrix and keeps artwork-only historical", () => {
   for (const objective of ["AWARENESS", "EDUCATION", "ENGAGEMENT", "COMMUNITY_BUILDING"]) {
     for (const format of ["SINGLE_IMAGE", "CAROUSEL"]) {
-      const resolution = resolveSocialVisualMode({
+      assert.deepEqual(resolveSocialVisualMode({
+        requestedVisualMode: "AI_BRANDED_ARTWORK",
+        recommendation: recommendation({ format, objective }),
+        strict: true,
+      }), {
+        requested: "AI_BRANDED_ARTWORK",
+        effective: "AI_BRANDED_ARTWORK",
+        eligible: true,
+        reasons: [],
+      });
+
+      const artworkOnlyResolution = resolveSocialVisualMode({
+        requestedVisualMode: "AI_ARTWORK_ONLY",
+        recommendation: recommendation({ format, objective }),
+      });
+      assert.deepEqual(artworkOnlyResolution, {
+        requested: "AI_ARTWORK_ONLY",
+        effective: "AI_BRANDED_ARTWORK",
+        eligible: false,
+        reasons: ["BRAND_LOGO_REQUIRED"],
+      });
+      assert.throws(() => resolveSocialVisualMode({
         requestedVisualMode: "AI_ARTWORK_ONLY",
         recommendation: recommendation({ format, objective }),
         strict: true,
-      });
-      assert.deepEqual(resolution, {
+      }), (error) => error.code === "social_visual_mode_ineligible"
+        && error.statusCode === 409
+        && error.visual_mode_resolution?.effective === "AI_BRANDED_ARTWORK");
+      assert.deepEqual(resolveSocialVisualMode({
+        requestedVisualMode: "AI_ARTWORK_ONLY",
+        recommendation: recommendation({ format, objective }),
+        allowHistoricalArtworkOnly: true,
+        strict: true,
+      }), {
         requested: "AI_ARTWORK_ONLY",
         effective: "AI_ARTWORK_ONLY",
         eligible: true,
@@ -229,6 +298,7 @@ test("visual policy allows artwork-only only for the approved format/objective m
   });
   assert.equal(productResolution.effective, "AI_VISUAL_WITH_EXACT_OVERLAY");
   assert.equal(productResolution.eligible, false);
+  assert.ok(productResolution.reasons.includes("BRAND_LOGO_REQUIRED"));
   assert.ok(productResolution.reasons.includes("AUTHENTIC_PRODUCT_REQUIRES_EXACT_OVERLAY"));
   assert.throws(
     () => assertSocialVisualModeEligible({ visualMode: "AI_ARTWORK_ONLY", recommendation: { ...recommendation(), format: "STORY" } }),
@@ -258,30 +328,24 @@ test("visual policy allows artwork-only only for the approved format/objective m
   }
 });
 
-test("artwork-only generation validates zero text/logo and final rendering changes no pixels except resize/encoding", async () => {
+test("branded-artwork generation validates the reference-baked logo and final rendering only resizes/encodes", async () => {
   const source = await patternedImage("ascending");
   const originalStores = [];
   const generated = await generateSocialVisuals({
     draftLike: { idempotency_key: "artwork-only-render" },
     recommendation: recommendation(),
     settings: generationSettings,
-    visualMode: "AI_ARTWORK_ONLY",
+    visualMode: "AI_BRANDED_ARTWORK",
     dependencies: {
-      generateOpenAiImage: async ({ prompt }) => {
+      generateOpenAiImage: async ({ prompt, brandLogoContract }) => {
         assert.match(prompt, /full-bleed/i);
-        assert.match(prompt, /Do not reserve a text-safe area/i);
+        assert.match(prompt, /canonical Pink Paisa profile badge/i);
+        assert.equal(brandLogoContract.serialized.required, true);
         return { buffer: source, response_id: "artwork-image-1", usage: {} };
       },
-      validateArtworkOnlyVisual: async ({ buffer }) => {
-        assert.equal(buffer.equals(source), true);
-        return {
-          decision: "PASS",
-          hasVisibleText: false,
-          hasLogoOrWatermark: false,
-          observedText: null,
-          issues: [],
-          response_id: "artwork-check-1",
-        };
+      validateBrandLogoReference: async ({ generatedBuffer, contract }) => {
+        assert.equal(generatedBuffer.equals(source), false, "validation runs on the normalized publishable base");
+        return passingBrandLogoValidation(contract, { response_id: "artwork-check-1" });
       },
       storeCampaignAsset: memoryStore(originalStores, "original"),
     },
@@ -293,7 +357,7 @@ test("artwork-only generation validates zero text/logo and final rendering chang
   }, {
     recommendation: recommendation(),
     baseImages: generated.original_visuals,
-    visualMode: "AI_ARTWORK_ONLY",
+    visualMode: "AI_BRANDED_ARTWORK",
     persist: false,
     storeCampaignAsset: memoryStore(finalStores, "final"),
   });
@@ -303,7 +367,8 @@ test("artwork-only generation validates zero text/logo and final rendering chang
   assert.equal(retainedProviderOriginal.buffer.equals(source), true);
   assert.equal(generated.original_visuals[0].provider_original.byte_preserving, true);
   assert.equal(generated.original_visuals[0].provider_original.checksum_sha256, checksum(source));
-  assert.equal(generated.original_visuals[0].artwork_validation.validated_asset, "openai_provider_original");
+  assert.equal(generated.original_visuals[0].brand_logo_evidence.outcome, "PASS");
+  assert.equal(generated.original_visuals[0].brand_logo_evidence.logo_count, 1);
   assert.equal(
     generated.original_visuals[0].normalization.source_checksum_sha256,
     generated.original_visuals[0].provider_original.checksum_sha256,
@@ -317,12 +382,14 @@ test("artwork-only generation validates zero text/logo and final rendering chang
   assert.equal(rendered.renderer, "sharp_resize_only");
   assert.equal(rendered.assets[0].renderer, "sharp_resize_only");
   assert.equal(rendered.assets[0].provenance.overlay.method, "none");
-  assert.equal(rendered.assets[0].provenance.logo, null);
+  assert.equal(rendered.assets[0].provenance.logo.method, "openai_reference_baked");
+  assert.equal(rendered.assets[0].brand_logo_evidence.outcome, "PASS");
+  assert.equal(rendered.assets[0].overlay_json.logo.post_generation_logo_overlay_applied, false);
   assert.equal(rendered.assets[0].overlay_json.text_rendering.method, "none");
   assert.equal(rendered.assets[0].provenance.caption_policy.method, "instagram_caption_only");
 });
 
-test("artwork-only zero-text/logo failure revises the prompt and retries before storage", async () => {
+test("branded-artwork logo validation failure revises the prompt and retries before storage", async () => {
   const calls = [];
   const stores = [];
   let validations = 0;
@@ -330,7 +397,7 @@ test("artwork-only zero-text/logo failure revises the prompt and retries before 
     draftLike: { idempotency_key: "artwork-only-validation-retry" },
     recommendation: recommendation(),
     settings: generationSettings,
-    visualMode: "AI_ARTWORK_ONLY",
+    visualMode: "AI_BRANDED_ARTWORK",
     dependencies: {
       generateOpenAiImage: async ({ prompt }) => {
         calls.push(prompt);
@@ -340,28 +407,22 @@ test("artwork-only zero-text/logo failure revises the prompt and retries before 
           usage: {},
         };
       },
-      validateArtworkOnlyVisual: async () => {
+      validateBrandLogoReference: async ({ contract }) => {
         validations += 1;
         return validations === 1
-          ? {
+          ? passingBrandLogoValidation(contract, {
             decision: "REGENERATE",
-            hasVisibleText: true,
-            hasLogoOrWatermark: true,
-            observedText: "SALE",
-            issues: ["Visible SALE badge and wordmark"],
+            approvedLogoPresent: false,
+            referenceIdentityMatch: false,
+            observedBadgeCount: 0,
+            singleBadgeOccurrence: false,
+            issues: ["Approved badge is missing"],
             response_id: "artwork-check-retry-1",
-          }
-          : {
-            decision: "PASS",
-            hasVisibleText: false,
-            hasLogoOrWatermark: false,
-            observedText: null,
-            issues: [],
-            response_id: "artwork-check-retry-2",
-          };
+          })
+          : passingBrandLogoValidation(contract, { response_id: "artwork-check-retry-2" });
       },
       reviseImagePrompt: async () => ({
-        prompt: "Create a revised full-bleed editorial scene with no badge, text, logo, wordmark, label or watermark.",
+        prompt: "Create a revised full-bleed editorial scene with the supplied canonical badge exactly once in its locked corner.",
         response_id: "artwork-prompt-revision",
       }),
       sleep: async () => {},
@@ -371,13 +432,13 @@ test("artwork-only zero-text/logo failure revises the prompt and retries before 
 
   assert.equal(calls.length, 2);
   assert.equal(validations, 2);
-  assert.equal(stores.length, 2);
+  assert.equal(stores.length, 4, "both paid attempts retain provider-original and normalized evidence");
   assert.equal(result.original_visuals[0].attempt_count, 2);
-  assert.equal(result.original_visuals[0].failures[0].code, "social_artwork_only_visual_invalid");
+  assert.equal(result.original_visuals[0].failures[0].code, "social_brand_logo_validation_invalid");
   assert.equal(result.original_visuals[0].failures[0].prompt_revision.status, "COMPLETED");
 });
 
-test("carousel near-duplicates retry only the failing slide and retain perceptual hashes", async () => {
+test("branded carousel near-duplicates retry only the failing slide and retain perceptual hashes", async () => {
   const images = [
     await patternedImage("ascending", "#b84d75"),
     await patternedImage("ascending", "#6d3852"),
@@ -390,18 +451,13 @@ test("carousel near-duplicates retry only the failing slide and retain perceptua
     draftLike: { idempotency_key: "artwork-carousel-diversity" },
     recommendation: recommendation({ format: "CAROUSEL" }),
     settings: generationSettings,
-    visualMode: "AI_ARTWORK_ONLY",
+    visualMode: "AI_BRANDED_ARTWORK",
     dependencies: {
       generateOpenAiImage: async ({ prompt }) => {
         calls.push(prompt);
         return { buffer: images[calls.length - 1], response_id: `image-${calls.length}`, usage: {} };
       },
-      validateArtworkOnlyVisual: async () => ({
-        decision: "PASS",
-        hasVisibleText: false,
-        hasLogoOrWatermark: false,
-        observedText: null,
-        issues: [],
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract, {
         response_id: "artwork-carousel-check",
       }),
       reviseImagePrompt: async ({ sequence }) => ({
@@ -421,14 +477,14 @@ test("carousel near-duplicates retry only the failing slide and retain perceptua
   assert.equal(result.original_visuals[1].attempt_count, 2);
 });
 
-test("single-slide carousel regeneration generates only the requested sequence", async () => {
+test("single-slide branded carousel regeneration generates only the requested sequence", async () => {
   const calls = [];
   const stores = [];
   const result = await generateSocialVisuals({
     draftLike: { idempotency_key: "artwork-carousel-slide-two" },
     recommendation: recommendation({ format: "CAROUSEL" }),
     settings: generationSettings,
-    visualMode: "AI_ARTWORK_ONLY",
+    visualMode: "AI_BRANDED_ARTWORK",
     assetSequence: 2,
     comparisonVisuals: [
       { sequence: 1, buffer: await patternedImage("ascending") },
@@ -439,15 +495,66 @@ test("single-slide carousel regeneration generates only the requested sequence",
         calls.push(prompt);
         return { buffer: await patternedImage("alternating"), response_id: "slide-two-only", usage: {} };
       },
-      validateArtworkOnlyVisual: async () => ({
-        decision: "PASS",
-        hasVisibleText: false,
-        hasLogoOrWatermark: false,
-        observedText: null,
-        issues: [],
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract, {
         response_id: "artwork-slide-check",
       }),
       storeCampaignAsset: memoryStore(stores, "carousel-slide-two"),
+    },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(stores.length, 2);
+  assert.equal(result.partial_generation, true);
+  assert.equal(result.requested_asset_sequence, 2);
+  assert.deepEqual(result.original_visuals.map((visual) => visual.sequence), [2]);
+});
+
+test("targeted Story recovery regenerates only the failed branded frame", async () => {
+  const story = recommendation();
+  story.format = "STORY";
+  story.formatContent = {
+    ...story.formatContent,
+    format: "STORY",
+    frames: [1, 2, 3].map((frameNumber) => ({
+      frameNumber,
+      copy: `Approved Story frame ${frameNumber}`,
+    })),
+  };
+  story.visualBrief = {
+    ...story.visualBrief,
+    format: "STORY",
+    visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    assets: [1, 2, 3].map((sequence) => ({
+      sequence,
+      role: "STORY_FRAME",
+      imagePrompt: `Create a distinct Pink Paisa Story scene ${sequence}.`,
+      overlayInstructions: "Keep the centre clear for exact approved copy.",
+      requiredObjects: [`Distinct Story object ${sequence}`],
+      prohibitedObjects: ["Unapproved text or unrelated branding"],
+    })),
+  };
+
+  const calls = [];
+  const stores = [];
+  const result = await generateSocialVisuals({
+    draftLike: { idempotency_key: "story-frame-two-recovery" },
+    recommendation: story,
+    settings: generationSettings,
+    visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    assetSequence: 2,
+    comparisonVisuals: [
+      { sequence: 1, buffer: await patternedImage("ascending") },
+      { sequence: 3, buffer: await patternedImage("descending") },
+    ],
+    dependencies: {
+      generateOpenAiImage: async ({ prompt }) => {
+        calls.push(prompt);
+        return { buffer: await patternedImage("alternating"), response_id: "story-frame-two", usage: {} };
+      },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract, {
+        response_id: "story-frame-two-logo-check",
+      }),
+      storeCampaignAsset: memoryStore(stores, "story-frame-two"),
     },
   });
 
@@ -564,6 +671,13 @@ test("Story finals validate affiliate disclosure on frame one and CTA/disclaimer
     })),
   };
 
+  const draft = {
+    idempotency_key: "captionless-story-policy",
+    current_package: { primaryRecommendation: affiliate },
+  };
+  const brandLogoRuntime = await buildBrandLogoContract({ draftLike: draft, recommendation: affiliate });
+  const brandLogoContract = serializeBrandLogoContract(brandLogoRuntime);
+  draft.brand_logo_contract = brandLogoContract;
   const sources = [await patternedImage("ascending"), await patternedImage("descending")];
   const baseImages = sources.map((buffer, index) => ({
     buffer,
@@ -578,12 +692,14 @@ test("Story finals validate affiliate disclosure on frame one and CTA/disclaimer
     status: "VALIDATED",
     source_provenance: "generated_without_reference",
     usage_rights_status: "api_permitted",
+    brand_logo_contract: brandLogoContract,
+    brand_logo_evidence: passingBrandLogoValidation(brandLogoContract, {
+      response_id: `story-logo-validator-${index + 1}`,
+      validated_asset_checksum_sha256: checksum(buffer),
+    }),
   }));
   const stores = [];
-  const result = await renderSocialDraftAssets({
-    idempotency_key: "captionless-story-policy",
-    current_package: { primaryRecommendation: affiliate },
-  }, {
+  const result = await renderSocialDraftAssets(draft, {
     recommendation: affiliate,
     baseImages,
     visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",

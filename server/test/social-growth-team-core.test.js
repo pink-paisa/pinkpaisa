@@ -388,7 +388,10 @@ test("creative production stays behind human plan approval and carries exact wee
       eligible: true,
       reasons: [],
     },
+    brandLogoContract: generationInput.weeklyContext.brandLogoContract,
   });
+  assert.equal(generationInput.weeklyContext.brandLogoContract.required, true);
+  assert.equal(generationInput.weeklyContext.brandLogoContract.method, "AI_REFERENCE_BAKED");
   assert.equal(generationInput.requestKey, `social-weekly-production:${plan._id}:${selectedCandidate.candidateId}:v4`);
   assert.equal(generationInput.generationRequest.request_id, `weekly:${plan._id}:${selectedCandidate.candidateId}`);
   assert.equal(generationInput.generationRequest.requested_format, "CAROUSEL");
@@ -758,6 +761,7 @@ test("an administrator can replace an unlocked review slot with an unused retain
     effective: "AI_VISUAL_WITH_EXACT_OVERLAY",
     eligible: false,
     reasons: [
+      "BRAND_LOGO_REQUIRED",
       "OBJECTIVE_REQUIRES_EXACT_OVERLAY",
       "PROMOTIONAL_CONTENT_REQUIRES_EXACT_OVERLAY",
     ],

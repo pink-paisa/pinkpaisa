@@ -41,6 +41,7 @@ const {
   generateSocialVisuals,
   sanitizeImageGenerationEvidence,
   stageSuppliedFullAiGraphic,
+  validateBrandLogoReference,
 } = require("./socialAiImageService");
 const openAiSocialProvider = require("./openAiSocialProvider");
 const {
@@ -65,7 +66,13 @@ const {
   buildWeeklyCandidateResearchFocus,
   collectExternalResearch,
 } = require("./socialResearchService");
-const { assembleReel, buildManualActions, buildSrt } = require("./socialReelAssemblyService");
+const {
+  assembleReel,
+  buildManualActions,
+  buildSrt,
+  extractSceneFrameFromVideo,
+  extractSceneFramesFromVideo,
+} = require("./socialReelAssemblyService");
 const { resolveUsableAudioTrack } = require("./socialAudioLibraryService");
 const { publicManualAction } = require("./socialManualActionService");
 const { syncWeeklyPlanFromDraft } = require("./socialWeeklyPlanSyncService");
@@ -85,9 +92,16 @@ const {
 } = require("./socialPublishingService");
 const { buildSocialCaptionContract, isAffiliateRecommendation } = require("./socialCaptionPolicy");
 const { resolveSocialVisualMode } = require("./socialVisualPolicy");
+const {
+  assertBrandLogoEvidenceForAssets,
+  brandLogoEvidencePassed,
+  buildBrandLogoContract,
+  serializeBrandLogoContract,
+} = require("./socialBrandLogoPolicy");
 
 const GENERATION_LEASE_MS = 15 * 60 * 1000;
 const PAID_OPERATION_LEASE_MS = 2 * 60 * 60 * 1000;
+const MAX_FINAL_VIDEO_LOGO_VALIDATION_ATTEMPTS = 3;
 const GENERATION_WORKER_OWNER = `${os.hostname()}:${process.pid}:social:${crypto.randomUUID().slice(0, 8)}`;
 const STAGE_MAP = Object.freeze({
   research: "MARKET_RESEARCH",
@@ -186,7 +200,7 @@ const SOCIAL_FORMAT_PREFERENCES = new Set([
   "EVENT_OR_WORKSHOP_PROMOTION",
 ]);
 const SOCIAL_GENERATION_TYPES = new Set(["TODAY", "SINGLE_POST", "CAROUSEL", "PRODUCT_POST"]);
-const SOCIAL_VISUAL_MODES = new Set(["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC"]);
+const SOCIAL_VISUAL_MODES = new Set(["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_BRANDED_ARTWORK", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC"]);
 
 function applyMongoSession(query, session) {
   return session && query && typeof query.session === "function" ? query.session(session) : query;
@@ -606,7 +620,7 @@ function normalizeGenerationRequest(input = {}) {
     throw error;
   }
   if (!SOCIAL_VISUAL_MODES.has(visualMode)) {
-    const error = new Error("visual_mode must be AI_VISUAL_WITH_EXACT_OVERLAY, AI_ARTWORK_ONLY, or FULL_AI_GRAPHIC");
+    const error = new Error("visual_mode must be AI_VISUAL_WITH_EXACT_OVERLAY, AI_BRANDED_ARTWORK, AI_ARTWORK_ONLY (historical only), or FULL_AI_GRAPHIC");
     error.code = "social_generation_request_invalid";
     error.statusCode = 400;
     throw error;
@@ -886,6 +900,10 @@ function publicAsset(asset) {
     manual_review_flags: manualReviewApproved ? [] : value.manual_review_flags || [],
     manual_review_status: value.manual_review_status || null,
     provenance: value.provenance || null,
+    brand_logo_evidence: value.brand_logo_evidence
+      || value.provenance?.brand_logo_evidence
+      || value.provenance?.base_image?.brand_logo_evidence
+      || null,
     source_provenance: value.source_provenance || null,
     usage_rights_status: value.usage_rights_status || null,
     reference_assets: value.reference_assets || [],
@@ -972,6 +990,7 @@ function publicRun(run) {
     timezone: value.timezone,
     trigger_type: value.trigger_type,
     generation_request: value.generation_request || null,
+    brand_logo_contract: value.brand_logo_contract || null,
     generation_mode: value.generation_mode || null,
     full_ai_generation: value.full_ai_generation !== false,
     status: value.status,
@@ -1030,6 +1049,7 @@ function publicDraft(draft, { assets = [], sources = [], audits = [], metrics = 
     generation_mode: value.generation_mode || null,
     visual_mode: value.visual_mode || null,
     visual_mode_resolution: value.visual_mode_resolution || null,
+    brand_logo_contract: value.brand_logo_contract || null,
     full_ai_ready: Boolean(value.full_ai_ready),
     status: value.status,
     generation_date: value.generation_date,
@@ -1103,7 +1123,7 @@ function exactHeadlineValidationPassed(validation = {}, expectedHeadline = "") {
 
 function normalizeFullAiTextManifest(value) {
   if (!Array.isArray(value) || !value.length || value.length > 40) {
-    const error = new Error("FULL_AI_GRAPHIC v2 requires an explicit ordered visible-text manifest of 1 to 40 blocks");
+    const error = new Error("FULL_AI_GRAPHIC requires an explicit ordered visible-text manifest of 1 to 40 blocks");
     error.code = "social_full_ai_graphic_text_contract_invalid";
     error.statusCode = 400;
     throw error;
@@ -1128,11 +1148,12 @@ function fullAiDraftManifestFromAssets(assets = []) {
     .filter((asset) => asset.asset_role === "FINAL_COMPOSED"
       && asset.media_kind === "IMAGE"
       && asset.visual_mode === "FULL_AI_GRAPHIC"
-      && Number(asset.provenance?.full_ai_graphic_contract_version || 0) === 2)
+      && [2, 3].includes(Number(asset.provenance?.full_ai_graphic_contract_version || 0)))
     .sort((left, right) => Number(left.slide_number || 1) - Number(right.slide_number || 1));
   if (!finalGraphics.length) return null;
   const rows = finalGraphics.map((asset) => ({
     sequence: Number(asset.slide_number || 1),
+    contract_version: Number(asset.provenance?.full_ai_graphic_contract_version || 2),
     blocks: normalizeFullAiTextManifest(asset.provenance?.full_ai_graphic_manifest?.expected_text_blocks),
     approved_copy_checksum_sha256: trimText(asset.approved_copy_checksum_sha256).toLowerCase(),
   }));
@@ -1143,7 +1164,7 @@ function fullAiDraftManifestFromAssets(assets = []) {
       text: block.text,
     })));
   return {
-    contract_version: 2,
+    contract_version: rows.every((row) => row.contract_version === 3) ? 3 : 2,
     expected_text_blocks: normalizeFullAiTextManifest(expectedTextBlocks),
     checksum_sha256: sha256Object(expectedTextBlocks),
     approved_copy_checksum_sha256: rows.length === 1
@@ -1164,13 +1185,17 @@ function applyFullAiDraftManifest(draft, assets = []) {
   return manifest;
 }
 
-function fullAiPosterValidationPassed(validation = {}, expectedTextBlocks = []) {
+function fullAiPosterValidationPassed(
+  validation = {},
+  expectedTextBlocks = [],
+  { requireBrandIdentity = true } = {},
+) {
   const expected = safeArray(expectedTextBlocks).map((block) => trimText(block?.text)).filter(Boolean);
   const observed = safeArray(validation.observedTextBlocks || validation.observed_text_blocks).map(trimText);
   return expected.length > 0
     && String(validation.decision || "").toUpperCase() === "PASS"
     && validation.exactTextMatch === true
-    && validation.brandIdentityMatch === true
+    && (!requireBrandIdentity || validation.brandIdentityMatch === true)
     && validation.mobileLegible === true
     && validation.safeAreaPassed === true
     && validation.unapprovedTextPresent === false
@@ -1322,7 +1347,7 @@ function captionPolicyPassed(asset = {}, expectedFormat, recommendation = {}) {
     && policy.financial_disclaimer_required === Boolean(contract.components.financial_disclaimer);
   if (expectedFormat === "STORY") {
     const nativeStory = trimText(asset.visual_mode).toUpperCase() === "FULL_AI_GRAPHIC"
-      && Number(asset.provenance?.full_ai_graphic_contract_version || 0) === 2
+      && [2, 3].includes(Number(asset.provenance?.full_ai_graphic_contract_version || 0))
       && asset.provenance?.overlay?.method === "none"
       && asset.provenance?.overlay?.pixel_overlay_applied === false;
     return common
@@ -1347,13 +1372,38 @@ function captionPolicyPassed(asset = {}, expectedFormat, recommendation = {}) {
     && policy.caption_checksum_sha256 === contract.checksum_sha256;
 }
 
-function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCopy = null, draftFullAiManifest = null) {
+function visualModeProvenancePassed(
+  asset = {},
+  effectiveVisualMode,
+  expectedCopy = null,
+  draftFullAiManifest = null,
+  draftBrandLogoContract = null,
+) {
   const provenance = asset.provenance || {};
   const base = provenance.base_image || {};
   const overlayProvenance = provenance.overlay || {};
   const overlay = asset.overlay_json || {};
   const textRendering = overlay.text_rendering || {};
   const selfCopyIntegrity = approvedCopyIntegrityPassed(asset);
+  const brandLogoContract = draftBrandLogoContract
+    || provenance.brand_logo_contract
+    || asset.brand_logo_contract
+    || null;
+  const brandLogoEvidence = asset.brand_logo_evidence
+    || provenance.brand_logo_evidence
+    || base.brand_logo_evidence
+    || null;
+  const mandatoryBrandLogoPolicy = Boolean(brandLogoContract);
+  const brandLogoValidatedChecksum = effectiveVisualMode === "AI_VISUAL_WITH_EXACT_OVERLAY"
+    ? trimText(base.checksum_sha256 || base.source_checksum_sha256)
+    : trimText(asset.checksum_sha256);
+  const mandatoryBrandLogoPassed = !mandatoryBrandLogoPolicy || (
+    brandLogoEvidencePassed(brandLogoEvidence || {}, brandLogoContract, brandLogoValidatedChecksum)
+    && provenance.post_generation_logo_overlay_applied === false
+    && provenance.logo?.post_generation_logo_overlay_applied === false
+    && (brandLogoEvidence?.post_generation_logo_overlay_applied === false
+      || brandLogoEvidence?.postGenerationLogoOverlayApplied === false)
+  );
 
   if (effectiveVisualMode === "AI_ARTWORK_ONLY") {
     const baseValidation = base.artwork_validation || {};
@@ -1375,8 +1425,24 @@ function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCop
       && trimText(baseValidation.response_id) === trimText(overlayValidation.response_id);
   }
 
+  if (effectiveVisualMode === "AI_BRANDED_ARTWORK") {
+    return mandatoryBrandLogoPolicy
+      && mandatoryBrandLogoPassed
+      && asset.renderer === "sharp_resize_only"
+      && provenance.renderer === "sharp_resize_only"
+      && overlayProvenance.method === "none"
+      && !overlayProvenance.copy_source
+      && textRendering.method === "none"
+      && textRendering.image_ai_used_for_text === false
+      && overlay.brand_name == null
+      && !overlay.logo?.source
+      && !provenance.logo?.source
+      && selfCopyIntegrity
+      && retainedProviderOriginalPassed(asset);
+  }
+
   if (effectiveVisualMode === "AI_VISUAL_WITH_EXACT_OVERLAY") {
-    return asset.renderer === "sharp_svg_overlay"
+    const exactOverlayCore = asset.renderer === "sharp_svg_overlay"
       && provenance.renderer === "sharp_svg_overlay"
       && overlayProvenance.method === "sharp_svg_overlay"
       && overlayProvenance.image_ai_used_for_text === false
@@ -1384,13 +1450,19 @@ function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCop
       && textRendering.method === "sharp_svg_overlay"
       && textRendering.image_ai_used_for_text === false
       && overlay.brand_name === "Pink Paisa"
-      && Boolean(trimText(overlay.logo?.source))
-      && Boolean(trimText(provenance.logo?.source))
       && approvedCopyIntegrityPassed(asset, expectedCopy);
+    return exactOverlayCore && (mandatoryBrandLogoPolicy
+      ? mandatoryBrandLogoPassed
+        && overlay.logo?.method === "openai_reference_baked"
+        && !overlay.logo?.source
+        && provenance.logo?.method === "openai_reference_baked"
+        && !provenance.logo?.source
+      : Boolean(trimText(overlay.logo?.source)) && Boolean(trimText(provenance.logo?.source)));
   }
 
   if (effectiveVisualMode === "FULL_AI_GRAPHIC") {
-    if (Number(provenance.full_ai_graphic_contract_version || 0) === 2) {
+    const fullAiContractVersion = Number(provenance.full_ai_graphic_contract_version || 0);
+    if ([2, 3].includes(fullAiContractVersion)) {
       let expectedBlocks;
       let storedBlocks;
       try {
@@ -1416,7 +1488,21 @@ function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCop
       const baseChecksum = trimText(base.checksum_sha256).toLowerCase();
       const draftManifestChecksum = sha256Object(expectedBlocks);
       const assetManifestChecksum = sha256Object(storedBlocks);
-      return asset.renderer === "openai_generated_graphic_passthrough"
+      const nativeLogoProvenanceMethod = trimText(brandLogoEvidence?.method).toUpperCase()
+        === "EXTERNAL_REFERENCE_VISUAL_MATCH"
+        ? "external_reference_visual_match"
+        : "openai_reference_baked";
+      const nativeLogoContractPassed = fullAiContractVersion === 3
+        ? mandatoryBrandLogoPolicy
+          && mandatoryBrandLogoPassed
+          && overlay.brand_name == null
+          && overlay.logo?.method === nativeLogoProvenanceMethod
+          && provenance.logo?.method === nativeLogoProvenanceMethod
+        : overlay.brand_name === "Pink Paisa"
+          && overlay.logo?.method === "openai_image_baked_in"
+          && provenance.logo?.method === "openai_image_baked_in";
+      return nativeLogoContractPassed
+        && asset.renderer === "openai_generated_graphic_passthrough"
         && provenance.renderer === "openai_generated_graphic_passthrough"
         && base.type === "openai_generated_complete_graphic"
         && base.contains_approved_copy_by_design === true
@@ -1427,10 +1513,7 @@ function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCop
         && textRendering.method === "openai_image_baked_in_exact_copy"
         && textRendering.pixel_overlay_applied === false
         && textRendering.image_ai_used_for_text === true
-        && overlay.brand_name === "Pink Paisa"
-        && overlay.logo?.method === "openai_image_baked_in"
         && !overlay.logo?.source
-        && provenance.logo?.method === "openai_image_baked_in"
         && !provenance.logo?.source
         && selfCopyIntegrity
         && approvedCopyIntegrityPassed(asset, expectedCopy)
@@ -1440,7 +1523,9 @@ function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCop
         && trimText(provenance.full_ai_graphic_manifest?.checksum_sha256).toLowerCase() === assetManifestChecksum
         && trimText(provenance.full_ai_graphic_manifest?.approved_copy_checksum_sha256).toLowerCase()
           === trimText(asset.approved_copy_checksum_sha256).toLowerCase()
-        && fullAiPosterValidationPassed(posterValidation, storedBlocks)
+        && fullAiPosterValidationPassed(posterValidation, storedBlocks, {
+          requireBrandIdentity: fullAiContractVersion < 3,
+        })
         && retainedNativeFullAiProviderOriginalPassed(asset)
         && isSha256(baseChecksum)
         && baseChecksum === trimText(asset.checksum_sha256).toLowerCase();
@@ -1483,11 +1568,30 @@ function visualModeProvenancePassed(asset = {}, effectiveVisualMode, expectedCop
   return false;
 }
 
-function currentVideoAssemblyPassed(asset = {}, recommendation = {}, effectiveVisualMode = null) {
+function currentVideoAssemblyPassed(
+  asset = {},
+  recommendation = {},
+  effectiveVisualMode = null,
+  brandLogoContract = null,
+) {
   const scenes = safeArray(reelContent(recommendation).scenes);
   const mappings = safeArray(asset.provenance?.storyboard_frames);
   const expectedSubtitleText = buildSrt(scenes);
   const expectedDuration = reelDurationSeconds(scenes);
+  const sceneLogoEvidence = safeArray(asset.provenance?.brand_logo_scene_evidence);
+  const logoScenesPassed = !brandLogoContract || (
+    sceneLogoEvidence.length === scenes.length
+    && sceneLogoEvidence.every((evidence, index) => (
+      Number(evidence.scene_index) === index
+      && brandLogoEvidencePassed(
+        evidence,
+        brandLogoContract,
+        evidence.extracted_frame_checksum_sha256,
+      )
+      && (evidence.post_generation_logo_overlay_applied === false
+        || evidence.postGenerationLogoOverlayApplied === false)
+    ))
+  );
   return scenes.length > 0
     && asset.provenance?.assembler === "ffmpeg"
     && asset.provenance?.scene_plan_fingerprint_sha256
@@ -1496,6 +1600,7 @@ function currentVideoAssemblyPassed(asset = {}, recommendation = {}, effectiveVi
     && asset.provenance?.subtitles_burned_in === (effectiveVisualMode !== "FULL_AI_GRAPHIC")
     && mappings.length === scenes.length
     && mappings.every((mapping, index) => Number(mapping.scene_index) === index)
+    && logoScenesPassed
     && Math.abs(Number(asset.duration_seconds || 0) - expectedDuration) < 0.001;
 }
 
@@ -1604,11 +1709,19 @@ function reviewAssetReadiness(assets = [], { draft = null } = {}) {
       issues.push(`${label} does not map to approved on-image copy for its sequence.`);
     }
     if (draftValue && SOCIAL_VISUAL_MODES.has(effectiveVisualMode)
-      && !visualModeProvenancePassed(value, effectiveVisualMode, expectedCopy, draftValue.full_ai_graphic_manifest || null)) {
+      && !visualModeProvenancePassed(
+        value,
+        effectiveVisualMode,
+        expectedCopy,
+        draftValue.full_ai_graphic_manifest || null,
+        draftValue.brand_logo_contract || null,
+      )) {
       const modeLabel = effectiveVisualMode === "AI_ARTWORK_ONLY"
         ? "resize-only/no-overlay and independent zero-text/logo"
+        : effectiveVisualMode === "AI_BRANDED_ARTWORK"
+          ? "resize-only/no-copy-overlay and independently validated reference-baked logo"
         : effectiveVisualMode === "FULL_AI_GRAPHIC"
-          ? Number(value.provenance?.full_ai_graphic_contract_version || 0) === 2
+          ? [2, 3].includes(Number(value.provenance?.full_ai_graphic_contract_version || 0))
             ? "validated AI-baked exact copy with zero post-generation overlays"
             : "validated AI headline and Sharp branded-finish"
           : "verified Sharp exact-overlay";
@@ -1654,7 +1767,12 @@ function reviewAssetReadiness(assets = [], { draft = null } = {}) {
       if (!Number(asset.duration_seconds) || !Number(asset.frame_rate_fps) || !trimText(asset.video_codec)) {
         issues.push(`The assembled ${videoLabel} video is missing required duration, frame-rate, or codec metadata.`);
       }
-      if (draftValue && !currentVideoAssemblyPassed(asObject(asset) || {}, recommendation, effectiveVisualMode)) {
+      if (draftValue && !currentVideoAssemblyPassed(
+        asObject(asset) || {},
+        recommendation,
+        effectiveVisualMode,
+        draftValue.brand_logo_contract || null,
+      )) {
         issues.push(`The assembled ${videoLabel} video does not match the current approved scene voiceover, subtitle, timing, and storyboard sequence.`);
       }
     });
@@ -2248,17 +2366,6 @@ async function persistInstagramNativeManualActions({ draft, run, recommendation,
       reference: "instagram-native-story-sticker",
     });
   }
-  const frameCount = storyFrameCount(recommendation);
-  if (frameCount > 1) {
-    actionSpecs.push({
-      suffix: `story-sequence:${frameCount}`,
-      priority: "MEDIUM",
-      title: `Publish the approved ${frameCount}-frame Story sequence manually`,
-      description: "The approved Story contains multiple ordered frames. The direct publishing workflow intentionally handles only one Story media object at a time and will not silently publish an incomplete sequence.",
-      instructions: ["Open the approved Story assets in sequence order in Instagram's first-party app, verify every crop/link/sticker, publish all frames in order, then record the result in this task."],
-      reference: `instagram-native-story-sequence-${frameCount}`,
-    });
-  }
   const actions = [];
   for (const spec of actionSpecs) {
     const actionKey = `social-${contentSlug}-${spec.suffix}:${draft._id}`.slice(0, 400);
@@ -2412,6 +2519,109 @@ async function persistReviewerNotificationFailure({ draft, run, error, dependenc
   return action;
 }
 
+function finalVideoLogoValidationAttempt({ evidence = {}, error = null, passed = false, sceneIndex, attemptNumber, frame }) {
+  const usage = mergeGenerationUsage(evidence.usage || error?.usage || {});
+  const responseId = trimText(
+    evidence.validator_response_id
+    || evidence.response_id
+    || error?.response_id,
+  ).slice(0, 300) || null;
+  const issues = safeArray(evidence.issues || error?.validation_errors)
+    .map((value) => normalizeWhitespace(value).slice(0, 1000))
+    .filter(Boolean)
+    .slice(0, 20);
+  return {
+    scene_index: Number(sceneIndex),
+    source_asset_sequence: Number(evidence.source_asset_sequence || evidence.sourceAssetSequence) || null,
+    attempt_number: Number(attemptNumber),
+    status: passed ? "PASSED" : "FAILED",
+    decision: trimText(evidence.decision || evidence.outcome).toUpperCase() || (error ? "ERROR" : "REGENERATE"),
+    provider: trimText(evidence.provider || error?.provider || "openai").toLowerCase() || "openai",
+    model: trimText(evidence.validator_model || error?.model) || null,
+    provider_response_id: responseId,
+    usage,
+    estimated_cost: estimateOpenAiCostUsd(usage),
+    issues: issues.length ? issues : error ? ["Final video badge validation provider call failed"] : [],
+    error_code: trimText(error?.code).slice(0, 200) || null,
+    extracted_at_seconds: Number(frame?.timestamp_seconds),
+    extracted_frame_checksum_sha256: trimText(frame?.checksum_sha256).toLowerCase()
+      || (Buffer.isBuffer(frame?.buffer) && frame.buffer.length
+        ? crypto.createHash("sha256").update(frame.buffer).digest("hex")
+        : null),
+    raw_output_retained: false,
+  };
+}
+
+function aggregateFinalVideoLogoValidation(attempts = [], { status = "SUCCEEDED", format = "REEL" } = {}) {
+  const rows = safeArray(attempts);
+  const lastAttemptByScene = new Map();
+  rows.forEach((row) => lastAttemptByScene.set(Number(row.scene_index), row));
+  const seenResponseIds = new Set();
+  const billableRows = rows.filter((row, index) => {
+    const responseId = trimText(row?.provider_response_id);
+    const identity = responseId ? `response:${responseId}` : `row:${index}`;
+    if (seenResponseIds.has(identity)) return false;
+    seenResponseIds.add(identity);
+    return responseId || Object.values(mergeGenerationUsage(row?.usage || {})).some(Boolean);
+  });
+  const usage = mergeGenerationUsage(billableRows.map((row) => row.usage || {}));
+  return {
+    kind: "FINAL_VIDEO_BRAND_LOGO_VALIDATION",
+    format: trimText(format).toUpperCase() || "REEL",
+    status,
+    retry_scope: "FAILING_SCENE_VALIDATION_ONLY",
+    max_attempts_per_scene: MAX_FINAL_VIDEO_LOGO_VALIDATION_ATTEMPTS,
+    republish_attempted: false,
+    validation_attempt_count: rows.length,
+    validated_scene_count: [...lastAttemptByScene.values()].filter((row) => row.status === "PASSED").length,
+    failed_scene_indexes: [...lastAttemptByScene.values()]
+      .filter((row) => row.status !== "PASSED")
+      .map((row) => row.scene_index),
+    provider_response_ids: billableRows.map((row) => row.provider_response_id).filter(Boolean),
+    usage,
+    estimated_cost: estimateOpenAiCostUsd(usage),
+    cost_currency: "USD",
+    attempts: rows,
+    raw_output_retained: false,
+  };
+}
+
+function appendFinalVideoLogoValidationRunEvidence(run, evidence = {}) {
+  if (!run || !safeArray(evidence.attempts).length) return;
+  const executions = evidence.attempts.map((attempt) => ({
+    stage: "VALIDATING_IMAGES",
+    status: attempt.status === "PASSED" ? "COMPLETED" : "FAILED",
+    provider: attempt.provider || "openai",
+    model: attempt.model || null,
+    provider_response_id: attempt.provider_response_id || null,
+    retry_number: Math.max(Number(attempt.attempt_number || 1) - 1, 0),
+    input_tokens: Number(attempt.usage?.input_tokens || 0),
+    output_tokens: Number(attempt.usage?.output_tokens || 0),
+    total_tokens: Number(attempt.usage?.total_tokens || 0),
+    estimated_cost: Number(attempt.estimated_cost || 0),
+    cost_currency: "USD",
+    attempt_count: 1,
+    started_at: null,
+    finished_at: new Date(),
+    error_code: attempt.error_code || (attempt.status === "PASSED" ? null : "social_brand_logo_validation_failed"),
+    error_message: attempt.status === "PASSED" ? null : "Final video scene badge validation did not pass",
+    output_json: null,
+    request_metadata: {
+      purpose: "FINAL_VIDEO_BRAND_LOGO_VALIDATION",
+      scene_index: attempt.scene_index,
+      extracted_at_seconds: attempt.extracted_at_seconds,
+      extracted_frame_checksum_sha256: attempt.extracted_frame_checksum_sha256,
+    },
+    response_metadata: {
+      decision: attempt.decision,
+      issues: attempt.issues,
+      raw_output_retained: false,
+    },
+  }));
+  run.stage_executions = mergeStageExecutionHistory(safeArray(run.stage_executions), executions);
+  run.markModified?.("stage_executions");
+}
+
 async function assembleReelCreative({
   draft,
   run = null,
@@ -2420,6 +2630,8 @@ async function assembleReelCreative({
   creativeResult,
   visualMode,
   actor = null,
+  settings = {},
+  paidEvidenceContext = null,
   dependencies = {},
   AssetModel = SocialAsset,
 } = {}) {
@@ -2512,6 +2724,184 @@ async function assembleReelCreative({
     error.code = "social_reel_output_invalid";
     throw error;
   }
+  let brandLogoSceneEvidence = [];
+  let finalVideoBrandLogoValidation = null;
+  if (draft.brand_logo_contract?.required) {
+    const runtimeBrandLogoContract = await buildBrandLogoContract({
+      draftLike: draft,
+      recommendation,
+      visualMode: draft.visual_mode || visualMode,
+      preferredCorner: draft.brand_logo_contract.locked_corner,
+      dependencies,
+    });
+    const runtimeSerialized = serializeBrandLogoContract(runtimeBrandLogoContract);
+    if (runtimeSerialized.reference_checksum_sha256 !== draft.brand_logo_contract.reference_checksum_sha256
+      || runtimeSerialized.locked_corner !== draft.brand_logo_contract.locked_corner
+      || runtimeSerialized.safe_corner?.lock_id !== draft.brand_logo_contract.safe_corner?.lock_id) {
+      const error = new Error(`The frozen ${videoLabel} badge contract no longer matches the verified canonical reference and locked corner`);
+      error.code = "social_brand_logo_contract_mismatch";
+      throw error;
+    }
+    const extractedFrames = safeArray(assembled.brand_logo_scene_frames).length
+      ? safeArray(assembled.brand_logo_scene_frames)
+      : await (dependencies.extractReelSceneFrames || extractSceneFramesFromVideo)({
+        videoPath: outputPath,
+        scenes,
+        dependencies: dependencies.reelAssemblyDependencies || {},
+      });
+    if (extractedFrames.length !== scenes.length) {
+      const error = new Error(`The final ${videoLabel} must provide one independent badge-verification frame for every scene`);
+      error.code = "social_reel_logo_frame_missing";
+      throw error;
+    }
+    const validationAttempts = [];
+    const maxValidationAttempts = Math.min(Math.max(
+      Number(settings?.ai_generation?.max_image_retries || MAX_FINAL_VIDEO_LOGO_VALIDATION_ATTEMPTS),
+      1,
+    ), MAX_FINAL_VIDEO_LOGO_VALIDATION_ATTEMPTS);
+    for (const [sceneIndex, scene] of scenes.entries()) {
+      let frame = extractedFrames.find((row) => Number(row.scene_index) === sceneIndex) || extractedFrames[sceneIndex];
+      if (!Buffer.isBuffer(frame?.buffer) || !frame.buffer.length) {
+        const error = new Error(`The final ${videoLabel} scene ${sceneIndex + 1} could not be independently inspected for the mandatory badge`);
+        error.code = "social_reel_logo_frame_missing";
+        throw error;
+      }
+      const sourceVisual = sceneFrameMappings[sceneIndex]?.visual || {};
+      const expectedTextBlocks = [
+        ...safeArray(sourceVisual.expected_text_blocks),
+        { text: trimText(scene.onScreenText || scene.on_screen_text || scene.voiceover) },
+      ].filter((row) => trimText(row?.text || row));
+      const sceneAttempts = [];
+      let acceptedEvidence = null;
+      for (let attemptNumber = 1; attemptNumber <= maxValidationAttempts; attemptNumber += 1) {
+        const frameChecksum = trimText(frame.checksum_sha256).toLowerCase()
+          || crypto.createHash("sha256").update(frame.buffer).digest("hex");
+        let evidence = {};
+        let validationError = null;
+        try {
+          evidence = await (dependencies.validateFinalVideoBrandLogo || validateBrandLogoReference)({
+            generatedBuffer: frame.buffer,
+            referenceBuffer: runtimeBrandLogoContract.reference.buffer,
+            contract: runtimeBrandLogoContract,
+            expectedTextBlocks,
+            settings,
+            dependencies,
+          });
+        } catch (error) {
+          validationError = error;
+          evidence = error?.brand_logo_validation || error?.brand_logo_evidence || {};
+        }
+        const candidateEvidence = {
+          ...evidence,
+          scene_index: sceneIndex,
+          source_asset_sequence: Number(sourceVisual.sequence) || null,
+          extracted_at_seconds: Number(frame.timestamp_seconds),
+          extracted_frame_checksum_sha256: frameChecksum,
+          validated_asset_checksum_sha256: frameChecksum,
+          post_generation_logo_overlay_applied: false,
+        };
+        const passed = !validationError
+          && brandLogoEvidencePassed(candidateEvidence, runtimeBrandLogoContract, frameChecksum);
+        const attemptRow = finalVideoLogoValidationAttempt({
+          evidence: candidateEvidence,
+          error: validationError,
+          passed,
+          sceneIndex,
+          attemptNumber,
+          frame,
+        });
+        sceneAttempts.push(attemptRow);
+        validationAttempts.push(attemptRow);
+        if (passed) {
+          acceptedEvidence = {
+            ...candidateEvidence,
+            validation_attempt_count: sceneAttempts.length,
+            validator_response_ids: sceneAttempts.map((row) => row.provider_response_id).filter(Boolean),
+            validation_usage: mergeGenerationUsage(sceneAttempts.map((row) => row.usage || {})),
+            validation_estimated_cost: Number(sceneAttempts.reduce(
+              (total, row) => total + Number(row.estimated_cost || 0),
+              0,
+            ).toFixed(6)),
+            validation_attempts: sceneAttempts,
+            recovery_scope: "FAILING_SCENE_VALIDATION_ONLY",
+            republish_attempted: false,
+          };
+          break;
+        }
+        if (attemptNumber < maxValidationAttempts) {
+          const canReextract = typeof dependencies.extractReelSceneFrame === "function"
+            || !safeArray(assembled.brand_logo_scene_frames).length;
+          if (canReextract) {
+            try {
+              frame = await (dependencies.extractReelSceneFrame || extractSceneFrameFromVideo)({
+                videoPath: outputPath,
+                scene,
+                sceneIndex,
+                timestampSeconds: Number(frame.timestamp_seconds),
+                dependencies: dependencies.reelAssemblyDependencies || {},
+              });
+            } catch (extractionError) {
+              attemptRow.recovery_extraction_error = {
+                code: trimText(extractionError?.code).slice(0, 200) || "social_reel_logo_frame_missing",
+                message: "The failing scene could not be re-extracted; validation retried against the retained proof frame.",
+              };
+            }
+          }
+        }
+      }
+      if (!acceptedEvidence) {
+        const failingEvidence = {
+          ...(sceneAttempts.at(-1) || {}),
+          scene_index: sceneIndex,
+          validation_attempt_count: sceneAttempts.length,
+          validation_attempts: sceneAttempts,
+          post_generation_logo_overlay_applied: false,
+        };
+        brandLogoSceneEvidence.push(failingEvidence);
+        finalVideoBrandLogoValidation = aggregateFinalVideoLogoValidation(validationAttempts, {
+          status: "FAILED",
+          format: socialFormat,
+        });
+        appendFinalVideoLogoValidationRunEvidence(run, finalVideoBrandLogoValidation);
+        const error = new Error(`The mandatory Pink Paisa badge did not survive final ${videoLabel} scale/crop validation in scene ${sceneIndex + 1} after ${sceneAttempts.length} bounded attempts`);
+        error.code = "social_brand_logo_validation_exhausted";
+        error.brand_logo_scene_evidence = brandLogoSceneEvidence;
+        error.reel_logo_validation_evidence = finalVideoBrandLogoValidation;
+        if (paidEvidenceContext) {
+          try {
+            await persistPaidFinalVideoLogoValidationUsage({
+              ...paidEvidenceContext,
+              draft,
+              status: "FAILED",
+              evidence: finalVideoBrandLogoValidation,
+              dependencies,
+            });
+          } catch (ledgerError) {
+            error.usage_ledger_error = {
+              code: trimText(ledgerError?.code).slice(0, 200) || null,
+              message: "Final-video badge validation usage could not be written to the append-only ledger.",
+            };
+          }
+        }
+        throw error;
+      }
+      brandLogoSceneEvidence.push(acceptedEvidence);
+    }
+    finalVideoBrandLogoValidation = aggregateFinalVideoLogoValidation(validationAttempts, {
+      status: "SUCCEEDED",
+      format: socialFormat,
+    });
+    appendFinalVideoLogoValidationRunEvidence(run, finalVideoBrandLogoValidation);
+    if (paidEvidenceContext) {
+      await persistPaidFinalVideoLogoValidationUsage({
+        ...paidEvidenceContext,
+        draft,
+        status: "SUCCEEDED",
+        evidence: finalVideoBrandLogoValidation,
+        dependencies,
+      });
+    }
+  }
   const subtitleText = buildSrt(scenes);
   if (!trimText(subtitleText)) {
     const error = new Error(`The approved ${videoLabel} scene plan must contain on-screen text or voiceover for a subtitle track`);
@@ -2581,6 +2971,14 @@ async function assembleReelCreative({
     frame_count: Math.max(Math.round(durationSeconds * 30), 1),
     renderer: assembled.command_profile || "ffmpeg_h264_aac_1080x1920_v1",
     image_generation_status: "NOT_APPLICABLE",
+    brand_logo_contract: draft.brand_logo_contract || null,
+    brand_logo_evidence: brandLogoSceneEvidence.length ? {
+      ...brandLogoSceneEvidence[0],
+      all_scenes_passed: brandLogoSceneEvidence.length === scenes.length,
+      validated_scene_count: brandLogoSceneEvidence.length,
+      expected_scene_count: scenes.length,
+      scene_evidence: brandLogoSceneEvidence,
+    } : null,
     provenance: {
       role: socialFormat === "REEL" ? "final_reel_video" : "final_video_feed",
       assembler: "ffmpeg",
@@ -2602,6 +3000,10 @@ async function assembleReelCreative({
       audio_rights: assembled.audio_rights || null,
       instagram_native_audio_requested: requestsInstagramNativeAudio(recommendation),
       caption_policy: captionPolicy,
+      brand_logo_contract: draft.brand_logo_contract || null,
+      brand_logo_scene_evidence: brandLogoSceneEvidence,
+      final_video_brand_logo_validation: finalVideoBrandLogoValidation,
+      post_generation_logo_overlay_applied: false,
     },
     source_provenance: "generated",
     usage_rights_status: "api_permitted",
@@ -2609,6 +3011,7 @@ async function assembleReelCreative({
       { key: "ffmpeg_output", label: "FFmpeg produced a non-empty H.264 MP4", status: "PASS", required: true, details: assembled.command_profile || "ffmpeg_h264_aac_1080x1920_v1" },
       { key: "storyboard_mapping", label: "Every approved scene maps to a generated storyboard frame", status: "PASS", required: true, details: `${scenes.length} scene${scenes.length === 1 ? "" : "s"} assembled from ${storyboardVisuals.length} generated frame${storyboardVisuals.length === 1 ? "" : "s"}` },
       { key: "subtitle_track", label: "Approved scene captions are present in the assembled video", status: "PASS", required: true, details: burnSubtitles ? "Complete SRT captions burned in" : "FULL_AI_GRAPHIC scene text was independently validated before assembly" },
+      { key: "brand_logo_every_scene", label: "The AI-baked canonical Pink Paisa badge survives final video scale/crop in every scene", status: draft.brand_logo_contract?.required && brandLogoSceneEvidence.length !== scenes.length ? "FAIL" : "PASS", required: Boolean(draft.brand_logo_contract?.required), details: draft.brand_logo_contract?.required ? `${brandLogoSceneEvidence.length}/${scenes.length} final scene frames independently validated` : "Historical video without the mandatory badge contract" },
       { key: "manual_visual_review", label: `Human ${videoLabel} playback and rights review`, status: "MANUAL_REVIEW", required: true, details: "Review playback, crop, caption timing, accessibility, and audio rights before approval" },
     ],
     validation_status: "needs_manual_review",
@@ -2701,7 +3104,8 @@ async function assembleReelCreative({
     reel_video_asset: videoAsset,
     reel_subtitle_asset: subtitleAsset,
     manual_action: manualActions[0] || null,
-      manual_actions: manualActions,
+    manual_actions: manualActions,
+      reel_logo_validation_evidence: finalVideoBrandLogoValidation,
       staged_files: [...safeArray(creativeResult.staged_files), ...stagedReelFiles],
     };
   } catch (error) {
@@ -2960,6 +3364,57 @@ async function persistPaidImageCallUsage({
   }
 }
 
+async function persistPaidFinalVideoLogoValidationUsage({
+  callId,
+  draft,
+  operation,
+  status,
+  evidence,
+  requestId = null,
+  dependencies = {},
+} = {}) {
+  const responseIds = safeArray(evidence?.provider_response_ids).map(trimText).filter(Boolean);
+  const usage = mergeGenerationUsage(evidence?.usage || {});
+  if (!responseIds.length && !Object.values(usage).some(Boolean) && Number(evidence?.estimated_cost || 0) <= 0) return null;
+  const LedgerModel = dependencies.SocialPaidCallUsageLedger
+    || (dependencies.SocialGenerationRun || dependencies.SocialPostDraft ? null : SocialPaidCallUsageLedger);
+  if (!LedgerModel) return null;
+  const operationName = ["VISUAL_REGENERATION", "PARTIAL_REGENERATION", "DUPLICATE"].includes(operation)
+    ? operation
+    : "PARTIAL_REGENERATION";
+  const validationReceiptId = sha256(`${callId}:final-video-logo-validation`);
+  const idempotencyKey = `social-paid-call:${operationName}:${draft._id}:${validationReceiptId}`.slice(0, 300);
+  const lastAttempt = safeArray(evidence?.attempts).at(-1) || {};
+  const row = {
+    idempotency_key: idempotencyKey,
+    generation_run_id: draft.generation_run_id,
+    draft_id: draft._id,
+    operation: operationName,
+    status,
+    provider: lastAttempt.provider || "openai",
+    model: lastAttempt.model || null,
+    incurred_at: new Date(),
+    usage: {
+      ...usage,
+      estimated_cost: Math.max(Number(evidence?.estimated_cost || estimateOpenAiCostUsd(usage)), 0),
+      cost_currency: "USD",
+    },
+    evidence: {
+      ...clone(evidence),
+      paid_call_id: callId,
+      raw_output_retained: false,
+    },
+    request_id: trimText(requestId).slice(0, 200) || null,
+    recorded_at: new Date(),
+  };
+  try {
+    return await LedgerModel.create(row);
+  } catch (error) {
+    if (error?.code !== 11000 || typeof LedgerModel.findOne !== "function") throw error;
+    return LedgerModel.findOne({ idempotency_key: idempotencyKey });
+  }
+}
+
 function sanitizePaidPromptRunEvidence(promptRun = {}) {
   return {
     stage: trimText(promptRun.stage).slice(0, 120) || null,
@@ -3103,6 +3558,14 @@ async function persistOriginalAiVisualAssets({
       width: visual.width,
       height: visual.height,
     };
+    const brandLogoContract = visual.brand_logo_contract
+      || imageResult.brand_logo_contract
+      || run.brand_logo_contract
+      || draft.brand_logo_contract
+      || null;
+    const brandLogoEvidence = visual.brand_logo_evidence
+      || visual.brand_logo_validation
+      || null;
     return ({
     draft_id: draft._id,
     generation_run_id: run._id,
@@ -3118,6 +3581,7 @@ async function persistOriginalAiVisualAssets({
       : "PRIMARY_MEDIA",
     social_format: recommendation.format,
     visual_mode: visualMode,
+    brand_logo_evidence: brandLogoEvidence,
     slide_number: Number(visual.sequence || index + 1),
     url: visual.url,
     storage_provider: visual.storage_provider || "local",
@@ -3150,7 +3614,19 @@ async function persistOriginalAiVisualAssets({
       width: providerOriginal.width,
       height: providerOriginal.height,
     },
-    reference_assets: visual.reference_image_url ? [{
+    reference_assets: [
+      {
+        reference_type: "BRAND_LOGO",
+        url: brandLogoContract?.reference_url || "/pink-paisa-logo.png",
+        checksum_sha256: brandLogoContract?.reference_checksum_sha256 || brandLogoContract?.checksum_sha256 || null,
+        mime_type: "image/png",
+        width: 512,
+        height: 512,
+        source_bytes_preserved: false,
+        usage_rights_status: "owned",
+        authenticity_must_be_preserved: false,
+      },
+      ...(visual.reference_image_url ? [{
       reference_type: "PRODUCT_IMAGE",
       product_id: recommendation.verifiedProductId || null,
       url: visual.reference_image_url,
@@ -3169,7 +3645,8 @@ async function persistOriginalAiVisualAssets({
         === visual.reference_image_checksum_sha256,
       usage_rights_status: visual.authentic_product_reference?.usage_rights_status || "admin_confirmed",
       authenticity_must_be_preserved: true,
-    }] : [],
+      }] : []),
+    ],
     provenance: {
       provider: visual.provider || imageResult.provider,
       model: visual.model || imageResult.model,
@@ -3190,12 +3667,16 @@ async function persistOriginalAiVisualAssets({
       artwork_validation: visual.artwork_validation || null,
       provider_original: visual.provider_original || null,
       normalization: visual.normalization || null,
+      brand_logo_contract: brandLogoContract,
+      brand_logo_evidence: brandLogoEvidence,
+      post_generation_logo_overlay_applied: false,
       paid_call_id: trimText(paidCallId) || null,
     },
     source_provenance: visual.source_provenance,
     usage_rights_status: visual.usage_rights_status,
     validation_checklist: [
       { key: "openai_original_validated", label: visual.ai_background ? "OpenAI background validation" : "OpenAI original image validation", status: "PASS", required: true, details: visual.ai_background ? "Text-free, product-free background decoded and validated before guarded local composition" : "Decoded, normalized, and validated before composition" },
+      { key: "mandatory_ai_baked_brand_logo", label: "Approved Pink Paisa badge reference validation", status: brandLogoContract && brandLogoEvidencePassed(brandLogoEvidence || {}, brandLogoContract, visual.checksum_sha256) ? "PASS" : "FAIL", required: true, details: "Exactly one AI-rendered badge must match the frozen reference and safe corner" },
       ...(visual.authentic_product_reference ? [{ key: "verified_product_reference", label: "Verified product reference integrity", status: "PASS", required: true, details: `Production database match and stored source-byte sha256:${visual.reference_image_checksum_sha256}` }] : []),
       ...(visual.authentic_product_composition ? [{ key: "authentic_product_composite", label: "Authentic product local composition", status: "PASS", required: true, details: "Product placed exactly once by Sharp without generative editing; human packaging review remains required" }] : []),
     ],
@@ -3337,6 +3818,7 @@ async function requestGeneration({
       weekly_candidate_id: weeklyContext?.candidateId || null,
       request_fingerprint: sha256({ generationDate, triggerType, adminId, force: forceFresh, generationRequest: normalizedRequest }),
       generation_request: normalizedRequest,
+      brand_logo_contract: weeklyContext?.brandLogoContract || weeklyContext?.brand_logo_contract || null,
       generation_mode: "FULL_AI",
       full_ai_generation: true,
       deterministic_content_fallback_used: false,
@@ -3384,6 +3866,9 @@ function generationErrorIsRetriable(error) {
     "social_compliance_exhausted",
     "social_image_generation_failed",
     "social_image_validation_failed",
+    "social_brand_logo_validation_exhausted",
+    "social_brand_logo_reference_invalid",
+    "social_brand_logo_reference_missing",
     "social_creative_validation_failed",
     "social_ai_not_configured",
     "social_manager_settings_invalid",
@@ -3705,6 +4190,28 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       || decision.package.primaryRecommendation.visual_brief;
     if (generatedVisualBrief) generatedVisualBrief.visualMode = resolvedVisualMode.effective;
 
+    const brandLogoContractRuntime = await (
+      dependencies.buildBrandLogoContract || buildBrandLogoContract
+    )({
+      draftLike: {
+        ...asObject(run),
+        brand_logo_contract: run.brand_logo_contract || null,
+        idempotency_key: `social-draft:${run._id}`,
+      },
+      recommendation: decision.package.primaryRecommendation,
+      visualMode: resolvedVisualMode.effective,
+      dependencies,
+    });
+    const frozenBrandLogoContract = serializeBrandLogoContract(brandLogoContractRuntime);
+    if (run.brand_logo_contract?.safe_corner?.lock_id
+      && run.brand_logo_contract.safe_corner.lock_id !== frozenBrandLogoContract.safe_corner?.lock_id) {
+      const error = new Error("The frozen Pink Paisa logo corner changed during generation");
+      error.code = "social_brand_logo_contract_mismatch";
+      error.statusCode = 409;
+      throw error;
+    }
+    run.brand_logo_contract = frozenBrandLogoContract;
+
     await updateRunStage(run, "GENERATING_IMAGES");
     run.image_generation_status = "RUNNING";
     await run.save();
@@ -3716,6 +4223,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       input: {
         recommendation: decision.package.primaryRecommendation,
         visual_mode: visualMode,
+        brand_logo_contract: frozenBrandLogoContract,
       },
     });
     imageResult = await withGenerationLeaseHeartbeat(run, () => (
@@ -3725,10 +4233,12 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         idempotency_key: `social-draft:${run._id}`,
         generation_date: run.generation_date,
         generation_run_id: run._id,
+        brand_logo_contract: frozenBrandLogoContract,
       },
       recommendation: decision.package.primaryRecommendation,
       settings: runtimeSettings,
       visualMode,
+      brandLogoContract: brandLogoContractRuntime,
       dependencies: {
         ...dependencies,
         reviseImagePrompt: dependencies.reviseImagePrompt
@@ -3745,6 +4255,9 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
             : undefined),
       },
     }), { dependencies });
+    assertBrandLogoEvidenceForAssets(imageResult.original_visuals, {
+      contract: frozenBrandLogoContract,
+    });
     rememberGenerationFiles(imageResult.original_visuals.flatMap((visual) => safeArray(visual.staged_files)));
     await updateRunStage(run, "VALIDATING_IMAGES");
     run.image_generation_attempts = imageAttemptRows(imageResult, decision.package.primaryRecommendation, visualMode);
@@ -3822,6 +4335,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         eligible: true,
         reasons: [],
       }),
+      brand_logo_contract: frozenBrandLogoContract,
       full_ai_ready: false,
       result_json: clone(packageValue),
       current_package: clone(packageValue),
@@ -3906,10 +4420,13 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         perceptual_hash_64: visual.perceptual_hash_64,
         provider_original: visual.provider_original,
         normalization: visual.normalization,
+        brand_logo_contract: visual.brand_logo_contract || frozenBrandLogoContract,
+        brand_logo_evidence: visual.brand_logo_evidence || visual.brand_logo_validation || null,
       })),
       imageProvider: imageResult.provider,
       imageModel: imageResult.model,
       visualMode,
+      brandLogoContract: frozenBrandLogoContract,
       sourceProvenance: "generated_without_reference",
       usageRightsStatus: "api_permitted",
       allowTemplateOnly: false,
@@ -3930,6 +4447,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       creativeResult,
       visualMode,
       actor: run.initiated_by_admin_id,
+      settings: canonicalSettings,
       dependencies,
       AssetModel: models.SocialAsset,
     });
@@ -3970,7 +4488,10 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       output_tokens: Number(decision.usage?.output_tokens || 0) + Number(research.usage?.output_tokens || 0),
       total_tokens: Number(decision.usage?.total_tokens || 0) + Number(research.usage?.total_tokens || 0),
     };
-    const currentImageUsage = mergeGenerationUsage(imageResult.usage || {});
+    const finalVideoLogoUsage = mergeGenerationUsage(
+      creativeResult.reel_logo_validation_evidence?.usage || {},
+    );
+    const currentImageUsage = mergeGenerationUsage(imageResult.usage || {}, finalVideoLogoUsage);
     const combinedUsage = mergeGenerationUsage(priorRunUsage, currentAttemptUsage, currentImageUsage);
     const completedUsage = {
       ...combinedUsage,
@@ -3978,6 +4499,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         Number(priorRunUsage.estimated_cost || 0)
         + estimateOpenAiCostUsd(currentAttemptUsage)
         + Number(imageResult.estimated_cost || 0)
+        + Number(creativeResult.reel_logo_validation_evidence?.estimated_cost || 0)
       ).toFixed(6)),
       cost_currency: "USD",
     };
@@ -4043,8 +4565,10 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         candidate_count: decision.candidate_count,
         image_model: imageResult.model,
         image_count: imageResult.image_count,
-        full_ai_graphic_contract_version: visualMode === "FULL_AI_GRAPHIC" ? 2 : null,
-        overlay_method: ["FULL_AI_GRAPHIC", "AI_ARTWORK_ONLY"].includes(visualMode) ? "none" : "sharp_svg_overlay",
+        final_video_logo_validation: creativeResult.reel_logo_validation_evidence || null,
+        full_ai_graphic_contract_version: visualMode === "FULL_AI_GRAPHIC" ? 3 : null,
+        brand_logo_contract: frozenBrandLogoContract,
+        overlay_method: ["FULL_AI_GRAPHIC", "AI_BRANDED_ARTWORK", "AI_ARTWORK_ONLY"].includes(visualMode) ? "none" : "sharp_svg_overlay",
       },
       dependencies,
     });
@@ -4255,6 +4779,11 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       && Number(run.attempt_count || 0) < Number(run.max_attempts || 1);
     const complianceFailure = error.code === "social_compliance_rejected" || error.code === "social_compliance_exhausted";
     const imageFailure = String(error.code || "").startsWith("social_image_")
+      || [
+        "social_brand_logo_validation_exhausted",
+        "social_brand_logo_validation_invalid",
+        "social_reel_logo_frame_missing",
+      ].includes(String(error.code || ""))
       || ["GENERATING_IMAGES", "VALIDATING_IMAGES"].includes(failedStage);
     const metadataPoorImageFailure = imageFailure && !error.image_generation ? {
       sequence: 1,
@@ -4318,8 +4847,14 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
     const failedImageUsage = sanitizedImageEvidence
       ? mergeGenerationUsage(sanitizedImageEvidence.usage || {})
       : mergeGenerationUsage();
+    const finalVideoLogoUsage = mergeGenerationUsage(error.reel_logo_validation_evidence?.usage || {});
     const priorFailureUsage = priorRunUsage;
-    const combinedFailureUsage = mergeGenerationUsage(priorFailureUsage, promptUsage, failedImageUsage);
+    const combinedFailureUsage = mergeGenerationUsage(
+      priorFailureUsage,
+      promptUsage,
+      failedImageUsage,
+      finalVideoLogoUsage,
+    );
     const imageFailureCost = sanitizedImageEvidence
       ? Number(sanitizedImageEvidence.estimated_cost || 0)
       : 0;
@@ -4333,6 +4868,7 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
         // failed image attempt twice.
         + estimateOpenAiCostUsd(promptUsage)
         + imageFailureCost
+        + Number(error.reel_logo_validation_evidence?.estimated_cost || 0)
       ).toFixed(6)),
       cost_currency: "USD",
     };
@@ -4342,6 +4878,9 @@ async function executeGenerationRun(run, { dependencies = {} } = {}) {
       failureDetails.compliance_history = error.compliance_history || [];
     }
     if (sanitizedImageEvidence) failureDetails.image_generation = sanitizedImageEvidence;
+    if (error.reel_logo_validation_evidence) {
+      failureDetails.final_video_brand_logo_validation = clone(error.reel_logo_validation_evidence);
+    }
     if (generationFileCleanup?.attempted) failureDetails.final_asset_cleanup = generationFileCleanup;
     if (uncertainProviderCheckpoints.length) {
       failureDetails.provider_call_uncertain = true;
@@ -5687,6 +6226,7 @@ function fullAiNativeSwapFingerprint(draft = {}) {
     asset_ids: safeArray(value.asset_ids).map(String),
     original_ai_asset_ids: safeArray(value.original_ai_asset_ids).map(String),
     final_composed_asset_ids: safeArray(value.final_composed_asset_ids).map(String),
+    brand_logo_contract: value.brand_logo_contract || null,
   });
 }
 
@@ -5789,10 +6329,10 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
     error.statusCode = 409;
     throw error;
   }
-  if (stage.contract_version !== 2
+  if (stage.contract_version !== 3
     || stage.normalized?.checksum_sha256 !== stage.final?.checksum_sha256
     || !isSha256(stage.final?.checksum_sha256)) {
-    const error = new Error("The staged FULL_AI_GRAPHIC does not satisfy the native passthrough v2 byte-integrity contract");
+    const error = new Error("The staged FULL_AI_GRAPHIC does not satisfy the native passthrough v3 byte-integrity and mandatory badge contract");
     error.code = "social_full_ai_graphic_passthrough_mismatch";
     error.statusCode = 422;
     throw error;
@@ -5805,7 +6345,13 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
     error.statusCode = 422;
     throw error;
   }
-  if (!fullAiPosterValidationPassed(stage.poster_validation, normalizedTextBlocks)) {
+  if (!fullAiPosterValidationPassed(stage.poster_validation, normalizedTextBlocks, { requireBrandIdentity: false })
+    || !stage.brand_logo_contract?.required
+    || !brandLogoEvidencePassed(
+      stage.brand_logo_evidence || {},
+      stage.brand_logo_contract,
+      stage.final?.checksum_sha256,
+    )) {
     const error = new Error("The supplied FULL_AI_GRAPHIC no longer has a passing independent poster validation");
     error.code = "social_full_ai_graphic_poster_invalid";
     error.statusCode = 422;
@@ -5816,6 +6362,26 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
   const finalId = new mongoose.Types.ObjectId();
   const originalGroupId = `${draft._id}-full-ai-native-source-${stage.version}`;
   const finalGroupId = `${draft._id}-full-ai-native-final-${stage.version}`;
+  const finalBrandLogoEvidence = {
+    ...stage.brand_logo_evidence,
+    validated_asset: "final_publishable_asset",
+    final_asset_preservation: {
+      method: "checksum_identical_ai_passthrough_v1",
+      source_validation_response_id: stage.brand_logo_evidence.validator_response_id
+        || stage.brand_logo_evidence.validatorResponseId
+        || stage.brand_logo_evidence.response_id
+        || stage.brand_logo_evidence.responseId
+        || null,
+      source_validated_asset_checksum_sha256: stage.normalized.checksum_sha256,
+      final_publishable_asset_checksum_sha256: stage.final.checksum_sha256,
+      pixel_overlay_applied: false,
+      post_generation_logo_overlay_applied: false,
+    },
+  };
+  const suppliedLogoProvenanceMethod = String(stage.brand_logo_evidence.method || "").toUpperCase()
+    === "EXTERNAL_REFERENCE_VISUAL_MATCH"
+    ? "external_reference_visual_match"
+    : "openai_reference_baked";
   const common = {
     draft_id: draft._id,
     generation_run_id: draft.generation_run_id,
@@ -5841,7 +6407,16 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
     image_usage: stage.generation_usage || {},
     image_cost_currency: stage.cost_currency || "USD",
     original_visual: fullAiOriginalVisualValue(stage.provider_original),
-    reference_assets: [],
+    reference_assets: stage.brand_logo_reference ? [{
+      reference_type: "BRAND_LOGO",
+      url: "/pink-paisa-logo.png",
+      checksum_sha256: stage.brand_logo_reference.checksum_sha256,
+      mime_type: stage.brand_logo_reference.mime_type,
+      usage_rights_status: "owned",
+      reference_asset_id: stage.brand_logo_reference.reference_asset_id,
+    }] : [],
+    brand_logo_contract: stage.brand_logo_contract,
+    brand_logo_evidence: stage.brand_logo_evidence,
     source_provenance: stage.source_provenance,
     usage_rights_status: "api_permitted",
     manual_review_status: "pending",
@@ -5881,9 +6456,9 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
     provenance: {
       ...generationProvenance,
       renderer: "sharp_resize_encode_only_v1",
-      full_ai_graphic_contract_version: 2,
+      full_ai_graphic_contract_version: 3,
       full_ai_graphic_manifest: {
-        contract_version: 2,
+        contract_version: 3,
         expected_text_blocks: normalizedTextBlocks,
         checksum_sha256: sha256Object(normalizedTextBlocks),
         approved_copy_checksum_sha256: copyChecksum,
@@ -5892,6 +6467,10 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
       provider_original: providerOriginal,
       normalization: stage.normalization,
       poster_validation: stage.poster_validation,
+      brand_logo_contract: stage.brand_logo_contract,
+      brand_logo_evidence: stage.brand_logo_evidence,
+      brand_logo_reference: stage.brand_logo_reference,
+      post_generation_logo_overlay_applied: false,
       overlay: {
         method: "none",
         pixel_overlay_applied: false,
@@ -5902,6 +6481,7 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
       { key: "provider_original_retained", label: "Byte-preserving AI provider original retained", status: "PASS", required: true, details: `sha256:${providerOriginal.checksum_sha256}` },
       { key: "resize_encode_only", label: "Instagram normalization used resize/encoding only", status: "PASS", required: true, details: "Sharp fit:fill; no composite, SVG, background, or overlay operation" },
       { key: "full_ai_poster_validation", label: "Independent exact poster validation", status: "PASS", required: true, details: `response:${stage.poster_validation.response_id}` },
+      { key: "brand_logo_reference_validation", label: "Canonical Pink Paisa badge independently matched the approved reference", status: "PASS", required: true, details: `response:${stage.brand_logo_evidence.response_id || stage.brand_logo_evidence.responseId}` },
     ],
     validation_status: "valid",
     manual_review_required: true,
@@ -5926,10 +6506,13 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
     provider_original: providerOriginal,
     normalization: stage.normalization,
     poster_validation: stage.poster_validation,
+    brand_logo_contract: stage.brand_logo_contract,
+    brand_logo_evidence: stage.brand_logo_evidence,
   };
   const finalRow = {
     _id: finalId,
     ...common,
+    brand_logo_evidence: finalBrandLogoEvidence,
     asset_group_id: finalGroupId,
     asset_role: "FINAL_COMPOSED",
     publication_role: "PRIMARY_MEDIA",
@@ -5940,13 +6523,13 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
     perceptual_hash_64: stage.normalized.perceptual_hash_64 || null,
     file_size_bytes: stage.final.file_size_bytes,
     renderer: "openai_generated_graphic_passthrough",
-    render_version: "social-full-ai-graphic-native-v2",
+    render_version: "social-full-ai-graphic-native-v3",
     approved_copy_checksum_sha256: copyChecksum,
     image_estimated_cost: 0,
     overlay_json: {
-      schema_version: "2.0.0",
+      schema_version: "3.0.0",
       visual_mode: "FULL_AI_GRAPHIC",
-      brand_name: "Pink Paisa",
+      brand_name: null,
       approved_copy: approvedCopy,
       approved_copy_checksum_sha256: copyChecksum,
       rendered_text: approvedCopy,
@@ -5960,19 +6543,25 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
         full_ai_graphic_poster_validation: stage.poster_validation,
       },
       logo: {
-        method: "openai_image_baked_in",
+        method: suppliedLogoProvenanceMethod,
         source: null,
         image_ai_used_for_logo: true,
+        reference_asset_id: stage.brand_logo_contract.reference_asset_id,
+        reference_checksum_sha256: stage.brand_logo_contract.reference_checksum_sha256,
+        input_fidelity: stage.brand_logo_evidence.input_fidelity || "not_applicable",
+        reference_used_for_generation: stage.brand_logo_evidence.reference_used_for_generation === true,
+        reference_used_for_validation: true,
+        post_generation_logo_overlay_applied: false,
       },
       layout: { within_safe_area: true, validation_source: "independent_vision" },
     },
     provenance: {
       ...generationProvenance,
       renderer: "openai_generated_graphic_passthrough",
-      render_version: "social-full-ai-graphic-native-v2",
-      full_ai_graphic_contract_version: 2,
+      render_version: "social-full-ai-graphic-native-v3",
+      full_ai_graphic_contract_version: 3,
       full_ai_graphic_manifest: {
-        contract_version: 2,
+        contract_version: 3,
         expected_text_blocks: normalizedTextBlocks,
         checksum_sha256: sha256Object(normalizedTextBlocks),
         approved_copy_checksum_sha256: copyChecksum,
@@ -5985,13 +6574,27 @@ async function buildNativeFullAiGraphicAssetRows({ draft, stage, renderItem, exp
         copy_source: renderItem.source_path,
         approved_copy_checksum_sha256: copyChecksum,
       },
-      logo: { method: "openai_image_baked_in", source: null },
+      logo: {
+        method: suppliedLogoProvenanceMethod,
+        source: null,
+        reference_asset_id: stage.brand_logo_contract.reference_asset_id,
+        reference_checksum_sha256: stage.brand_logo_contract.reference_checksum_sha256,
+        input_fidelity: stage.brand_logo_evidence.input_fidelity || "not_applicable",
+        reference_used_for_generation: stage.brand_logo_evidence.reference_used_for_generation === true,
+        reference_used_for_validation: true,
+        post_generation_logo_overlay_applied: false,
+      },
+      brand_logo_contract: stage.brand_logo_contract,
+      brand_logo_evidence: finalBrandLogoEvidence,
+      brand_logo_reference: stage.brand_logo_reference,
+      post_generation_logo_overlay_applied: false,
       caption_policy: buildCaptionPolicyProvenance(recommendation, "FULL_AI_GRAPHIC"),
       final_pixel_contract: {
         method: "normalized_ai_bytes_passthrough",
         normalized_checksum_sha256: stage.normalized.checksum_sha256,
         final_checksum_sha256: stage.final.checksum_sha256,
         pixel_overlay_applied: false,
+        post_generation_logo_overlay_applied: false,
       },
     },
   };
@@ -6147,10 +6750,17 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
     error.statusCode = 400;
     throw error;
   }
-  const manifest = normalizeFullAiTextManifest(expectedTextBlocks);
+  const manifest = normalizeFullAiTextManifest(expectedTextBlocks)
+    .filter((block) => block.key !== "brand_name");
+  if (!manifest.length) {
+    const error = new Error("FULL_AI_GRAPHIC v3 requires ordinary poster text in addition to the separately validated Pink Paisa badge");
+    error.code = "social_full_ai_graphic_text_contract_invalid";
+    error.statusCode = 400;
+    throw error;
+  }
   const sourceChecksum = crypto.createHash("sha256").update(sourceBuffer).digest("hex");
   const mutationIdempotencyKey = trimText(idempotencyKey)
-    || `social-full-ai-native-v2:${draftId}:${sourceChecksum}`;
+    || `social-full-ai-native-v3:${draftId}:${sourceChecksum}`;
   if (mutationIdempotencyKey.length > 400) {
     const error = new Error("FULL_AI_GRAPHIC replacement idempotency key exceeds 400 characters");
     error.code = "social_idempotency_key_invalid";
@@ -6243,6 +6853,9 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
       sourceBuffer,
       format,
       draftIdentity: preflightDraft.idempotency_key || preflightDraft._id,
+      draftLike: preflightDraft,
+      recommendation,
+      brandLogoContract: preflightDraft.brand_logo_contract || null,
       model,
       prompt,
       providerResponseId,
@@ -6264,6 +6877,7 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
       generation_run_id: preflightDraft.generation_run_id,
       idempotency_key: preflightDraft.idempotency_key,
       current_package: nextPackage,
+      brand_logo_contract: stage.brand_logo_contract,
     };
     prepared = await buildNativeFullAiGraphicAssetRows({
       draft: preparedDraft,
@@ -6340,8 +6954,9 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
       draft.visual_mode_resolution = visualModeResolution;
       draft.generation_mode = "FULL_AI";
       draft.full_ai_ready = true;
+      draft.brand_logo_contract = stage.brand_logo_contract;
       draft.full_ai_graphic_manifest = {
-        contract_version: 2,
+        contract_version: 3,
         expected_text_blocks: manifest,
         checksum_sha256: sha256Object(manifest),
         approved_copy_checksum_sha256: prepared.approvedCopyChecksum,
@@ -6392,7 +7007,7 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
         asset_count: 1,
         ai_visual_required: true,
         ai_visual_status: "COMPLETED",
-        full_ai_graphic_contract_version: 2,
+        full_ai_graphic_contract_version: 3,
         pixel_overlay_applied: false,
         checked_at: new Date(),
       };
@@ -6406,15 +7021,17 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
         entityId: draft._id,
         draft,
         action: "AI_IMAGE_REGENERATED",
-        summary: "Replaced the draft media with one independently validated, fully AI-rendered poster using resize/encoding-only native passthrough and no post-generation pixel overlay.",
+        summary: "Replaced the draft media with one independently validated, fully AI-rendered poster containing the mandatory reference-baked Pink Paisa badge, using resize/encoding-only native passthrough and no post-generation pixel overlay.",
         actor,
         fieldChanges: findFieldChanges(beforePackage, nextPackage),
         requestId,
         idempotencyKey: mutationIdempotencyKey,
         ip,
-        providerModels: [{ provider: "openai", model: stage.model, stage: "FULL_AI_GRAPHIC_NATIVE_V2" }],
+        providerModels: [{ provider: "openai", model: stage.model, stage: "FULL_AI_GRAPHIC_NATIVE_V3" }],
         metadata: {
-          full_ai_graphic_contract_version: 2,
+          full_ai_graphic_contract_version: 3,
+          brand_logo_contract: stage.brand_logo_contract,
+          brand_logo_validation_response_id: stage.brand_logo_evidence.response_id || stage.brand_logo_evidence.responseId,
           original_asset_id: String(prepared.originalRow._id),
           final_asset_id: String(prepared.finalRow._id),
           provider_original_url: stage.provider_original.url,
@@ -6486,6 +7103,7 @@ async function replaceDraftWithSuppliedFullAiGraphic(draftId, {
 }
 
 function originalAssetDescriptor(asset) {
+  const productReference = safeArray(asset.reference_assets).find((row) => row?.reference_type === "PRODUCT_IMAGE") || null;
   return {
     url: asset.url,
     source_url: asset.url,
@@ -6507,9 +7125,9 @@ function originalAssetDescriptor(asset) {
     sequence: Number(asset.slide_number),
     asset_purpose: asset.provenance?.asset_purpose || null,
     scene_index: Number.isInteger(asset.provenance?.scene_index) ? asset.provenance.scene_index : null,
-    reference_image_url: asset.provenance?.base_image?.reference_image_url || asset.reference_assets?.[0]?.url || null,
-    reference_image_checksum_sha256: asset.reference_assets?.[0]?.checksum_sha256 || null,
-    reference_image_mime_type: asset.reference_assets?.[0]?.mime_type || null,
+    reference_image_url: asset.provenance?.base_image?.reference_image_url || productReference?.url || null,
+    reference_image_checksum_sha256: productReference?.checksum_sha256 || null,
+    reference_image_mime_type: productReference?.mime_type || null,
     ai_background: asset.provenance?.ai_background || null,
     authentic_product_reference: asset.provenance?.authentic_product_reference || null,
     authentic_product_composition: asset.provenance?.authentic_product_composition || null,
@@ -6523,6 +7141,8 @@ function originalAssetDescriptor(asset) {
     perceptual_hash_64: asset.perceptual_hash_64 || asset.provenance?.perceptual_hash_64 || null,
     provider_original: asset.provider_original || asset.provenance?.provider_original || null,
     normalization: asset.normalization || asset.provenance?.normalization || null,
+    brand_logo_contract: asset.provenance?.brand_logo_contract || null,
+    brand_logo_evidence: asset.brand_logo_evidence || asset.provenance?.brand_logo_evidence || null,
   };
 }
 
@@ -6556,6 +7176,7 @@ async function recomposeDraftFromActiveOriginals(draft, {
     imageProvider: baseImages[0]?.provider,
     imageModel: baseImages[0]?.model,
     visualMode,
+    brandLogoContract: draft.brand_logo_contract || null,
     allowTemplateOnly: false,
     onStagedFile,
   });
@@ -6832,11 +7453,12 @@ async function regenerateDraftVisual(draftId, {
   }
   const canonicalSettings = await (dependencies.getSocialManagerSettings || getSocialManagerSettings)();
   const runtimeSettings = (dependencies.buildSocialManagerRuntimeSettings || buildSocialManagerRuntimeSettings)(canonicalSettings);
+  const legacyArtworkOnlyUpgrade = !visualMode && trimText(draft.visual_mode).toUpperCase() === "AI_ARTWORK_ONLY";
   const visualModeResolution = resolveSocialVisualMode({
     requestedVisualMode: visualMode || draft.visual_mode || canonicalSettings.generation?.default_visual_mode,
     fallbackVisualMode: draft.visual_mode || "AI_VISUAL_WITH_EXACT_OVERLAY",
     recommendation: draft.current_package.primaryRecommendation,
-    strict: true,
+    strict: !legacyArtworkOnlyUpgrade,
   });
   const effectiveVisualMode = visualModeResolution.effective;
   const regenerationRecommendation = clone(draft.current_package.primaryRecommendation);
@@ -6851,25 +7473,60 @@ async function regenerateDraftVisual(draftId, {
     },
   };
   const requestedAssetSequence = assetSequence == null || assetSequence === "" ? null : Number(assetSequence);
+  const regenerationFormat = trimText(draft.current_package.primaryRecommendation.format).toUpperCase();
+  const targetedSequenceLabel = regenerationFormat === "STORY"
+    ? "Story frame"
+    : regenerationFormat === "CAROUSEL"
+      ? "carousel slide"
+      : regenerationFormat === "REEL"
+        ? "Reel cover or scene frame"
+        : "Video Feed cover or scene frame";
   if (requestedAssetSequence != null
-    && (!Number.isInteger(requestedAssetSequence) || draft.current_package.primaryRecommendation.format !== "CAROUSEL")) {
-    const error = new Error("asset_sequence is supported only for an existing carousel slide");
+    && (!Number.isInteger(requestedAssetSequence) || !["CAROUSEL", "STORY", "REEL", "VIDEO_FEED"].includes(regenerationFormat))) {
+    const error = new Error("asset_sequence is supported only for an existing carousel slide, Story frame, Reel frame, or Video Feed frame");
     error.code = "social_asset_sequence_invalid";
     error.statusCode = 400;
     throw error;
   }
+  const requiresBrandPolicyUpgrade = !draft.brand_logo_contract;
+  if (requiresBrandPolicyUpgrade && requestedAssetSequence != null) {
+    const error = new Error("A legacy multi-frame creative must be fully regenerated so every slide or frame receives the mandatory Pink Paisa badge");
+    error.code = "social_brand_logo_full_regeneration_required";
+    error.statusCode = 409;
+    throw error;
+  }
+  const brandLogoContractRuntime = await (
+    dependencies.buildBrandLogoContract || buildBrandLogoContract
+  )({
+    draftLike: draft,
+    recommendation: regenerationRecommendation,
+    visualMode: effectiveVisualMode,
+    dependencies,
+  });
+  const frozenBrandLogoContract = serializeBrandLogoContract(brandLogoContractRuntime);
+  if (draft.brand_logo_contract?.required && (
+    draft.brand_logo_contract.reference_checksum_sha256 !== frozenBrandLogoContract.reference_checksum_sha256
+    || draft.brand_logo_contract.locked_corner !== frozenBrandLogoContract.locked_corner
+    || draft.brand_logo_contract.safe_corner?.lock_id !== frozenBrandLogoContract.safe_corner?.lock_id
+  )) {
+    const error = new Error("Regeneration must reuse the draft's frozen canonical badge reference and locked safe corner");
+    error.code = "social_brand_logo_contract_mismatch";
+    error.statusCode = 409;
+    throw error;
+  }
+  renderDraft.brand_logo_contract = frozenBrandLogoContract;
   let priorOriginalAssets = [];
   if (requestedAssetSequence != null) {
     const priorQuery = AssetModel.find({
       draft_id: draft._id,
-      asset_role: "ORIGINAL_AI_VISUAL",
+      asset_role: { $in: ["ORIGINAL_AI_VISUAL", "GENERATED_FRAME"] },
       is_active: true,
       deleted_at: null,
     });
     const sortedPriorQuery = typeof priorQuery?.sort === "function" ? priorQuery.sort({ slide_number: 1 }) : priorQuery;
     priorOriginalAssets = await (typeof sortedPriorQuery?.lean === "function" ? sortedPriorQuery.lean() : sortedPriorQuery);
     if (!priorOriginalAssets.some((asset) => Number(asset.slide_number) === requestedAssetSequence)) {
-      const error = new Error("asset_sequence does not identify an active carousel original");
+      const error = new Error(`asset_sequence does not identify an active ${targetedSequenceLabel}`);
       error.code = "social_asset_sequence_invalid";
       error.statusCode = 400;
       throw error;
@@ -6931,6 +7588,7 @@ async function regenerateDraftVisual(draftId, {
       recommendation: regenerationRecommendation,
       settings: runtimeSettings,
       visualMode: effectiveVisualMode,
+      brandLogoContract: brandLogoContractRuntime,
       assetSequence: requestedAssetSequence,
       comparisonVisuals: priorOriginalAssets.map((asset) => ({
         sequence: Number(asset.slide_number),
@@ -6948,6 +7606,9 @@ async function regenerateDraftVisual(draftId, {
             }
             : undefined),
       },
+    });
+    assertBrandLogoEvidenceForAssets(imageResult.original_visuals, {
+      contract: frozenBrandLogoContract,
     });
     rememberFinalFiles(imageResult.original_visuals.flatMap((visual) => safeArray(visual.staged_files)));
     await heartbeatPaidOperation(operationClaim, { dependencies });
@@ -7058,6 +7719,7 @@ async function regenerateDraftVisual(draftId, {
     source_url: visual.url,
     storage_provider: visual.storage_provider,
     storage_key: visual.storage_key,
+    file_path: visual.file_path,
     checksum_sha256: visual.checksum_sha256,
     mime_type: visual.mime_type,
     file_size_bytes: visual.file_size_bytes,
@@ -7086,6 +7748,10 @@ async function regenerateDraftVisual(draftId, {
     perceptual_hash_64: visual.perceptual_hash_64,
     provider_original: visual.provider_original,
     normalization: visual.normalization,
+    brand_logo_contract: visual.brand_logo_contract || frozenBrandLogoContract,
+    brand_logo_evidence: visual.brand_logo_evidence || visual.brand_logo_validation || null,
+    asset_purpose: visual.asset_purpose || null,
+    scene_index: Number.isInteger(visual.scene_index) ? visual.scene_index : null,
     sequence: Number(visual.sequence),
   }));
   const retainedBaseImages = priorOriginalAssets
@@ -7095,6 +7761,7 @@ async function regenerateDraftVisual(draftId, {
       source_url: asset.url,
       storage_provider: asset.storage_provider,
       storage_key: asset.storage_key,
+      file_path: asset.file_path || null,
       checksum_sha256: asset.checksum_sha256,
       mime_type: asset.mime_type,
       file_size_bytes: asset.file_size_bytes,
@@ -7122,6 +7789,10 @@ async function regenerateDraftVisual(draftId, {
       perceptual_hash_64: asset.perceptual_hash_64 || asset.provenance?.perceptual_hash_64 || null,
       provider_original: asset.provider_original || asset.provenance?.provider_original || null,
       normalization: asset.normalization || asset.provenance?.normalization || null,
+      brand_logo_contract: asset.provenance?.brand_logo_contract || frozenBrandLogoContract,
+      brand_logo_evidence: asset.brand_logo_evidence || asset.provenance?.brand_logo_evidence || null,
+      asset_purpose: asset.provenance?.asset_purpose || null,
+      scene_index: Number.isInteger(asset.provenance?.scene_index) ? asset.provenance.scene_index : null,
       sequence: Number(asset.slide_number),
     }));
   const combinedBaseImages = requestedAssetSequence == null
@@ -7141,6 +7812,9 @@ async function regenerateDraftVisual(draftId, {
         SocialAsset: TransactionAssetModel,
         SocialGenerationRun: TransactionRunModel,
         SocialPostDraft: TransactionDraftModel,
+        // Provider usage is append-only evidence of an already incurred call;
+        // it must survive a later creative-transaction rollback.
+        SocialPaidCallUsageLedger: dependencies.SocialPaidCallUsageLedger || SocialPaidCallUsageLedger,
         SocialPaidOperation: TransactionOperationModel,
         SocialAuditLog: TransactionAuditModel,
       };
@@ -7162,6 +7836,7 @@ async function regenerateDraftVisual(draftId, {
         imageProvider: imageResult.provider,
         imageModel: imageResult.model,
         visualMode: effectiveVisualMode,
+        brandLogoContract: frozenBrandLogoContract,
         allowTemplateOnly: false,
         onStagedFile: (file) => rememberFinalFiles([file]),
       };
@@ -7191,10 +7866,19 @@ async function regenerateDraftVisual(draftId, {
         draft,
         run: { _id: draft.generation_run_id },
         recommendation: regenerationRecommendation,
-        imageResult,
+        imageResult: {
+          ...imageResult,
+          original_visuals: combinedBaseImages,
+        },
         creativeResult: result,
         visualMode: effectiveVisualMode,
         actor,
+        settings: runtimeSettings,
+        paidEvidenceContext: {
+          callId: paidCallId,
+          operation: "VISUAL_REGENERATION",
+          requestId,
+        },
         dependencies: transactionDependencies,
         AssetModel: TransactionAssetModel,
       });
@@ -7214,6 +7898,7 @@ async function regenerateDraftVisual(draftId, {
       }
       draft.visual_mode = effectiveVisualMode;
       draft.visual_mode_resolution = visualModeResolution;
+      draft.brand_logo_contract = frozenBrandLogoContract;
       draft.current_package = renderDraft.current_package;
       draft.generation_mode = "FULL_AI";
       draft.full_ai_ready = true;
@@ -7246,7 +7931,7 @@ async function regenerateDraftVisual(draftId, {
         status: "NEEDS_REVIEW",
         dependencies: transactionDependencies,
       });
-      await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, action: "AI_IMAGE_REGENERATED", summary: requestedAssetSequence == null ? `Generated ${imageResult.image_count} new OpenAI original visual${imageResult.image_count === 1 ? "" : "s"} and recomposed the approved package.` : `Regenerated carousel slide ${requestedAssetSequence} and recomposed the carousel while retaining the other approved AI originals.`, actor, requestId, ip, metadata: { paid_operation_key: operationClaim.key, paid_call_id: paidCallId, asset_group_id: result.asset_group_id, validation_status: result.validation_status, image_ai_used_for_text: effectiveVisualMode === "FULL_AI_GRAPHIC", template_mode: false, image_provider: imageResult?.provider || null, image_model: imageResult?.model || null, image_cost: imageResult?.estimated_cost ?? null, asset_sequence: requestedAssetSequence, partial_generation: requestedAssetSequence != null, visual_mode_resolution: visualModeResolution }, dependencies: transactionDependencies });
+      await appendAudit({ entityType: "DRAFT", entityId: draft._id, draft, action: "AI_IMAGE_REGENERATED", summary: requestedAssetSequence == null ? `Generated ${imageResult.image_count} new OpenAI original visual${imageResult.image_count === 1 ? "" : "s"} with the mandatory reference-baked Pink Paisa badge and recomposed the approved package.` : `Regenerated ${targetedSequenceLabel.toLowerCase()} ${requestedAssetSequence} with the frozen Pink Paisa badge contract and recomposed the creative while retaining the other approved AI originals.`, actor, requestId, ip, metadata: { paid_operation_key: operationClaim.key, paid_call_id: paidCallId, asset_group_id: result.asset_group_id, validation_status: result.validation_status, image_ai_used_for_text: effectiveVisualMode === "FULL_AI_GRAPHIC", template_mode: false, image_provider: imageResult?.provider || null, image_model: imageResult?.model || null, image_cost: imageResult?.estimated_cost ?? null, asset_sequence: requestedAssetSequence, partial_generation: requestedAssetSequence != null, visual_mode_resolution: visualModeResolution, brand_logo_contract: frozenBrandLogoContract }, dependencies: transactionDependencies });
       await finishPaidOperation(operationClaim, {
         status: "SUCCEEDED",
         resultDraftId: draft._id,
@@ -9301,6 +9986,19 @@ async function duplicateCommitSucceeded({ run, draft, operationClaim, dependenci
   return Boolean(successAudit || successReceipt);
 }
 
+function duplicateBrandLogoDraftLike(original = {}, operationKey = "") {
+  const draftLike = {
+    idempotency_key: `social-duplicate:${original._id}:${sha256(operationKey)}`,
+  };
+  // A duplicated creative is a new approval object, but it is not a new brand
+  // placement decision. Reuse the original frozen reference, corner, target
+  // box and lock id so every regenerated frame follows the same contract.
+  if (original.brand_logo_contract?.required) {
+    draftLike.brand_logo_contract = clone(original.brand_logo_contract);
+  }
+  return draftLike;
+}
+
 async function duplicateDraft(draftId, { actor, now = new Date(), requestId = null, requestKey = null, ip = null, dependencies = {} } = {}) {
   const DraftModel = dependencies.SocialPostDraft || SocialPostDraft;
   let RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
@@ -9365,6 +10063,27 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
   let imageResult = null;
   const paidCallId = String(operationClaim.row?._id || sha256(operationClaim.key)).slice(0, 200);
   let paidLedgerRecorded = false;
+  const brandLogoContractRuntime = await (
+    dependencies.buildBrandLogoContract || buildBrandLogoContract
+  )({
+    draftLike: duplicateBrandLogoDraftLike(original, operationClaim.key),
+    recommendation: packageValue.primaryRecommendation,
+    visualMode: visualModeResolution.effective,
+    dependencies,
+  });
+  const frozenBrandLogoContract = serializeBrandLogoContract(brandLogoContractRuntime);
+  if (original.brand_logo_contract?.required && (
+    frozenBrandLogoContract.reference_checksum_sha256 !== original.brand_logo_contract.reference_checksum_sha256
+    || frozenBrandLogoContract.locked_corner !== original.brand_logo_contract.locked_corner
+    || frozenBrandLogoContract.safe_corner?.lock_id !== original.brand_logo_contract.safe_corner?.lock_id
+    || stableIntegrityJson(frozenBrandLogoContract.safe_corner?.target_box)
+      !== stableIntegrityJson(original.brand_logo_contract.safe_corner?.target_box)
+  )) {
+    const error = new Error("Draft duplication must reuse the original frozen Pink Paisa badge contract");
+    error.code = "social_brand_logo_contract_mismatch";
+    error.statusCode = 409;
+    throw error;
+  }
   const stagedDuplicateFiles = [];
   let duplicateFileCleanup = null;
   const rememberDuplicateFiles = (files = []) => {
@@ -9397,6 +10116,7 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
       admin_instructions: "Create a fresh original visual for the duplicated AI-authored package.",
       request_id: trimText(requestId).slice(0, 200) || null,
     },
+    brand_logo_contract: frozenBrandLogoContract,
     generation_mode: original.generation_mode === "FULL_AI" ? "FULL_AI" : "ADMIN_MANUAL",
     full_ai_generation: original.generation_mode === "FULL_AI",
     status: "RUNNING",
@@ -9425,6 +10145,7 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
     generation_mode: original.generation_mode === "FULL_AI" ? "FULL_AI" : "ADMIN_MANUAL",
     visual_mode: visualModeResolution.effective,
     visual_mode_resolution: visualModeResolution,
+    brand_logo_contract: frozenBrandLogoContract,
     full_ai_ready: false,
     result_json: clone(packageValue),
     current_package: clone(packageValue),
@@ -9452,6 +10173,7 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
       recommendation: packageValue.primaryRecommendation,
       settings: runtimeSettings,
       visualMode: visualModeResolution.effective,
+      brandLogoContract: brandLogoContractRuntime,
       dependencies: {
         ...dependencies,
         reviseImagePrompt: dependencies.reviseImagePrompt
@@ -9463,6 +10185,9 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
             }
             : undefined),
       },
+    });
+    assertBrandLogoEvidenceForAssets(imageResult.original_visuals, {
+      contract: frozenBrandLogoContract,
     });
     rememberDuplicateFiles(imageResult.original_visuals.flatMap((visual) => safeArray(visual.staged_files)));
     await persistPaidImageCallUsage({
@@ -9501,6 +10226,9 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
           SocialGenerationRun: RunModel,
           SocialPostDraft: TransactionDraftModel,
           SocialAsset: AssetModel,
+          // Provider usage is append-only evidence of an already incurred call;
+          // it must survive a later creative-transaction rollback.
+          SocialPaidCallUsageLedger: originalDependencies.SocialPaidCallUsageLedger || SocialPaidCallUsageLedger,
           SocialAuditLog: bindModelToMongoSession(originalDependencies.SocialAuditLog || SocialAuditLog, session),
           SocialPaidOperation: bindModelToMongoSession(originalDependencies.SocialPaidOperation || SocialPaidOperation, session),
         };
@@ -9564,10 +10292,13 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
         perceptual_hash_64: visual.perceptual_hash_64,
         provider_original: visual.provider_original,
         normalization: visual.normalization,
+        brand_logo_contract: visual.brand_logo_contract || frozenBrandLogoContract,
+        brand_logo_evidence: visual.brand_logo_evidence || visual.brand_logo_validation || null,
       })),
       imageProvider: imageResult.provider,
       imageModel: imageResult.model,
       visualMode: visualModeResolution.effective,
+      brandLogoContract: frozenBrandLogoContract,
       allowTemplateOnly: false,
       onStagedFile: (file) => rememberDuplicateFiles([file]),
     });
@@ -9585,6 +10316,12 @@ async function duplicateDraft(draftId, { actor, now = new Date(), requestId = nu
       creativeResult,
       visualMode: visualModeResolution.effective,
       actor,
+      settings: runtimeSettings,
+      paidEvidenceContext: {
+        callId: paidCallId,
+        operation: "DUPLICATE",
+        requestId,
+      },
       dependencies,
       AssetModel,
     });
@@ -9942,6 +10679,7 @@ module.exports = {
     commitGenerationRunSuccess,
     draftQueueNavigation,
     duplicateCommitSucceeded,
+    duplicateBrandLogoDraftLike,
     failStaleDuplicatePlaceholder,
     failStalePaidGenerationRun,
     currentVideoAssemblyPassed,
@@ -9959,6 +10697,7 @@ module.exports = {
     generationRunLeaseExpired,
     imageAttemptRows,
     imagePromptRevisionResult,
+    aggregateFinalVideoLogoValidation,
     istTimeParts,
     persistResearchSources,
     persistReviewerNotificationFailure,

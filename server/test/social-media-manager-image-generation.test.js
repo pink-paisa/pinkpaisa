@@ -14,6 +14,7 @@ const {
 } = require("../services/social/socialAiImageService");
 const {
   renderSocialDraftAssets,
+  validateSocialAsset,
 } = require("../services/socialCreativeService");
 const {
   _private: {
@@ -26,6 +27,43 @@ const {
 
 function checksum(buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
+}
+
+function passingBrandLogoValidation(contract, overrides = {}) {
+  const box = contract.safe_corner.target_box;
+  return {
+    decision: "PASS",
+    badgeId: contract.reference_asset_id,
+    referenceChecksumSha256: contract.reference_checksum_sha256,
+    approvedLogoPresent: true,
+    referenceIdentityMatch: true,
+    wordmarkExactMatch: true,
+    iconGeometryMatch: true,
+    brandColourMatch: true,
+    registeredMarkRecognizable: true,
+    singleBadgeOccurrence: true,
+    observedBadgeCount: 1,
+    observedBadgeWidthPx: 210,
+    safeCornerMatch: true,
+    fullyInsideSafeBox: true,
+    acceptedWidthRange: true,
+    observedCorner: contract.locked_corner,
+    normalizedBoundingBox: {
+      x: box.left / box.canvas_width,
+      y: box.top / box.canvas_height,
+      width: box.width / box.canvas_width,
+      height: box.height / box.canvas_height,
+    },
+    mobileLegible: true,
+    protectedContentOverlapPresent: false,
+    unapprovedTextPresent: false,
+    observedUnapprovedText: null,
+    unrelatedLogoOrWatermarkPresent: false,
+    post_generation_logo_overlay_applied: false,
+    issues: [],
+    response_id: "brand-logo-validator-pass",
+    ...overrides,
+  };
 }
 
 async function generatedImageBuffer(seed = 1) {
@@ -396,6 +434,7 @@ test("carousel generation ignores the legacy zero daily-image cap and still enfo
           usage: {},
         };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
       storeCampaignAsset: memoryAssetStore(stored, "carousel-originals"),
     },
   });
@@ -409,7 +448,7 @@ test("carousel generation ignores the legacy zero daily-image cap and still enfo
     visual.provider === "openai"
     && visual.model === "gpt-image-2"
     && visual.status === "VALIDATED"
-    && visual.source_provenance === "generated_without_reference"
+    && visual.source_provenance === "generated_from_approved_source"
   )));
 
   for (const invalidCount of [2, 8]) {
@@ -453,6 +492,7 @@ test("every image retry uses a materially revised AI prompt while preserving har
         }
         return { buffer: await generatedImageBuffer(4), response_id: "image-after-revision", usage: {} };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
       reviseImagePrompt: async (input) => {
         revisions.push(input);
         return {
@@ -512,6 +552,7 @@ test("paid retry success retains attempt rows and charges image calls plus promp
               usage: { input_tokens: 7, output_tokens: 0, total_tokens: 7 },
             };
         },
+        validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
         reviseImagePrompt: async () => imagePromptRevisionResult({
           output: { prompt: "Create a materially revised Pink Paisa scene beside a bright arched window." },
           provider: "openai",
@@ -664,9 +705,9 @@ test("an invalid OpenAI image payload retains paid response metadata without raw
   );
 });
 
-test("accepted visual validation usage is priced exactly once with its image call", async () => {
+test("accepted brand-logo validation usage is priced exactly once with its image call", async () => {
   const recommendation = singleRecommendation();
-  recommendation.visualBrief.visualMode = "AI_ARTWORK_ONLY";
+  recommendation.visualBrief.visualMode = "AI_BRANDED_ARTWORK";
   const priorEnvironment = {
     image: process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE,
     input: process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION,
@@ -679,7 +720,7 @@ test("accepted visual validation usage is priced exactly once with its image cal
     const result = await generateSocialVisuals({
       draftLike: draftFor(recommendation, "accepted-validator-cost"),
       recommendation,
-      visualMode: "AI_ARTWORK_ONLY",
+      visualMode: "AI_BRANDED_ARTWORK",
       settings: settings(1),
       dependencies: {
         generateOpenAiImage: async () => ({
@@ -687,12 +728,7 @@ test("accepted visual validation usage is priced exactly once with its image cal
           response_id: "accepted-artwork-image",
           usage: {},
         }),
-        validateArtworkOnlyVisual: async () => ({
-          decision: "PASS",
-          hasVisibleText: false,
-          hasLogoOrWatermark: false,
-          observedText: null,
-          issues: [],
+        validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract, {
           response_id: "accepted-artwork-validator",
           usage: { input_tokens: 1_000_000, output_tokens: 500_000, total_tokens: 1_500_000 },
         }),
@@ -705,7 +741,7 @@ test("accepted visual validation usage is priced exactly once with its image cal
     assert.equal(result.prompt_revision_estimated_cost, 0);
     assert.equal(result.estimated_cost, 2.25);
     assert.equal(result.validation_usage.total_tokens, 1_500_000);
-    const rows = imageAttemptRows(result, recommendation, "AI_ARTWORK_ONLY");
+    const rows = imageAttemptRows(result, recommendation, "AI_BRANDED_ARTWORK");
     assert.equal(rows.length, 1);
     assert.equal(rows[0].validation_usage.total_tokens, 1_500_000);
     assert.equal(rows[0].usage.estimated_cost, 2.25);
@@ -719,14 +755,14 @@ test("accepted visual validation usage is priced exactly once with its image cal
   }
 });
 
-test("artwork-only validation cannot pass without a traceable provider response id", async () => {
+test("brand-logo validation cannot pass without a traceable provider response id", async () => {
   const recommendation = singleRecommendation();
-  recommendation.visualBrief.visualMode = "AI_ARTWORK_ONLY";
+  recommendation.visualBrief.visualMode = "AI_BRANDED_ARTWORK";
   await assert.rejects(
     () => generateSocialVisuals({
       draftLike: draftFor(recommendation, "artwork-validator-response-id"),
       recommendation,
-      visualMode: "AI_ARTWORK_ONLY",
+      visualMode: "AI_BRANDED_ARTWORK",
       settings: settings(0),
       dependencies: {
         generateOpenAiImage: async () => ({
@@ -734,25 +770,22 @@ test("artwork-only validation cannot pass without a traceable provider response 
           response_id: "artwork-image-with-id",
           usage: {},
         }),
-        validateArtworkOnlyVisual: async () => ({
-          decision: "PASS",
-          hasVisibleText: false,
-          hasLogoOrWatermark: false,
-          observedText: null,
-          issues: [],
+        validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract, {
+          response_id: null,
           usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
         }),
-        storeCampaignAsset: async () => { throw new Error("untraceable validation must not store an image"); },
+        storeCampaignAsset: memoryAssetStore([], "untraceable-brand-validator"),
       },
     }),
-    (error) => error.code === "social_image_generation_failed"
-      && error.image_generation.failures.some((failure) => failure.code === "social_artwork_only_visual_invalid"),
+    (error) => error.code === "social_brand_logo_validation_exhausted"
+      && error.image_generation.failures.length === 3
+      && error.image_generation.failures.every((failure) => failure.code === "social_brand_logo_validation_invalid"),
   );
 });
 
 test("malformed paid visual-validator output retains response evidence and validation cost without raw output", async () => {
   const recommendation = singleRecommendation();
-  recommendation.visualBrief.visualMode = "AI_ARTWORK_ONLY";
+  recommendation.visualBrief.visualMode = "AI_BRANDED_ARTWORK";
   const priorEnvironment = {
     image: process.env.SOCIAL_MANAGER_OPENAI_IMAGE_USD_PER_IMAGE,
     input: process.env.SOCIAL_MANAGER_OPENAI_INPUT_USD_PER_MILLION,
@@ -766,7 +799,7 @@ test("malformed paid visual-validator output retains response evidence and valid
       generateSocialVisuals({
         draftLike: draftFor(recommendation, "malformed-validator-evidence"),
         recommendation,
-        visualMode: "AI_ARTWORK_ONLY",
+        visualMode: "AI_BRANDED_ARTWORK",
         settings: settings(1),
         dependencies: {
           generateOpenAiImage: async () => ({
@@ -784,15 +817,15 @@ test("malformed paid visual-validator output retains response evidence and valid
               }),
             },
           },
-          storeCampaignAsset: async () => { throw new Error("invalid validator output must not store an image"); },
+          storeCampaignAsset: memoryAssetStore([], "malformed-brand-validator"),
         },
       }),
       (error) => {
-        assert.equal(error.code, "social_image_generation_failed");
-        assert.equal(error.image_generation.validation_usage.total_tokens, 1_500_000);
-        assert.equal(error.image_generation.validation_estimated_cost, 2);
-        assert.equal(error.image_generation.image_estimated_cost, 0.25);
-        assert.equal(error.image_generation.estimated_cost, 2.25);
+        assert.equal(error.code, "social_brand_logo_validation_exhausted");
+        assert.equal(error.image_generation.validation_usage.total_tokens, 4_500_000);
+        assert.equal(error.image_generation.validation_estimated_cost, 6);
+        assert.equal(error.image_generation.image_estimated_cost, 0.75);
+        assert.equal(error.image_generation.estimated_cost, 6.75);
         const [failure] = error.image_generation.failures;
         assert.equal(failure.details.validation.response_id, "malformed-validator-response");
         assert.equal(failure.details.validation.usage.total_tokens, 1_500_000);
@@ -832,6 +865,7 @@ test("a terminal carousel failure retains prior paid visuals and retries without
               usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 },
             };
           },
+          validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
           storeCampaignAsset: memoryAssetStore([], "partial-carousel"),
         },
       }),
@@ -857,7 +891,7 @@ test("a terminal carousel failure retains prior paid visuals and retries without
   }
 });
 
-test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 no-overlay bytes", async () => {
+test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v3 no-overlay bytes", async () => {
   const approvedHeadline = "Money can feel simpler";
   const recommendation = singleRecommendation({ headline: approvedHeadline });
   recommendation.visualBrief.visualMode = "FULL_AI_GRAPHIC";
@@ -909,6 +943,7 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
             response_id: "visual-validator-2",
           };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
       reviseImagePrompt: async (input) => {
         promptRevisions.push(input);
         throw new Error("FULL_AI_GRAPHIC retries must not trust a free-form revised prompt");
@@ -926,12 +961,11 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   assert.equal((imageCalls[1].prompt.match(/\{"key":"supporting_text","text":"Small steps can still build confidence\."\}/g) || []).length, 1);
   assert.match(imageCalls[1].prompt, /Retry with a cleaner hierarchy/i);
   assert.deepEqual(result.original_visuals[0].poster_validation.observedTextBlocks, [
-    "Pink Paisa",
     approvedHeadline,
     "Small steps can still build confidence.",
   ]);
   assert.equal(result.original_visuals[0].poster_validation.validated_asset, "openai_normalized_final");
-  assert.equal(result.original_visuals[0].full_ai_graphic_contract_version, 2);
+  assert.equal(result.original_visuals[0].full_ai_graphic_contract_version, 3);
   assert.equal(result.original_visuals[0].normalization.renderer, "sharp_resize_encode_only_v1");
   assert.equal(result.original_visuals[0].normalization.resize_fit, "fill");
   assert.equal(result.original_visuals[0].normalization.pixel_overlay_applied, false);
@@ -944,7 +978,7 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
     poster_validation: {
       ...result.original_visuals[0].poster_validation,
       exactTextMatch: false,
-      observedTextBlocks: ["Pink Paisa", "Money can feels simpler", "Small steps can still build confidence."],
+      observedTextBlocks: ["Money can feels simpler", "Small steps can still build confidence."],
     },
   };
   let invalidStores = 0;
@@ -979,14 +1013,14 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   assert.equal(asset.checksum_sha256, result.original_visuals[0].checksum_sha256);
   assert.equal(asset.renderer, "openai_generated_graphic_passthrough");
   assert.equal(asset.provenance.renderer, "openai_generated_graphic_passthrough");
-  assert.equal(asset.provenance.full_ai_graphic_contract_version, 2);
+  assert.equal(asset.provenance.full_ai_graphic_contract_version, 3);
   assert.equal(asset.provenance.overlay.method, "none");
   assert.equal(asset.provenance.overlay.pixel_overlay_applied, false);
   assert.equal(asset.provenance.base_image.normalization.renderer, "sharp_resize_encode_only_v1");
   assert.equal(asset.overlay_json.text_rendering.method, "openai_image_baked_in_exact_copy");
   assert.equal(asset.overlay_json.text_rendering.pixel_overlay_applied, false);
-  assert.equal(asset.overlay_json.logo.method, "openai_image_baked_in");
-  assert.equal(asset.overlay_json.logo.source, null);
+  assert.equal(asset.overlay_json.logo.method, "openai_reference_baked");
+  assert.equal(asset.overlay_json.logo.post_generation_logo_overlay_applied, false);
   assert.equal(
     asset.validation_checklist.find((row) => row.key === "programmatic_text_overlay").status,
     "PASS",
@@ -1001,7 +1035,7 @@ test("FULL_AI_GRAPHIC retries failed complete-poster validation and persists v2 
   };
   reviewDraft.full_ai_graphic_manifest = {
     ...asset.provenance.full_ai_graphic_manifest,
-    contract_version: 2,
+    contract_version: 3,
     updated_at: new Date(),
   };
   const readiness = reviewAssetReadiness([asset], { draft: reviewDraft });
@@ -1091,9 +1125,8 @@ test("FULL_AI_GRAPHIC Story prompt bakes frame copy, final CTA, disclaimer and s
     })),
   };
 
-  const blocks = fullAiGraphicTextBlocksForSequence(recommendation, 2, 2);
+  const blocks = fullAiGraphicTextBlocksForSequence(recommendation, 2, 2, { contractVersion: 3 });
   assert.deepEqual(blocks, [
-    { key: "brand_name", text: "Pink Paisa" },
     { key: "story_copy", text: "Choose one topic and begin with a clear explanation." },
     { key: "cta", text: "Visit the Wealthness Quiz." },
     { key: "financial_disclaimer", text: "Educational content only. Not personalised financial advice." },
@@ -1163,6 +1196,9 @@ test("FULL_AI_GRAPHIC Story finals are AI-native byte passthrough with no progra
         observedTextBlocks: expectedTextBlocks.map((block) => block.text),
         issues: [],
         response_id: `native-story-validator-${imageCall}`,
+      }),
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract, {
+        response_id: `native-story-logo-validator-${imageCall}`,
       }),
       sleep: async () => {},
       storeCampaignAsset: memoryAssetStore(originalStores, "native-story-original"),
@@ -1245,6 +1281,7 @@ test("product generation preserves the exact authentic reference from prompt thr
         imageCalls.push(input);
         return { buffer: await generatedImageBuffer(20), response_id: "product-image-1", usage: {} };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
       storeCampaignAsset: memoryAssetStore(originalStores, "product-original"),
     },
   });
@@ -1277,7 +1314,7 @@ test("product generation preserves the exact authentic reference from prompt thr
     persist: false,
     storeCampaignAsset: memoryAssetStore(finalStores, "product-final"),
   });
-  const reference = composed.assets[0].reference_assets[0];
+  const reference = composed.assets[0].reference_assets.find((row) => row.reference_type === "PRODUCT_IMAGE");
   assert.equal(reference.reference_type, "PRODUCT_IMAGE");
   assert.equal(reference.url, productUrl);
   assert.equal(reference.checksum_sha256, referenceChecksum);
@@ -1289,7 +1326,7 @@ test("product generation preserves the exact authentic reference from prompt thr
   assert.equal(composed.assets[0].manual_review_required, true);
   assert.equal(reviewAssetReadiness(composed.assets).passed, true);
   const tamperedAsset = JSON.parse(JSON.stringify(composed.assets[0]));
-  tamperedAsset.reference_assets[0].checksum_sha256 = "0".repeat(64);
+  tamperedAsset.reference_assets.find((row) => row.reference_type === "PRODUCT_IMAGE").checksum_sha256 = "0".repeat(64);
   assert.equal(reviewAssetReadiness([tamperedAsset]).passed, false);
 
   const mismatched = JSON.parse(JSON.stringify(recommendation));
@@ -1325,10 +1362,29 @@ test("final assets retain independently verifiable original and final AI provena
         response_id: "provenance-image-response",
         usage: { input_tokens: 12, output_tokens: 0, total_tokens: 12 },
       }),
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation(contract),
       storeCampaignAsset: memoryAssetStore(originalStores, "provenance-original"),
     },
   });
   const original = generated.original_visuals[0];
+  const replacementOriginalBuffer = await generatedImageBuffer(98);
+  const replacementOriginal = {
+    ...original,
+    buffer: replacementOriginalBuffer,
+    checksum_sha256: checksum(replacementOriginalBuffer),
+  };
+  await assert.rejects(
+    () => renderSocialDraftAssets(draftFor(recommendation, "provenance-replaced-base"), {
+      recommendation,
+      baseImages: [replacementOriginal],
+      visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+      sourceProvenance: "generated_without_reference",
+      usageRightsStatus: "api_permitted",
+      persist: false,
+      storeCampaignAsset: memoryAssetStore([], "provenance-replaced-base"),
+    }),
+    (error) => error.code === "social_brand_logo_evidence_invalid",
+  );
   const finalStores = [];
   const composed = await renderSocialDraftAssets(draftFor(recommendation, "provenance-final"), {
     recommendation,
@@ -1362,9 +1418,38 @@ test("final assets retain independently verifiable original and final AI provena
   assert.equal(final.provenance.base_image.provider_original.checksum_sha256, original.provider_original.checksum_sha256);
   assert.equal(final.provenance.base_image.type, "openai_generated_original_visual");
   assert.equal(final.provenance.base_image.generation_status, "VALIDATED");
+  assert.equal(final.brand_logo_evidence.validated_asset, "openai_normalized_final");
+  assert.equal(final.brand_logo_evidence.final_asset_preservation.final_asset_role, "final_publishable_asset");
+  assert.equal(final.brand_logo_evidence.validated_asset_checksum_sha256, original.checksum_sha256);
+  assert.equal(
+    final.brand_logo_evidence.final_asset_preservation.source_validated_asset_checksum_sha256,
+    original.checksum_sha256,
+  );
   assert.equal(final.overlay_json.copy_source_path, "formatContent");
   assert.equal(final.overlay_json.approved_copy.selectedHeadline, recommendation.formatContent.selectedHeadline);
   assert.match(final.checksum_sha256, /^[a-f0-9]{64}$/);
   assert.equal(final.checksum_sha256, checksum(finalStores[0].buffer));
+  assert.equal(
+    final.brand_logo_evidence.final_asset_preservation.final_publishable_asset_checksum_sha256,
+    final.checksum_sha256,
+  );
   assert.notEqual(final.checksum_sha256, original.checksum_sha256);
+
+  const replacementBuffer = await generatedImageBuffer(99);
+  const replacementAsset = JSON.parse(JSON.stringify(final));
+  replacementAsset.checksum_sha256 = checksum(replacementBuffer);
+  const replacementValidation = await validateSocialAsset(replacementAsset, {
+    buffer: replacementBuffer,
+    expectedWidth: 1080,
+    expectedHeight: 1350,
+    expectedCopy: final.overlay_json.approved_copy,
+  });
+  assert.equal(
+    replacementValidation.validation_checklist.find((row) => row.key === "mandatory_ai_baked_brand_logo")?.status,
+    "FAIL",
+  );
+  assert.equal(
+    replacementValidation.validation_checklist.find((row) => row.key === "final_asset_logo_preservation")?.status,
+    "FAIL",
+  );
 });

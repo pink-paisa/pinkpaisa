@@ -51,6 +51,10 @@ const {
   publicSendIntent,
   queueApprovedCommunityReply,
 } = require("./socialCommunityWorkflowService");
+const {
+  buildBrandLogoContract,
+  serializeBrandLogoContract,
+} = require("./socialBrandLogoPolicy");
 
 const DEFAULT_POSTING_SLOTS = Object.freeze([
   { weekday: "MONDAY", hour_ist: 11, minute_ist: 0 },
@@ -1154,6 +1158,7 @@ async function executeWeeklyPlan(planOrId, { now = new Date(), dependencies = {}
       content_strategy: clone(settings.content_strategy || {}),
       content_mix_snapshot: contentMixSnapshot,
     };
+    plan.brand_logo_contract = clone(settings.visual_brand?.logo_policy || null);
     plan.plan_rationale = {
       format_balance: weeklyPlan.formatBalance,
       objective_balance: weeklyPlan.objectiveBalance,
@@ -1350,6 +1355,31 @@ function freezeSelectedVisualMode(selected, candidate, settings, dependencies = 
   return resolution;
 }
 
+async function freezeSelectedBrandLogoContract(plan, selected, candidate, dependencies = {}) {
+  const candidateId = selected.candidateId || selected.candidate_id;
+  const runtimeContract = await (
+    dependencies.buildBrandLogoContract || buildBrandLogoContract
+  )({
+    draftLike: {
+      idempotency_key: `weekly:${plan._id}:${candidateId}:v${plan.version || 1}`,
+      brand_logo_contract: selected.brand_logo_contract || null,
+    },
+    recommendation: candidate,
+    visualMode: selected.visual_mode_resolution?.effective || "AI_VISUAL_WITH_EXACT_OVERLAY",
+    dependencies,
+  });
+  const frozen = serializeBrandLogoContract(runtimeContract);
+  if (selected.brand_logo_contract?.safe_corner?.lock_id
+    && selected.brand_logo_contract.safe_corner.lock_id !== frozen.safe_corner?.lock_id) {
+    const error = new Error("The selected weekly creative's frozen logo corner changed");
+    error.code = "social_brand_logo_contract_mismatch";
+    error.statusCode = 409;
+    throw error;
+  }
+  selected.brand_logo_contract = clone(frozen);
+  return runtimeContract;
+}
+
 async function queueWeeklySelectedPost(plan, selected, { actor = null, now = new Date(), dependencies = {} } = {}) {
   const RunModel = dependencies.SocialGenerationRun || SocialGenerationRun;
   const session = dependencies.mongoSession || null;
@@ -1399,6 +1429,7 @@ async function queueWeeklySelectedPost(plan, selected, { actor = null, now = new
       planId: plan._id,
       candidateId,
       visualModeResolution: clone(selected.visual_mode_resolution),
+      brandLogoContract: clone(selected.brand_logo_contract),
     },
     dependencies,
   });
@@ -1410,6 +1441,10 @@ async function queueWeeklySelectedPost(plan, selected, { actor = null, now = new
       error.statusCode = 409;
       error.code = "social_weekly_run_link_mismatch";
       throw error;
+    }
+    if (!run.brand_logo_contract) {
+      run.brand_logo_contract = clone(selected.brand_logo_contract);
+      if (typeof run.save === "function") await run.save(session ? { session } : undefined);
     }
     selected.generation_run_id = run._id;
     selected.status = "GENERATING_COPY";
@@ -1471,6 +1506,7 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
       plan.approved_by_admin_id = actorId(actor);
       plan.approved_at = now;
     }
+    plan.brand_logo_contract = clone(settings.visual_brand?.logo_policy || null);
     const production = {
       requested: (plan.selected_posts || []).length + (plan.story_plan || []).length,
       queued: 0,
@@ -1487,6 +1523,7 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
       if (firstApproval || !selected.visual_mode_resolution) {
         freezeSelectedVisualMode(selected, candidate, settings, transactionDependencies);
       }
+      await freezeSelectedBrandLogoContract(plan, selected, candidate, transactionDependencies);
       const queued = await queueWeeklySelectedPost(plan, selected, {
         actor,
         now,
@@ -1529,6 +1566,7 @@ async function approveWeeklyPlan(planId, { actor, now = new Date(), dependencies
             retry_of_generation_run_id: queued.retryOfRunId,
             reused: queued.reused,
             visual_mode_resolution: clone(selected.visual_mode_resolution),
+            brand_logo_contract: clone(selected.brand_logo_contract),
           },
           dependencies: transactionDependencies,
         });

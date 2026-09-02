@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const fs = require("fs");
 const mongoose = require("mongoose");
 const os = require("os");
 const Product = require("../../models/Product");
@@ -14,6 +15,7 @@ const {
   isPublicMediaUrl,
   publishInstagramDraft,
 } = require("../instagramPublishService");
+const { getGeneratedCampaignAssetReference } = require("../campaignAssetStorage");
 const {
   buildPublicationFingerprint,
   scanRecommendationCompliance,
@@ -26,6 +28,7 @@ const {
   buildSocialCaptionContract,
   isAffiliateRecommendation,
 } = require("./socialCaptionPolicy");
+const { brandLogoEvidencePassed } = require("./socialBrandLogoPolicy");
 
 const REQUIRED_PUBLISH_SCOPE_NAMES = new Set([
   "instagram_business_content_publish",
@@ -77,6 +80,22 @@ function sha256(value) {
   return crypto.createHash("sha256").update(String(value || "")).digest("hex");
 }
 
+function sha256File(filePath, { createReadStream = fs.createReadStream } = {}) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    let stream;
+    try {
+      stream = createReadStream(filePath, { flags: "r" });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
 function parseBoolean(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   return ["true", "1", "yes", "on"].includes(String(value).trim().toLowerCase());
@@ -114,7 +133,7 @@ function storyOnFrameProvenancePassed(asset = {}) {
     && policy.pixel_overlay_applied === false
     && policy.text_rendering === "openai_image_baked_in_exact_copy"
     && trimText(asset.visual_mode).toUpperCase() === "FULL_AI_GRAPHIC"
-    && Number(asset.provenance?.full_ai_graphic_contract_version || 0) === 2
+    && [2, 3].includes(Number(asset.provenance?.full_ai_graphic_contract_version || 0))
     && asset.provenance?.overlay?.method === "none"
     && asset.provenance?.overlay?.pixel_overlay_applied === false
     && asset.provenance?.final_pixel_contract?.pixel_overlay_applied === false
@@ -122,6 +141,170 @@ function storyOnFrameProvenancePassed(asset = {}) {
     && nativePoster.exactTextMatch === true
     && nativePoster.unapprovedTextPresent === false
     && nativePoster.unrelatedLogoOrWatermarkPresent === false;
+}
+
+function brandLogoPublicationEvidencePassed({ draft = null, asset = {}, format = null } = {}) {
+  const contract = draft?.brand_logo_contract || asset?.brand_logo_contract || asset?.provenance?.brand_logo_contract;
+  if (!contract?.required) return true;
+  if (contract.post_generation_logo_overlay_applied === true
+    || asset?.provenance?.post_generation_logo_overlay_applied === true
+    || asset?.provenance?.overlay?.logo_overlay_applied === true) return false;
+
+  const mimeType = String(asset?.mime_type || asset?.mimeType || "").toLowerCase();
+  if (mimeType.startsWith("video/") || ["REEL", "VIDEO_FEED"].includes(String(format || "").toUpperCase())) {
+    const evidenceRows = Array.isArray(asset?.provenance?.brand_logo_scene_evidence)
+      ? asset.provenance.brand_logo_scene_evidence
+      : [];
+    const expectedSceneCount = Math.max(
+      Array.isArray(draft?.current_package?.primaryRecommendation?.formatContent?.scenes)
+        ? draft.current_package.primaryRecommendation.formatContent.scenes.length
+        : 0,
+      1,
+    );
+    return evidenceRows.length === expectedSceneCount
+      && evidenceRows.every((row, index) => {
+        const evidence = row?.evidence || row;
+        const extractedFrameChecksum = trimText(
+          row?.extracted_frame_checksum_sha256
+          || evidence?.extracted_frame_checksum_sha256,
+        ).toLowerCase();
+        return Number(row?.scene_index ?? evidence?.scene_index) === index
+          && brandLogoEvidencePassed(evidence, contract, extractedFrameChecksum);
+      });
+  }
+
+  const evidence = asset?.brand_logo_evidence
+    || asset?.provenance?.brand_logo_evidence
+    || asset?.provenance?.base_image?.brand_logo_evidence
+    || asset?.provenance?.base_image?.brand_logo_validation;
+  const nativeFullAi = trimText(asset?.visual_mode).toUpperCase() === "FULL_AI_GRAPHIC"
+    && [2, 3].includes(Number(asset?.provenance?.full_ai_graphic_contract_version || 0));
+  const assetChecksum = trimText(asset?.checksum_sha256 || asset?.checksumSha256).toLowerCase();
+  const baseImageChecksum = trimText(
+    asset?.provenance?.base_image?.checksum_sha256
+    || asset?.provenance?.base_image?.checksumSha256,
+  ).toLowerCase();
+  const evidenceExpectedChecksum = nativeFullAi ? assetChecksum : baseImageChecksum;
+  if (!brandLogoEvidencePassed(evidence || {}, contract, evidenceExpectedChecksum)) return false;
+  const preservation = evidence?.final_asset_preservation || evidence?.finalAssetPreservation;
+  if (nativeFullAi) {
+    return asset?.provenance?.overlay?.method === "none"
+      && asset?.provenance?.overlay?.pixel_overlay_applied === false
+      && /^[a-f0-9]{64}$/.test(assetChecksum)
+      && baseImageChecksum === assetChecksum
+      && evidence?.validated_asset === "final_publishable_asset"
+      && preservation?.method === "checksum_identical_ai_passthrough_v1"
+      && trimText(preservation?.source_validated_asset_checksum_sha256).toLowerCase() === assetChecksum
+      && trimText(preservation?.final_publishable_asset_checksum_sha256).toLowerCase() === assetChecksum
+      && preservation?.pixel_overlay_applied === false
+      && preservation?.post_generation_logo_overlay_applied === false;
+  }
+  return ["openai_normalized_final", "openai_normalized_with_authentic_product_final"].includes(evidence?.validated_asset)
+    && preservation?.method === "locked_safe_box_overlay_exclusion_v1"
+    && preservation?.final_asset_role === "final_publishable_asset"
+    && /^[a-f0-9]{64}$/.test(assetChecksum)
+    && /^[a-f0-9]{64}$/.test(baseImageChecksum)
+    && trimText(preservation?.source_validated_asset_checksum_sha256).toLowerCase() === baseImageChecksum
+    && trimText(preservation?.final_publishable_asset_checksum_sha256).toLowerCase() === assetChecksum
+    && preservation?.programmatic_copy_or_brand_pixels_inside_excluded_box === false
+    && preservation?.post_generation_logo_overlay_applied === false;
+}
+
+function brandLogoAssetIntegrityError(asset = {}, reason, details = {}) {
+  const sequence = Number(asset?.slide_number || asset?.slideNumber || 1);
+  const error = publishingError(
+    `The final publication asset at sequence ${sequence} could not be verified against its approved SHA-256 checksum. Regenerate and review this asset before publishing.`,
+    "social_brand_logo_asset_integrity_invalid",
+    409,
+  );
+  error.is_retriable = false;
+  error.details = {
+    instagram_publish_stage: "prepublish_asset_integrity",
+    instagram_outcome_uncertain: false,
+    reason,
+    asset_id: asset?._id ? String(asset._id) : null,
+    asset_sequence: sequence,
+    storage_provider: trimText(asset?.storage_provider || asset?.storageProvider).toLowerCase() || null,
+    storage_key: trimText(asset?.storage_key || asset?.storageKey) || null,
+    ...details,
+  };
+  return error;
+}
+
+async function verifyMandatoryBrandPublicationAssetIntegrity({
+  draft = null,
+  assets = [],
+  dependencies = {},
+} = {}) {
+  if (draft?.brand_logo_contract?.required !== true) {
+    return { required: false, status: "NOT_APPLICABLE", verified_assets: [] };
+  }
+
+  const publicationAssets = Array.isArray(assets) ? assets : [];
+  if (!publicationAssets.length) {
+    throw brandLogoAssetIntegrityError({}, "publication_assets_missing");
+  }
+
+  const resolveGeneratedAsset = dependencies.getGeneratedCampaignAssetReference
+    || getGeneratedCampaignAssetReference;
+  const hashAssetFile = dependencies.hashFileSha256 || sha256File;
+  const verifiedAssets = [];
+
+  for (const asset of publicationAssets) {
+    const storageProvider = trimText(asset?.storage_provider || asset?.storageProvider).toLowerCase();
+    const storageKey = trimText(asset?.storage_key || asset?.storageKey);
+    const expectedChecksum = trimText(asset?.checksum_sha256 || asset?.checksumSha256).toLowerCase();
+    if (storageProvider !== "local") {
+      throw brandLogoAssetIntegrityError(asset, "storage_provider_unsupported");
+    }
+    if (!storageKey) {
+      throw brandLogoAssetIntegrityError(asset, "storage_key_missing");
+    }
+    if (!/^[a-f0-9]{64}$/.test(expectedChecksum)) {
+      throw brandLogoAssetIntegrityError(asset, "approved_checksum_missing_or_invalid");
+    }
+
+    let reference;
+    try {
+      reference = await resolveGeneratedAsset(storageKey);
+    } catch (_error) {
+      throw brandLogoAssetIntegrityError(asset, "storage_key_invalid");
+    }
+    if (!reference?.filePath) {
+      throw brandLogoAssetIntegrityError(asset, "storage_key_not_generated_asset");
+    }
+
+    let actualChecksum;
+    try {
+      actualChecksum = trimText(await hashAssetFile(reference.filePath)).toLowerCase();
+    } catch (_error) {
+      throw brandLogoAssetIntegrityError(asset, "asset_missing_or_unreadable");
+    }
+    if (!/^[a-f0-9]{64}$/.test(actualChecksum)) {
+      throw brandLogoAssetIntegrityError(asset, "computed_checksum_invalid");
+    }
+    if (!crypto.timingSafeEqual(Buffer.from(actualChecksum, "hex"), Buffer.from(expectedChecksum, "hex"))) {
+      throw brandLogoAssetIntegrityError(asset, "checksum_mismatch", {
+        expected_checksum_sha256: expectedChecksum,
+        actual_checksum_sha256: actualChecksum,
+      });
+    }
+
+    verifiedAssets.push({
+      asset_id: asset?._id ? String(asset._id) : null,
+      asset_sequence: Number(asset?.slide_number || asset?.slideNumber || 1),
+      storage_provider: storageProvider,
+      storage_key: reference.storageKey || storageKey,
+      checksum_sha256: actualChecksum,
+    });
+  }
+
+  return {
+    required: true,
+    status: "PASSED",
+    verified_asset_count: verifiedAssets.length,
+    verified_assets: verifiedAssets,
+  };
 }
 
 function publicationModelContentType(format) {
@@ -135,6 +318,36 @@ function publicationModelContentType(format) {
 function publicationLeaseActive(publication, now = new Date()) {
   const expiry = publication?.lease_expires_at ? new Date(publication.lease_expires_at) : null;
   return Boolean(publication?.lease_owner && expiry && Number.isFinite(expiry.getTime()) && expiry.getTime() > now.getTime());
+}
+
+function storySequenceCheckpointSafelyResumable(publication = {}) {
+  if (String(publication.content_type || "").toUpperCase() !== "STORY") return false;
+  const checkpoint = publication.provider_checkpoint || {};
+  if (checkpoint.status !== "story_frame_published") return false;
+  const frames = Array.isArray(checkpoint.story_frames) ? checkpoint.story_frames : [];
+  const expectedCount = Array.isArray(publication.asset_urls) ? publication.asset_urls.length : 0;
+  if (!expectedCount || frames.length !== expectedCount) return false;
+  let pendingSeen = false;
+  let publishedCount = 0;
+  for (const frame of frames) {
+    const mediaId = trimText(frame?.media_id);
+    const creationId = trimText(frame?.creation_id);
+    const status = trimText(frame?.status).toLowerCase();
+    if (status === "publishing") return false;
+    if (mediaId) {
+      if (pendingSeen || !creationId || status !== "published") return false;
+      publishedCount += 1;
+    } else {
+      pendingSeen = true;
+    }
+  }
+  const checkpointMediaIds = Array.isArray(checkpoint.media_ids)
+    ? checkpoint.media_ids.map(trimText).filter(Boolean)
+    : [];
+  return publishedCount > 0
+    && publishedCount < expectedCount
+    && checkpointMediaIds.length === publishedCount
+    && new Set(checkpointMediaIds).size === checkpointMediaIds.length;
 }
 
 function buildInstagramCaption(recommendation = {}) {
@@ -170,7 +383,11 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
     const mimeType = String(asset.mime_type || asset.mimeType || "").toLowerCase();
     return !mimeType || mimeType.startsWith("image/");
   });
-  const publicationAssets = videoContent ? videoAssets : contentType === "story" && videoAssets.length ? videoAssets : imageAssets;
+  const storyAssets = usableAssets.filter((asset) => {
+    const mimeType = String(asset.mime_type || asset.mimeType || "").toLowerCase();
+    return !mimeType || mimeType.startsWith("image/") || mimeType.startsWith("video/");
+  });
+  const publicationAssets = videoContent ? videoAssets : contentType === "story" ? storyAssets : imageAssets;
   const compliance = scanRecommendationCompliance(recommendation, { requireSourcesForCurrentClaims: true });
   const captionContract = buildSocialCaptionContract(recommendation, {
     requireAffiliateDisclosure: isAffiliateRecommendation(recommendation),
@@ -190,7 +407,8 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
   }
   const safelyResumableStalePublication = draft?.status === "PUBLISHING"
     && existingPublication
-    && ["VALIDATING", "CONTAINER_CREATED"].includes(existingPublication.status)
+    && (["VALIDATING", "CONTAINER_CREATED"].includes(existingPublication.status)
+      || (existingPublication.status === "PUBLISHING" && storySequenceCheckpointSafelyResumable(existingPublication)))
     && !publicationLeaseActive(existingPublication, now);
   if (!["APPROVED", "SCHEDULED", "FAILED"].includes(draft?.status) && !safelyResumableStalePublication) {
     blockers.push({ code: "draft_status_invalid", message: `A ${draft?.status || "missing"} draft cannot be published.` });
@@ -258,8 +476,29 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
   if (contentType === "carousel" && (publicationAssets.length < 2 || publicationAssets.length > 10)) {
     blockers.push({ code: "asset_count_invalid", message: "A carousel requires between two and ten active assets." });
   }
-  if (["reel", "video_feed", "story"].includes(contentType) && publicationAssets.length !== 1) {
+  if (["reel", "video_feed"].includes(contentType) && publicationAssets.length !== 1) {
     blockers.push({ code: "asset_count_invalid", message: `${format} publishing requires exactly one validated publication media asset.` });
+  }
+  if (contentType === "story" && (publicationAssets.length < 1 || publicationAssets.length > 10)) {
+    blockers.push({ code: "asset_count_invalid", message: "A Story requires between one and ten ordered image or video frames." });
+  }
+  if (contentType === "story" && publicationAssets.length) {
+    const expectedFrameCount = Number(recommendation?.formatContent?.frameCount)
+      || (Array.isArray(recommendation?.formatContent?.frames) ? recommendation.formatContent.frames.length : 0)
+      || (Array.isArray(recommendation?.onPostCopy?.storyFrames) ? recommendation.onPostCopy.storyFrames.length : 0);
+    if (expectedFrameCount > 0 && publicationAssets.length !== expectedFrameCount) {
+      blockers.push({
+        code: "story_asset_count_mismatch",
+        message: `The approved Story requires ${expectedFrameCount} ordered frame${expectedFrameCount === 1 ? "" : "s"}, but ${publicationAssets.length} publishable asset${publicationAssets.length === 1 ? " is" : "s are"} present.`,
+      });
+    }
+    const sequences = publicationAssets.map((asset) => Number(asset.slide_number));
+    if (sequences.some((sequence, index) => !Number.isInteger(sequence) || sequence !== index + 1)) {
+      blockers.push({
+        code: "story_asset_sequence_invalid",
+        message: "Story assets must have a complete, unique 1..N frame sequence before publishing.",
+      });
+    }
   }
   if (["REEL", "VIDEO_FEED"].includes(format) && draft?.audio_track_id) {
     const selectedTrackId = String(draft.audio_track_id);
@@ -284,6 +523,13 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
   }
   if (publicationAssets.some((asset) => !assetReady(asset))) {
     blockers.push({ code: "creative_validation_pending", message: "Every active asset must pass automated validation and any required manual review." });
+  }
+  if (draft?.brand_logo_contract?.required
+    && publicationAssets.some((asset) => !brandLogoPublicationEvidencePassed({ draft, asset, format }))) {
+    blockers.push({
+      code: "social_brand_logo_evidence_invalid",
+      message: "Every image, slide, Story frame, and final video scene must retain passing evidence for the mandatory AI-baked Pink Paisa badge.",
+    });
   }
   if (publicationAssets.some((asset) => !isPublicMediaUrl(asset.url))) {
     blockers.push({ code: "asset_url_not_public", message: "Instagram requires every creative to have a public HTTPS URL." });
@@ -314,7 +560,9 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
   if (PUBLICATION_IN_FLIGHT_STATUSES.has(existingPublication?.status) && publicationLeaseActive(existingPublication, now)) {
     blockers.push({ code: "publish_in_progress", message: "Another worker already owns this Instagram publication attempt." });
   }
-  if (existingPublication?.status === "PUBLISHING" && !publicationLeaseActive(existingPublication, now)) {
+  if (existingPublication?.status === "PUBLISHING"
+    && !publicationLeaseActive(existingPublication, now)
+    && !storySequenceCheckpointSafelyResumable(existingPublication)) {
     blockers.push({ code: "publish_outcome_uncertain", message: "A stale publication crossed the pre-publish checkpoint. Reconcile Instagram manually before retrying." });
   }
   if (existingPublication && Number(existingPublication.attempt_count || 0) >= Math.max(Number(existingPublication.max_attempts || 4), 1)) {
@@ -343,6 +591,7 @@ function buildReadiness({ draft, assets = [], settings = {}, connection = {}, no
     asset_count: publicationAssets.length,
     asset_urls: publicationAssets.map((asset) => asset.url),
     asset_mime_types: publicationAssets.map((asset) => asset.mime_type || asset.mimeType || null),
+    asset_sequences: publicationAssets.map((asset) => Number(asset.slide_number || 1)),
   };
 }
 
@@ -472,6 +721,7 @@ async function persistPublicationUncertainManualAction({
   const actionKey = `social-publish-reconciliation:${publicationId}:outcome-uncertain`.slice(0, 400);
   const checkpoint = publication?.provider_checkpoint || {};
   const externalReferenceId = checkpoint.media_id
+    || checkpoint.media_ids?.[0]
     || checkpoint.creation_id
     || publication?.creation_id
     || String(publicationId);
@@ -540,8 +790,10 @@ function normalizeAuthoritativePublicationId(value, publication) {
     ...(publication?.child_creation_ids || []),
     checkpoint.creation_id,
     checkpoint.container_id,
+    ...(checkpoint.creation_ids || []),
     ...(checkpoint.child_creation_ids || []),
     ...(checkpoint.container_ids || []),
+    ...(checkpoint.story_frames || []).map((frame) => frame?.creation_id),
   ].map((identifier) => trimText(identifier)).filter(Boolean);
   if (containerIds.includes(mediaId)) {
     throw publishingError(
@@ -869,6 +1121,7 @@ function retryDelayMs(publication, settings = {}) {
 }
 
 function isRetriablePublishError(error) {
+  if (error?.is_retriable === false) return false;
   const status = Number(error?.response?.status || error?.status || 0);
   return !error?.details?.instagram_outcome_uncertain && (!status || [408, 409, 425, 429, 500, 502, 503, 504].includes(status));
 }
@@ -1073,7 +1326,9 @@ async function queueSocialPublication({ draftId, settings, actorAdminId = null, 
     publication.next_retry_at = now;
     publication.queued_at = now;
     await publication.save();
-  } else if (["VALIDATING", "CONTAINER_CREATED"].includes(publication.status) && !publicationLeaseActive(publication, now)) {
+  } else if ((["VALIDATING", "CONTAINER_CREATED"].includes(publication.status)
+    || (publication.status === "PUBLISHING" && storySequenceCheckpointSafelyResumable(publication)))
+    && !publicationLeaseActive(publication, now)) {
     publication.status = "FAILED";
     publication.next_retry_at = now;
     publication.lease_owner = null;
@@ -1121,10 +1376,16 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
   }
   const ensured = await ensurePublicationRecord({ context, settings, actorAdminId, publishNow, now });
   const { models, draft } = context;
-  const { readiness, caption, assetUrls, payloadFingerprint, idempotencyKey } = ensured;
+  const { readiness, caption, usableAssets, assetUrls, payloadFingerprint, idempotencyKey } = ensured;
   let { publication } = ensured;
   if (publication.status === "PUBLISHED") {
-    if (!trimText(publication.external_publication_id)) {
+    const publishedStoryIds = Array.isArray(publication.external_publication_ids)
+      ? publication.external_publication_ids.map(trimText).filter(Boolean)
+      : [];
+    const completePublishedStory = readiness.content_type !== "story"
+      || (publishedStoryIds.length === assetUrls.length
+        && publishedStoryIds[0] === trimText(publication.external_publication_id));
+    if (!trimText(publication.external_publication_id) || !completePublishedStory) {
       const error = new Error("The stored publication is marked PUBLISHED without Meta's media identifier");
       error.code = "published_identity_missing";
       error.statusCode = 409;
@@ -1186,6 +1447,14 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
   });
 
   try {
+    const prepublishAssetIntegrity = await (
+      dependencies.verifyMandatoryBrandPublicationAssetIntegrity
+      || verifyMandatoryBrandPublicationAssetIntegrity
+    )({
+      draft,
+      assets: usableAssets,
+      dependencies,
+    });
     const result = await (dependencies.publishInstagramDraft || publishInstagramDraft)({
       contentType: readiness.content_type,
       assetUrls,
@@ -1195,7 +1464,9 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
         creation_id: publication.creation_id,
         child_creation_ids: publication.child_creation_ids,
         media_id: publication.external_publication_id,
+        media_ids: publication.external_publication_ids || [],
         permalink: publication.external_permalink,
+        permalinks: publication.external_permalinks || [],
       },
       onProgress: async (checkpoint = {}) => {
         const statusMap = {
@@ -1207,7 +1478,13 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
         publication.creation_id = checkpoint.creation_id || publication.creation_id;
         publication.child_creation_ids = checkpoint.child_creation_ids || publication.child_creation_ids;
         publication.external_publication_id = checkpoint.media_id || publication.external_publication_id;
+        if (Array.isArray(checkpoint.media_ids)) {
+          publication.external_publication_ids = checkpoint.media_ids;
+        }
         publication.external_permalink = checkpoint.permalink || publication.external_permalink;
+        if (Array.isArray(checkpoint.permalinks)) {
+          publication.external_permalinks = checkpoint.permalinks.filter(Boolean);
+        }
         if (checkpoint.status === "published" && checkpoint.media_id) {
           publication.published_at = publication.published_at || new Date();
           publication.finished_at = publication.finished_at || publication.published_at;
@@ -1218,29 +1495,83 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
         await publication.save();
       },
     });
-    const publishedMediaId = trimText(result?.media_id);
-    if (!publishedMediaId) {
-      const error = new Error("Instagram did not return a published media identifier; the outcome requires reconciliation");
+    const resultCreationIds = [
+      result?.creation_id,
+      ...(Array.isArray(result?.creation_ids) ? result.creation_ids : []),
+      ...(Array.isArray(result?.child_creation_ids) ? result.child_creation_ids : []),
+    ].map(trimText).filter(Boolean);
+    const rawPublishedMediaIds = readiness.content_type === "story"
+      ? (Array.isArray(result?.media_ids) ? result.media_ids : [])
+      : [result?.media_id];
+    const trimmedPublishedMediaIds = rawPublishedMediaIds.map(trimText).filter(Boolean);
+    const rawStoryMediaComplete = readiness.content_type !== "story"
+      || trimmedPublishedMediaIds.length === assetUrls.length;
+    const rawMediaIdsUnique = new Set(trimmedPublishedMediaIds).size === trimmedPublishedMediaIds.length;
+    if (!trimmedPublishedMediaIds.length || !rawStoryMediaComplete || !rawMediaIdsUnique) {
+      const error = new Error(readiness.content_type === "story"
+        ? "Instagram did not return one unique authoritative published media identifier for every Story frame; the outcome requires reconciliation"
+        : "Instagram did not return a published media identifier; the outcome requires reconciliation");
       error.code = "instagram_publish_identifier_missing";
       error.details = {
         instagram_publish_stage: "media_publish",
         instagram_outcome_uncertain: true,
         creation_id: result?.creation_id || publication.creation_id || null,
         child_creation_ids: result?.child_creation_ids || publication.child_creation_ids || [],
+        creation_ids: result?.creation_ids || [],
+        media_ids: trimmedPublishedMediaIds,
+        story_frames: result?.story_frames || [],
       };
       throw error;
     }
+    let publishedMediaIds;
+    try {
+      publishedMediaIds = trimmedPublishedMediaIds.map((mediaId) => (
+        normalizeAuthoritativePublicationId(mediaId, {
+          ...publication,
+          creation_id: result?.creation_id || publication.creation_id,
+          child_creation_ids: resultCreationIds,
+          provider_checkpoint: {
+            ...(publication.provider_checkpoint || {}),
+            creation_ids: resultCreationIds,
+            child_creation_ids: resultCreationIds,
+          },
+        })
+      ));
+    } catch (validationError) {
+      const error = new Error("Instagram returned a non-authoritative media identifier; the outcome requires reconciliation");
+      error.code = "instagram_publish_identifier_not_authoritative";
+      error.details = {
+        instagram_publish_stage: "media_publish",
+        instagram_outcome_uncertain: true,
+        creation_id: result?.creation_id || publication.creation_id || null,
+        child_creation_ids: resultCreationIds,
+        creation_ids: resultCreationIds,
+        media_ids: trimmedPublishedMediaIds,
+        story_frames: result?.story_frames || [],
+        validation_code: validationError.code || null,
+      };
+      throw error;
+    }
+    const publishedMediaId = publishedMediaIds[0] || null;
     const publishedAt = new Date();
     const enrichmentWarning = normalizeMediaEnrichmentWarning(result?.enrichment_warning);
     publication.status = "PUBLISHED";
     publication.external_publication_id = publishedMediaId;
+    publication.external_publication_ids = publishedMediaIds;
     publication.external_permalink = result.permalink || null;
+    publication.external_permalinks = Array.isArray(result?.permalinks) ? result.permalinks.filter(Boolean) : [];
     publication.provider_response_metadata = {
       content_type: result.content_type,
       resumed: Boolean(result.resumed),
       account_username: result.connection?.instagram_username || null,
       media_enrichment_status: enrichmentWarning ? "WARNING" : "COMPLETE",
       media_enrichment_warning: enrichmentWarning,
+      prepublish_asset_integrity: prepublishAssetIntegrity,
+      ...(readiness.content_type === "story" ? {
+        story_frame_count: publishedMediaIds.length,
+        story_frames: result?.story_frames || [],
+        external_publication_ids: publishedMediaIds,
+      } : {}),
     };
     publication.published_at = publishedAt;
     publication.finished_at = publishedAt;
@@ -1258,7 +1589,9 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
     draft.publication_json = {
       status: "PUBLISHED",
       external_publication_id: publishedMediaId,
+      external_publication_ids: publishedMediaIds,
       external_permalink: result.permalink || null,
+      external_permalinks: publication.external_permalinks,
       published_at: publishedAt,
       media_enrichment_status: enrichmentWarning ? "WARNING" : "COMPLETE",
       media_enrichment_warning: enrichmentWarning,
@@ -1279,6 +1612,7 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
       actorAdminId,
       metadata: {
         external_publication_id: publishedMediaId,
+        external_publication_ids: publishedMediaIds,
         permalink: result.permalink || null,
         media_enrichment_status: enrichmentWarning ? "WARNING" : "COMPLETE",
       },
@@ -1307,8 +1641,15 @@ async function publishSocialDraft({ draftId, settings, actorAdminId = null, publ
     publication.provider_checkpoint = {
       ...(publication.provider_checkpoint || {}),
       ...(error?.details?.creation_id ? { creation_id: error.details.creation_id } : {}),
+      ...(error?.details?.creation_ids ? { creation_ids: error.details.creation_ids } : {}),
       ...(error?.details?.child_creation_ids ? { child_creation_ids: error.details.child_creation_ids } : {}),
+      ...(error?.details?.media_ids ? { media_ids: error.details.media_ids } : {}),
+      ...(error?.details?.story_frames ? { story_frames: error.details.story_frames } : {}),
     };
+    if (Array.isArray(error?.details?.media_ids) && error.details.media_ids.length) {
+      publication.external_publication_ids = error.details.media_ids.map(trimText).filter(Boolean);
+      publication.external_publication_id = publication.external_publication_ids[0] || publication.external_publication_id;
+    }
     publication.last_error = {
       code: error.code || "instagram_publish_failed",
       message: trimText(error.message).slice(0, 4000),
@@ -1385,7 +1726,8 @@ async function recoverStaleSocialPublications({ now = new Date(), limit = 20, de
   let requeued = 0;
   let uncertain = 0;
   for (const stale of staleRows) {
-    const crossedPublishCheckpoint = stale.status === "PUBLISHING";
+    const crossedPublishCheckpoint = stale.status === "PUBLISHING"
+      && !storySequenceCheckpointSafelyResumable(stale);
     const nextStatus = crossedPublishCheckpoint ? "UNCERTAIN" : "FAILED";
     const recovered = await models.SocialPublication.findOneAndUpdate(
       { _id: stale._id, status: stale.status, lease_expires_at: { $lte: now } },
@@ -1499,7 +1841,9 @@ async function reconcileCheckpointedSocialPublications({ now = new Date(), limit
     draft.publication_json = {
       status: "PUBLISHED",
       external_publication_id: publication.external_publication_id,
+      external_publication_ids: publication.external_publication_ids || [publication.external_publication_id],
       external_permalink: publication.external_permalink || null,
+      external_permalinks: publication.external_permalinks || [],
       published_at: draft.published_at,
       reconciled_from_provider_checkpoint: true,
     };
@@ -1516,7 +1860,10 @@ async function reconcileCheckpointedSocialPublications({ now = new Date(), limit
       summary: "A real Instagram media ID persisted before a worker interruption; the draft was reconciled to PUBLISHED without another provider call.",
       draft,
       publication,
-      metadata: { external_publication_id: publication.external_publication_id },
+      metadata: {
+        external_publication_id: publication.external_publication_id,
+        external_publication_ids: publication.external_publication_ids || [publication.external_publication_id],
+      },
       models,
     });
     reconciled += 1;
@@ -1595,6 +1942,9 @@ module.exports = {
   _private: {
     activeAssets,
     assetReady,
+    brandLogoPublicationEvidencePassed,
+    brandLogoAssetIntegrityError,
+    verifyMandatoryBrandPublicationAssetIntegrity,
     isRetriablePublishError,
     normalizeMediaEnrichmentWarning,
     normalizeAuthoritativePublicationId,
@@ -1608,5 +1958,7 @@ module.exports = {
     requiredScopePresent,
     retryDelayMs,
     sha256,
+    sha256File,
+    storySequenceCheckpointSafelyResumable,
   },
 };

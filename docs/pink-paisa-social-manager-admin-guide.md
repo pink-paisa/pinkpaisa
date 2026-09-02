@@ -33,13 +33,14 @@ For a normal three-post week this is exactly four human decisions: one strategy 
 
 | Mode | Result | Eligibility |
 | --- | --- | --- |
-| `AI_VISUAL_WITH_EXACT_OVERLAY` | OpenAI artwork plus verified programmatic headline/supporting copy/logo | Required fallback for Stories and authentic product/affiliate creatives; also available as an explicit precision mode |
-| `AI_ARTWORK_ONLY` | Full-bleed OpenAI artwork normalized only by Sharp; no composited text, logo, watermark, branding or reserved text area | Only non-product `SINGLE_IMAGE`/`CAROUSEL` awareness, education, engagement or community-building posts |
-| `FULL_AI_GRAPHIC` | Complete AI-native artwork, exact approved text and Pink Paisa identity; Sharp performs resize/encoding-only normalization and adds no pixel overlay | Recommended default for eligible new creatives |
+| `AI_VISUAL_WITH_EXACT_OVERLAY` | OpenAI artwork with the approved badge AI-baked from its reference, plus verified programmatic headline/supporting copy. Sharp never adds the logo. | Precision mode and the protected route for authentic product/affiliate creatives |
+| `AI_BRANDED_ARTWORK` | Full-bleed OpenAI artwork with exactly one validated AI-rendered approved badge and no other on-image text | Available to eligible new artwork-led creatives |
+| `AI_ARTWORK_ONLY` | Historical full-bleed artwork without branding | Read-only historical mode; new requests are rejected with `BRAND_LOGO_REQUIRED` |
+| `FULL_AI_GRAPHIC` | Complete AI-native artwork and exact approved poster text with the approved badge supplied as a high-fidelity reference | Recommended default for eligible new creatives; contract version 3 |
 
-Artwork-only is rejected for products, affiliate content, traffic/leads, promotions, resources/events/workshops, Stories, Reels and videos. `FULL_AI_GRAPHIC` is allowed for eligible non-product Stories: all approved frame text, sequence labels, CTA and disclaimer are rendered inside the original AI image, independently validated and passed through without a programmatic pixel overlay. Authentic product/affiliate creatives resolve to exact-overlay mode so verified catalogue pixels and mandatory disclosure treatment remain deterministic. A manually requested ineligible mode returns `social_visual_mode_ineligible`. During weekly planning, an ineligible default is visibly resolved to exact-overlay mode with its reason before approval. For artwork-only, the system preserves both the OpenAI original and normalized final, validates that no text/logo/watermark is visible, and retries only the failing image. Stories always keep required disclosure/CTA text on-frame.
+All new generation and regeneration requires the canonical badge. A saved or explicit artwork-only request resolves to `AI_BRANDED_ARTWORK` during weekly planning or returns `social_visual_mode_ineligible` with `BRAND_LOGO_REQUIRED` for strict manual requests. `FULL_AI_GRAPHIC` Stories bake approved frame copy, sequence labels, CTA and disclaimer into the generated image. Product and affiliate creatives retain authentic catalogue pixels through guarded local placement over a referenced branded background.
 
-New `FULL_AI_GRAPHIC` assets use contract version 2. The complete ordered visible-text manifest is included in the image prompt and independently validated after normalization for exact text, Pink Paisa identity, mobile legibility, safe area, unapproved text and unrelated marks. The normalized AI bytes are the final image bytes: provenance must show `renderer: openai_generated_graphic_passthrough`, `overlay.method: none`, `pixel_overlay_applied: false` and `normalization.renderer: sharp_resize_encode_only_v1`. Historical contract-version-1 assets remain readable and are labelled as an AI-rendered headline with a branded overlay finish; they are not relabelled as overlay-free.
+New `FULL_AI_GRAPHIC` assets use contract version 3. Their ordinary text manifest excludes the brand name because badge identity is validated separately. Every publishable image, carousel slide, Story frame, Reel cover and generated video scene must show `Logo · AI-rendered from approved reference — validated`, while provenance states `Post-generation logo overlay · None`. A draft-level pass appears only when every required asset or final-video scene passes. Historical contract-version-1/2 assets remain readable and keep their original labels.
 
 ### Pink Paisa creative system
 
@@ -60,7 +61,7 @@ Required components must appear exactly once and the assembled result must be at
 - Weekly approval either approves and queues every selected item in one transaction, or rolls back the entire change and leaves the plan in `NEEDS_REVIEW`.
 - A failed item exposes its specific retry; successful or already-queued items are reused idempotently.
 - **Approve & schedule** validates compliance, caption checksum, assets/provenance, visual eligibility, future time and weekly capacity before one transaction. A failure leaves draft, assets, weekly plan and audit history unchanged.
-- Caption-only edits retain imagery, increment the revision, rerun checks and return directly to `NEEDS_REVIEW`. Exact-overlay on-image copy edits recompose from the retained original without a new image call. Because native v2 text is part of the AI-rendered pixels, changing its on-image text requires generation and validation of a fresh AI-native image; it must never be patched with a manual overlay. Carousel recovery can target one slide.
+- Caption-only edits retain imagery, increment the revision, rerun checks and return directly to `NEEDS_REVIEW`. Exact-overlay on-image copy edits recompose from the retained original without a new image call. Because native v3 text is part of the AI-rendered pixels, changing its on-image text requires generation and validation of a fresh AI-native image; it must never be patched with a manual overlay. Historical native v2 assets keep their original contract. Carousel recovery can target one slide.
 - Selecting a different rights-confirmed Reel/Video Feed track in the review drawer rebuilds from retained frames, invalidates prior approval and returns directly to review without an image-generation call.
 - `PUBLISHING` is wait-only. Publishing errors arrive on a generic `FAILED` draft with `last_error.stage` and publication status (`FAILED`, `BLOCKED`, or `UNCERTAIN`) identifying the recovery path; never create a duplicate publish blindly.
 
@@ -86,7 +87,7 @@ Weekly Strategy is the control point for the next Asia/Kolkata week.
 2. While the plan is queued/running, watch its automatically loaded state instead of requesting another plan.
 3. Review the research summary, audience problem/opportunity, previous performance, candidate set, selection rationale, content balance, proposed formats and slots.
 4. Confirm that each claim is supported by its cited source or verified Pink Paisa fact. Weak/unconfirmed signals must not be promoted into factual timely claims.
-5. Confirm the selected feed set does not exceed the displayed weekly maximum. The current default is three; Stories do not count under the present rule.
+5. Confirm the selected feed set does not exceed the displayed weekly maximum. The current default is five; Stories do not count under the present rule.
 6. If one selected idea is weak, use **Replace this slot** to choose an unused retained candidate. The slot number and posting time remain frozen; this is allowed only before approval and before production exists.
 7. Select **Approve plan & start generation** only when the mix, effective visual modes and schedule are acceptable. Reject with a specific reason when the strategy needs revision.
 8. The approval response shows requested, queued and reused runs. Use per-item production only as a visible retry when one item has failed.
@@ -126,7 +127,7 @@ Inspect:
 - token/image usage and estimated cost, remembering that a zero price configuration means cost is unknown rather than free;
 - one compliance decision and every required revision;
 - format-specific fields rather than a flattened generic caption;
-- the retained provider original and normalized image beside the truthful final mode (verified overlay, artwork-only, AI-native v2 with no overlay, or historical v1 branded finish);
+- the retained provider original and normalized image beside the truthful final mode (verified-copy overlay with an AI-baked badge, branded artwork, AI-native v3 with no overlay, or its accurately labelled historical contract);
 - asset provenance, rights status and validation result.
 
 An original image is not automatically publication-safe. Check anatomy/product fidelity, logos, text-like artifacts, sensitive depictions and usage rights. The final asset must carry exact approved text/disclosure without obscuring important content.

@@ -103,6 +103,7 @@ try {
     "server/models/SocialOAuthState.js",
     "server/services/social/socialAudioLibraryService.js",
     "server/services/social/socialAiImageService.js",
+    "server/services/social/socialBrandLogoPolicy.js",
     "server/services/social/socialContentIntegrity.js",
     "server/services/social/socialFailureRecoveryService.js",
     "server/services/social/socialManagerService.js",
@@ -115,6 +116,8 @@ try {
     "server/models/SocialResearchSource.js",
     "server/utils/socialManagerSettings.js",
     "server/routes/socialMediaManager.js",
+    "frontend-next/src/assets/pink-paisa-logo.png",
+    "frontend-next/public/pink-paisa-logo.png",
     "deploy/lightsail/server.env.production.example",
     "deploy/lightsail/scripts/backup-social-audio.sh",
     "deploy/lightsail/scripts/restore-social-audio.sh",
@@ -135,6 +138,19 @@ try {
     $stagedPath = Join-Path $staging ($relativePath.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
     if (-not (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
       throw "Deployment archive is missing required fully-AI Social Manager file: $relativePath"
+    }
+  }
+
+  $expectedBadgeHash = "0cf39611014a2e674bec396a43335f023c803aaffb61256c004bfcb6fabc92e9"
+  $badgePaths = @(
+    "frontend-next/src/assets/pink-paisa-logo.png",
+    "frontend-next/public/pink-paisa-logo.png"
+  )
+  foreach ($relativePath in $badgePaths) {
+    $stagedPath = Join-Path $staging ($relativePath.Replace("/", [System.IO.Path]::DirectorySeparatorChar))
+    $actualBadgeHash = (Get-FileHash -LiteralPath $stagedPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualBadgeHash -ne $expectedBadgeHash) {
+      throw "Deployment archive contains a non-canonical Pink Paisa badge at ${relativePath}: ${actualBadgeHash}"
     }
   }
 

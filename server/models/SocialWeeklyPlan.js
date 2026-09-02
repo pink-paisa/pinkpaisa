@@ -11,7 +11,7 @@ const SOCIAL_FORMATS = Object.freeze([
   "WORKSHOP_PROMOTION", "EVENT_OR_WORKSHOP_PROMOTION",
 ]);
 const VISUAL_MODES = Object.freeze([
-  "AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC",
+  "AI_VISUAL_WITH_EXACT_OVERLAY", "AI_BRANDED_ARTWORK", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC",
 ]);
 const BUNDLE_ROLES = Object.freeze(["PARENT_FEED", "COMPANION_STORY", "STANDALONE_STORY"]);
 const SELECTED_POST_STATUSES = Object.freeze([
@@ -128,6 +128,7 @@ const selectedPostSchema = new mongoose.Schema({
   roleInWeeklyMix: { type: String, required: true, enum: ["DISCOVERY", "SAVEABLE_EDUCATION", "ENGAGEMENT", "CONVERSION", "OTHER"], uppercase: true, trim: true },
   candidate: { type: candidateSchema, required: true },
   visual_mode_resolution: { type: visualModeResolutionSchema, default: null },
+  brand_logo_contract: { type: mongoose.Schema.Types.Mixed, default: null },
   status: { type: String, required: true, enum: SELECTED_POST_STATUSES, default: "PLANNED", uppercase: true, trim: true },
   generation_run_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialGenerationRun", default: null },
   draft_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPostDraft", default: null },
@@ -147,6 +148,7 @@ const storyPlanItemSchema = new mongoose.Schema({
   bundleId: { type: String, required: true, trim: true, maxlength: 240 },
   bundleRole: { type: String, required: true, enum: ["COMPANION_STORY", "STANDALONE_STORY"], uppercase: true, trim: true },
   visual_mode_resolution: { type: visualModeResolutionSchema, required: true },
+  brand_logo_contract: { type: mongoose.Schema.Types.Mixed, default: null },
   status: { type: String, required: true, enum: SELECTED_POST_STATUSES, default: "PLANNED", uppercase: true, trim: true },
   generation_run_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialGenerationRun", default: null },
   draft_id: { type: mongoose.Schema.Types.ObjectId, ref: "SocialPostDraft", default: null },
@@ -179,6 +181,7 @@ const SocialWeeklyPlanSchema = new mongoose.Schema({
   status: { type: String, required: true, enum: PLAN_STATUSES, default: "QUEUED", uppercase: true, trim: true, index: true },
   maximum_feed_posts: { type: Number, required: true, default: 5, min: 1, max: 7 },
   config_snapshot: { type: mongoose.Schema.Types.Mixed, default: null, validate: { validator: nullableAggregateOnly, message: "config_snapshot must not contain personal data" } },
+  brand_logo_contract: { type: mongoose.Schema.Types.Mixed, default: null },
   candidates: { type: [candidateSchema], default: [] },
   selected_posts: { type: [selectedPostSchema], default: [] },
   story_plan: { type: [storyPlanItemSchema], default: [] },

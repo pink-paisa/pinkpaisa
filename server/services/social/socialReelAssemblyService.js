@@ -98,6 +98,117 @@ async function runFfmpeg(binary, args, spawnImpl = spawn) {
   });
 }
 
+function sceneMidpointTimestamps(scenes = []) {
+  let cursor = 0;
+  return (Array.isArray(scenes) ? scenes : []).map((scene, sceneIndex) => {
+    const duration = Math.min(Math.max(Number(scene.durationSeconds || scene.duration_seconds || 3), 1), 60);
+    const timestampSeconds = cursor + (duration / 2);
+    cursor += duration;
+    return { scene_index: sceneIndex, timestamp_seconds: timestampSeconds };
+  });
+}
+
+async function extractSceneFrameFromVideo({
+  videoPath,
+  scene,
+  sceneIndex = 0,
+  timestampSeconds = null,
+  dependencies = {},
+} = {}) {
+  const roots = dependencies.allowedRoots || allowedMediaRoots();
+  const input = assertAllowedPath(videoPath, roots);
+  const duration = Math.min(Math.max(Number(scene?.durationSeconds || scene?.duration_seconds || 3), 1), 60);
+  const timestampValue = Number.isFinite(Number(timestampSeconds))
+    ? Number(timestampSeconds)
+    : duration / 2;
+  const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "pinkpaisa-reel-scene-proof-"));
+  try {
+    const framePath = path.join(temporaryDirectory, `scene-${Number(sceneIndex) + 1}.png`);
+    await runFfmpeg(
+      dependencies.ffmpegBinary || process.env.FFMPEG_PATH || "ffmpeg",
+      [
+        "-y",
+        "-ss",
+        String(timestampValue),
+        "-i",
+        input,
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+        framePath,
+      ],
+      dependencies.spawnImpl || spawn,
+    );
+    const buffer = await fsp.readFile(framePath);
+    if (!buffer.length) {
+      const error = new Error(`FFmpeg did not extract a verification frame for scene ${Number(sceneIndex) + 1}`);
+      error.code = "social_reel_logo_frame_missing";
+      throw error;
+    }
+    return {
+      scene_index: Number(sceneIndex),
+      timestamp_seconds: timestampValue,
+      buffer,
+      checksum_sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+    };
+  } finally {
+    await fsp.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => null);
+  }
+}
+
+async function extractSceneFramesFromVideo({
+  videoPath,
+  scenes,
+  dependencies = {},
+} = {}) {
+  const roots = dependencies.allowedRoots || allowedMediaRoots();
+  const input = assertAllowedPath(videoPath, roots);
+  const timestamps = sceneMidpointTimestamps(scenes);
+  if (!timestamps.length) {
+    const error = new Error("A complete scene plan is required to verify the AI-baked badge in the final video");
+    error.code = "social_reel_scenes_missing";
+    throw error;
+  }
+  const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "pinkpaisa-reel-proof-"));
+  try {
+    const frames = [];
+    for (const row of timestamps) {
+      const framePath = path.join(temporaryDirectory, `scene-${row.scene_index + 1}.png`);
+      await runFfmpeg(
+        dependencies.ffmpegBinary || process.env.FFMPEG_PATH || "ffmpeg",
+        [
+          "-y",
+          "-ss",
+          String(row.timestamp_seconds),
+          "-i",
+          input,
+          "-frames:v",
+          "1",
+          "-vf",
+          "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
+          framePath,
+        ],
+        dependencies.spawnImpl || spawn,
+      );
+      const buffer = await fsp.readFile(framePath);
+      if (!buffer.length) {
+        const error = new Error(`FFmpeg did not extract a verification frame for scene ${row.scene_index + 1}`);
+        error.code = "social_reel_logo_frame_missing";
+        throw error;
+      }
+      frames.push({
+        ...row,
+        buffer,
+        checksum_sha256: crypto.createHash("sha256").update(buffer).digest("hex"),
+      });
+    }
+    return frames;
+  } finally {
+    await fsp.rm(temporaryDirectory, { recursive: true, force: true }).catch(() => null);
+  }
+}
+
 async function assembleReel({
   framePaths,
   scenes,
@@ -205,6 +316,8 @@ module.exports = {
   assembleReel,
   buildManualActions,
   buildSrt,
+  extractSceneFrameFromVideo,
+  extractSceneFramesFromVideo,
   timestamp,
   _private: {
     allowedMediaRoots,
@@ -212,5 +325,6 @@ module.exports = {
     escapeConcatPath,
     escapeSubtitleFilterPath,
     runFfmpeg,
+    sceneMidpointTimestamps,
   },
 };

@@ -8,6 +8,10 @@ import {
   SocialAnalyticsSummary,
   SocialAsset,
   SocialAuditEvent,
+  SocialBrandLogoContract,
+  SocialBrandLogoEvidence,
+  SocialBrandLogoSceneEvidence,
+  SocialBrandLogoValidationEvidence,
   SocialCommunityItem,
   SocialConnection,
   SocialConnectionsSnapshot,
@@ -23,6 +27,7 @@ import {
   SocialManualAction,
   SocialReadiness,
   SocialRecommendation,
+  SocialResolvedVisualMode,
   SocialSettings,
   SocialSignal,
   SocialSource,
@@ -94,28 +99,161 @@ const numberMap = (value: unknown): Record<string, number> => Object.fromEntries
     .filter((entry): entry is readonly [string, number] => entry[1] !== null),
 );
 
-const visualMode = (value: unknown, fallback: SocialVisualMode = "AI_VISUAL_WITH_EXACT_OVERLAY"): SocialVisualMode => {
+const visualMode = (value: unknown, fallback: SocialVisualMode = "AI_BRANDED_ARTWORK"): SocialVisualMode => {
   const normalized = string(value).trim().toUpperCase();
-  return ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC"].includes(normalized)
+  return ["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_BRANDED_ARTWORK", "FULL_AI_GRAPHIC"].includes(normalized)
     ? normalized as SocialVisualMode
     : fallback;
 };
 
+const settingsVisualMode = (value: unknown, fallback: SocialVisualMode): SocialVisualMode => (
+  string(value).trim().toUpperCase() === "AI_ARTWORK_ONLY"
+    ? "AI_BRANDED_ARTWORK"
+    : visualMode(value, fallback)
+);
+
 const storedVisualMode = (value: unknown): SocialAsset["visualMode"] => {
   const normalized = string(value).toUpperCase();
-  return normalized === "MANUAL_TEMPLATE" ? "MANUAL_TEMPLATE" : visualMode(normalized);
+  if (normalized === "MANUAL_TEMPLATE" || normalized === "AI_ARTWORK_ONLY") return normalized;
+  return visualMode(normalized, "AI_VISUAL_WITH_EXACT_OVERLAY");
 };
 
-const normalizeVisualModeResolution = (value: unknown, fallback?: SocialVisualMode): SocialVisualModeResolution | null => {
+const resolvedVisualMode = (value: unknown, fallback: SocialResolvedVisualMode = "AI_VISUAL_WITH_EXACT_OVERLAY"): SocialResolvedVisualMode => {
+  const normalized = string(value).trim().toUpperCase();
+  return normalized === "AI_ARTWORK_ONLY" ? normalized : visualMode(normalized, fallback === "AI_ARTWORK_ONLY" ? "AI_BRANDED_ARTWORK" : fallback);
+};
+
+const normalizeVisualModeResolution = (value: unknown, fallback?: SocialResolvedVisualMode): SocialVisualModeResolution | null => {
   const resolution = object(value);
   if (!Object.keys(resolution).length && !fallback) return null;
-  const requested = visualMode(first(resolution, ["requested", "requested_mode", "requestedMode"]), fallback);
-  const effective = visualMode(first(resolution, ["effective", "effective_mode", "effectiveMode"]), fallback || requested);
+  const requested = resolvedVisualMode(first(resolution, ["requested", "requested_mode", "requestedMode"]), fallback);
+  const effective = resolvedVisualMode(first(resolution, ["effective", "effective_mode", "effectiveMode"]), fallback || requested);
   return {
     requested,
     effective,
     eligible: boolean(first(resolution, ["eligible"]), requested === effective),
     reasons: strings(first(resolution, ["reasons", "reason_codes", "reasonCodes"])),
+  };
+};
+
+const normalizeBrandLogoContract = (value: unknown): SocialBrandLogoContract => {
+  const contract = object(value);
+  const acceptedWidthRange = array(first(contract, ["accepted_width_range_px", "acceptedWidthRangePx"]))
+    .map(number)
+    .filter((item): item is number => item !== null);
+  const lockedCorner = first(contract, ["locked_corner", "lockedCorner"]);
+  return {
+    contractVersion: number(first(contract, ["contract_version", "contractVersion"])) ?? DEFAULT_SOCIAL_SETTINGS.brandLogoContract.contractVersion,
+    policyVersion: string(first(contract, ["policy_version", "policyVersion"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.policyVersion),
+    required: boolean(first(contract, ["required", "mandatory"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.required),
+    method: string(first(contract, ["method"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.method),
+    referenceAssetId: string(first(contract, ["reference_asset_id", "referenceAssetId", "asset_id", "assetId"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.referenceAssetId),
+    referenceChecksumSha256: string(first(contract, ["reference_checksum_sha256", "referenceChecksumSha256", "checksum_sha256", "checksumSha256"])),
+    referenceMimeType: string(first(contract, ["reference_mime_type", "referenceMimeType", "mime_type", "mimeType"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.referenceMimeType),
+    referenceWidth: number(first(contract, ["reference_width", "referenceWidth", "width"])) ?? DEFAULT_SOCIAL_SETTINGS.brandLogoContract.referenceWidth,
+    referenceHeight: number(first(contract, ["reference_height", "referenceHeight", "height"])) ?? DEFAULT_SOCIAL_SETTINGS.brandLogoContract.referenceHeight,
+    referenceUrl: portableMediaUrl(first(contract, ["reference_url", "referenceUrl", "asset_url", "assetUrl", "url"])),
+    inputFidelity: string(first(contract, ["input_fidelity", "inputFidelity"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.inputFidelity),
+    placementStrategy: string(first(contract, ["placement_strategy", "placementStrategy"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.placementStrategy),
+    lockedCorner: lockedCorner === null || lockedCorner === undefined || lockedCorner === "" ? null : string(lockedCorner),
+    targetWidthPx: number(first(contract, ["target_width_px", "targetWidthPx"])) ?? DEFAULT_SOCIAL_SETTINGS.brandLogoContract.targetWidthPx,
+    acceptedWidthRangePx: acceptedWidthRange.length
+      ? acceptedWidthRange
+      : [...DEFAULT_SOCIAL_SETTINGS.brandLogoContract.acceptedWidthRangePx],
+    readinessStatus: string(first(contract, ["readiness_status", "readinessStatus", "status"]), DEFAULT_SOCIAL_SETTINGS.brandLogoContract.readinessStatus).toUpperCase(),
+  };
+};
+
+const nullableBoolean = (value: unknown): boolean | null => (
+  value === undefined || value === null || value === "" ? null : boolean(value, false)
+);
+
+const normalizeFinalAssetPreservation = (value: unknown): SocialBrandLogoValidationEvidence["finalAssetPreservation"] => {
+  const preservation = object(value);
+  if (!Object.keys(preservation).length) return null;
+  return {
+    method: string(first(preservation, ["method"])),
+    finalAssetRole: string(first(preservation, ["final_asset_role", "finalAssetRole"])),
+    sourceValidationResponseId: string(first(preservation, ["source_validation_response_id", "sourceValidationResponseId"])),
+    sourceValidatedAssetChecksumSha256: string(first(preservation, ["source_validated_asset_checksum_sha256", "sourceValidatedAssetChecksumSha256"])).toLowerCase(),
+    finalPublishableAssetChecksumSha256: string(first(preservation, ["final_publishable_asset_checksum_sha256", "finalPublishableAssetChecksumSha256"])).toLowerCase(),
+    pixelOverlayApplied: nullableBoolean(first(preservation, ["pixel_overlay_applied", "pixelOverlayApplied"])),
+    programmaticCopyOrBrandPixelsInsideExcludedBox: nullableBoolean(first(preservation, ["programmatic_copy_or_brand_pixels_inside_excluded_box", "programmaticCopyOrBrandPixelsInsideExcludedBox"])),
+    postGenerationLogoOverlayApplied: nullableBoolean(first(preservation, ["post_generation_logo_overlay_applied", "postGenerationLogoOverlayApplied"])),
+  };
+};
+
+const normalizeBrandLogoValidationEvidence = (value: unknown): SocialBrandLogoValidationEvidence => {
+  const evidence = object(value);
+  const boundingBox = object(first(evidence, ["normalized_bounding_box", "normalizedBoundingBox"]));
+  const identityChecks = object(first(evidence, ["identity_checks", "identityChecks"]));
+  return {
+    referenceAssetId: string(first(evidence, ["reference_asset_id", "referenceAssetId"])),
+    referenceChecksumSha256: string(first(evidence, ["reference_checksum_sha256", "referenceChecksumSha256"])),
+    method: string(first(evidence, ["method"])),
+    inputFidelity: string(first(evidence, ["input_fidelity", "inputFidelity"])),
+    generationMethod: string(first(evidence, ["generation_method", "generationMethod"])),
+    referenceValidationMethod: string(first(evidence, ["reference_validation_method", "referenceValidationMethod"])),
+    sourceProvenance: string(first(evidence, ["source_provenance", "sourceProvenance"])),
+    referenceUsedForGeneration: nullableBoolean(first(evidence, ["reference_used_for_generation", "referenceUsedForGeneration"])),
+    referenceUsedForValidation: nullableBoolean(first(evidence, ["reference_used_for_validation", "referenceUsedForValidation"])),
+    validatedAssetChecksumSha256: string(first(evidence, ["validated_asset_checksum_sha256", "validatedAssetChecksumSha256"])).toLowerCase(),
+    validatedAsset: string(first(evidence, ["validated_asset", "validatedAsset"])),
+    requestedCorner: string(first(evidence, ["requested_corner", "requestedCorner"])),
+    observedCorner: string(first(evidence, ["observed_corner", "observedCorner"])),
+    normalizedBoundingBox: Object.keys(boundingBox).length ? {
+      x: number(first(boundingBox, ["x", "left", "min_x", "minX"])),
+      y: number(first(boundingBox, ["y", "top", "min_y", "minY"])),
+      width: number(first(boundingBox, ["width", "w"])),
+      height: number(first(boundingBox, ["height", "h"])),
+    } : null,
+    logoCount: number(first(evidence, ["logo_count", "logoCount"])),
+    identityChecks: identityChecks as SocialBrandLogoValidationEvidence["identityChecks"],
+    validatorModel: string(first(evidence, ["validator_model", "validatorModel"])),
+    validatorResponseId: string(first(evidence, ["validator_response_id", "validatorResponseId"])),
+    outcome: string(first(evidence, ["outcome", "decision", "status"])).toUpperCase(),
+    postGenerationLogoOverlayApplied: nullableBoolean(first(evidence, ["post_generation_logo_overlay_applied", "postGenerationLogoOverlayApplied"])),
+    finalAssetPreservation: normalizeFinalAssetPreservation(first(evidence, ["final_asset_preservation", "finalAssetPreservation"])),
+    registeredMarkRecognizable: nullableBoolean(first(evidence, ["registered_mark_recognizable", "registeredMarkRecognizable"])
+      ?? first(identityChecks, ["registered_mark_recognizable", "registeredMarkRecognizable"])),
+    protectedContentOverlapPresent: nullableBoolean(first(evidence, ["protected_content_overlap_present", "protectedContentOverlapPresent"])
+      ?? first(identityChecks, ["protected_content_overlap_present", "protectedContentOverlapPresent"])),
+    issues: strings(first(evidence, ["issues", "validation_issues", "validationIssues"])),
+  };
+};
+
+const normalizeBrandLogoSceneEvidence = (value: unknown): SocialBrandLogoSceneEvidence => {
+  const row = object(value);
+  const nestedEvidence = object(first(row, ["evidence", "validation", "brand_logo_evidence", "brandLogoEvidence"]));
+  const evidence = Object.keys(nestedEvidence).length ? nestedEvidence : row;
+  return {
+    ...normalizeBrandLogoValidationEvidence(evidence),
+    sceneIndex: number(first(row, ["scene_index", "sceneIndex"]) ?? first(evidence, ["scene_index", "sceneIndex"])),
+    sourceAssetSequence: number(first(row, ["source_asset_sequence", "sourceAssetSequence", "asset_sequence", "assetSequence", "sequence"])
+      ?? first(evidence, ["source_asset_sequence", "sourceAssetSequence", "asset_sequence", "assetSequence", "sequence"])),
+    extractedAtSeconds: number(first(row, ["extracted_at_seconds", "extractedAtSeconds", "timestamp_seconds", "timestampSeconds"])
+      ?? first(evidence, ["extracted_at_seconds", "extractedAtSeconds", "timestamp_seconds", "timestampSeconds"])),
+    extractedFrameChecksumSha256: string(first(row, ["extracted_frame_checksum_sha256", "extractedFrameChecksumSha256", "checksum_sha256", "checksumSha256"])
+      ?? first(evidence, ["extracted_frame_checksum_sha256", "extractedFrameChecksumSha256", "checksum_sha256", "checksumSha256"])),
+  };
+};
+
+const normalizeBrandLogoEvidence = (value: unknown, supplementalSceneEvidence?: unknown): SocialBrandLogoEvidence | null => {
+  const evidence = object(value);
+  const embeddedSceneRows = array(first(evidence, ["scene_evidence", "sceneEvidence"]));
+  const sceneRows = embeddedSceneRows.length ? embeddedSceneRows : array(supplementalSceneEvidence);
+  if (!Object.keys(evidence).length && !sceneRows.length) return null;
+  const firstSceneRow = object(sceneRows[0]);
+  const firstNestedEvidence = object(first(firstSceneRow, ["evidence", "validation", "brand_logo_evidence", "brandLogoEvidence"]));
+  const baseEvidence = Object.keys(evidence).length
+    ? evidence
+    : Object.keys(firstNestedEvidence).length ? firstNestedEvidence : firstSceneRow;
+  return {
+    ...normalizeBrandLogoValidationEvidence(baseEvidence),
+    allScenesPassed: nullableBoolean(first(evidence, ["all_scenes_passed", "allScenesPassed"])),
+    validatedSceneCount: number(first(evidence, ["validated_scene_count", "validatedSceneCount"])),
+    expectedSceneCount: number(first(evidence, ["expected_scene_count", "expectedSceneCount"])),
+    sceneEvidence: sceneRows.map(normalizeBrandLogoSceneEvidence),
   };
 };
 
@@ -278,6 +416,24 @@ const normalizeRecommendation = (value: unknown): SocialRecommendation => {
 const normalizeAsset = (value: unknown): SocialAsset => {
   const asset = object(value);
   const provenance = object(first(asset, ["provenance"]));
+  const normalizedBrandLogoEvidence = normalizeBrandLogoEvidence(
+    first(asset, ["brand_logo_evidence", "brandLogoEvidence"])
+      ?? first(provenance, ["brand_logo_evidence", "brandLogoEvidence", "brand_logo", "brandLogo"])
+      ?? first(object(first(provenance, ["base_image", "baseImage"])), ["brand_logo_evidence", "brandLogoEvidence"]),
+    first(provenance, ["brand_logo_scene_evidence", "brandLogoSceneEvidence"]),
+  );
+  const storyboardRows = array(first(provenance, ["storyboard_frames", "storyboardFrames"])).map(object);
+  const brandLogoEvidence = normalizedBrandLogoEvidence ? {
+    ...normalizedBrandLogoEvidence,
+    sceneEvidence: normalizedBrandLogoEvidence.sceneEvidence.map((scene) => {
+      const mapping = storyboardRows.find((row) => number(first(row, ["scene_index", "sceneIndex"])) === scene.sceneIndex) || {};
+      return {
+        ...scene,
+        sourceAssetSequence: scene.sourceAssetSequence
+          ?? number(first(mapping, ["sequence", "asset_sequence", "assetSequence"])),
+      };
+    }),
+  } : null;
   const original = object(first(asset, ["original_visual", "originalVisual", "ai_visual", "aiVisual"]) ?? first(provenance, ["base_image", "baseImage", "original_visual", "originalVisual"]));
   const finalComposed = object(first(asset, ["final_composed", "finalComposed", "composed_asset", "composedAsset"]));
   const generationAttempt = object(first(asset, ["image_generation", "imageGeneration", "generation"])
@@ -291,7 +447,7 @@ const normalizeAsset = (value: unknown): SocialAsset => {
     id: string(first(asset, ["id", "_id"])) || undefined,
     type: string(first(asset, ["type", "asset_type", "assetType"]), "creative"),
     role: string(first(asset, ["role", "asset_role", "assetRole"]), "FINAL_COMPOSED"),
-    slideNumber: number(first(asset, ["slide_number", "slideNumber"])),
+    slideNumber: number(first(asset, ["slide_number", "slideNumber", "frame_number", "frameNumber", "asset_sequence", "assetSequence", "sequence"])),
     url: portableMediaUrl(first(finalComposed, ["url", "public_url", "publicUrl"]) ?? first(asset, ["url", "public_url", "publicUrl", "asset_url", "assetUrl"])),
     previewUrl: portableMediaUrl(first(finalComposed, ["preview_url", "previewUrl", "url"]) ?? first(asset, ["preview_url", "previewUrl", "thumbnail_url", "thumbnailUrl", "url", "public_url"])),
     originalUrl: portableMediaUrl(first(original, ["url", "source_url", "sourceUrl", "public_url", "publicUrl", "original_asset_url", "originalAssetUrl"])
@@ -318,8 +474,10 @@ const normalizeAsset = (value: unknown): SocialAsset => {
       ?? first(original, ["status", "generation_status", "generationStatus"])),
     generationAttempts: number(first(asset, ["image_attempt_count", "imageAttemptCount", "image_retry_number", "imageRetryNumber"])
       ?? first(generationAttempt, ["attempt_count", "attemptCount", "attempts"])) ?? 0,
+    checksumSha256: string(first(asset, ["checksum_sha256", "checksumSha256"])).toLowerCase(),
     sourceProvenance: string(first(asset, ["source_provenance", "sourceProvenance"]) ?? first(original, ["source_provenance", "sourceProvenance"])),
     provenance,
+    brandLogoEvidence,
     status: string(first(asset, ["status", "validation_status", "validationStatus"]), "draft"),
     manualReviewRequired: boolean(first(asset, ["manual_review_required", "manualReviewRequired"]), false),
     manualReviewStatus: string(first(asset, ["manual_review_status", "manualReviewStatus"])),
@@ -389,13 +547,16 @@ export const normalizeGenerationRun = (value: unknown): SocialGenerationRun | nu
 
   return {
     id: string(first(run, ["id", "_id"])),
+    brandLogoContract: Object.keys(object(first(run, ["brand_logo_contract", "brandLogoContract"]))).length
+      ? normalizeBrandLogoContract(first(run, ["brand_logo_contract", "brandLogoContract"]))
+      : null,
     status,
     currentStage: string(first(run, ["current_stage", "currentStage"])),
     generationRequest: Object.keys(generationRequest).length ? {
       requestedFormat: string(first(generationRequest, ["requested_format", "requestedFormat"]), "AUTO_CHOOSE") as NonNullable<SocialGenerationRun["generationRequest"]>["requestedFormat"],
       requestedPostType: string(first(generationRequest, ["requested_post_type", "requestedPostType"])),
       generationScope: string(first(generationRequest, ["generation_scope", "generationScope"]), "FULL_POST") as NonNullable<SocialGenerationRun["generationRequest"]>["generationScope"],
-      visualMode: string(first(generationRequest, ["visual_mode", "visualMode"]), "AI_VISUAL_WITH_EXACT_OVERLAY") as NonNullable<SocialGenerationRun["generationRequest"]>["visualMode"],
+      visualMode: resolvedVisualMode(first(generationRequest, ["visual_mode", "visualMode"])),
       adminInstructions: string(first(generationRequest, ["admin_instructions", "adminInstructions"])),
       verifiedProductId: string(first(generationRequest, ["verified_product_id", "verifiedProductId"])),
       requestId: string(first(generationRequest, ["request_id", "requestId"])),
@@ -541,6 +702,8 @@ export const normalizeDraft = (value: unknown): SocialDraft | null => {
   const manualActions = array(first(draft, ["manual_actions", "manualActions"])).map(normalizeManualAction);
   const captionContract = object(first(draft, ["caption_contract", "captionContract"]));
   const captionComponents = object(first(captionContract, ["components"]));
+  const brandLogoContractSource = first(draft, ["brand_logo_contract", "brandLogoContract"])
+    ?? first(contentPackage, ["brand_logo_contract", "brandLogoContract"]);
 
   return {
     id,
@@ -553,8 +716,11 @@ export const normalizeDraft = (value: unknown): SocialDraft | null => {
     fullAiReady: boolean(first(draft, ["full_ai_ready", "fullAiReady"]), false),
     visualModeResolution: normalizeVisualModeResolution(
       first(draft, ["visual_mode_resolution", "visualModeResolution"]),
-      visualMode(first(draft, ["visual_mode", "visualMode"])),
+      resolvedVisualMode(first(draft, ["visual_mode", "visualMode"])),
     ),
+    brandLogoContract: Object.keys(object(brandLogoContractSource)).length
+      ? normalizeBrandLogoContract(brandLogoContractSource)
+      : null,
     primary: {
       ...primary,
       sources: primary.sources.length ? primary.sources : sources,
@@ -791,6 +957,9 @@ export const normalizeWeeklyPlanResponse = (value: unknown): SocialWeeklyPlan | 
   const contentMix = object(contentMixValue);
   return {
     id: string(first(plan, ["id", "_id"])),
+    brandLogoContract: Object.keys(object(first(plan, ["brand_logo_contract", "brandLogoContract"]))).length
+      ? normalizeBrandLogoContract(first(plan, ["brand_logo_contract", "brandLogoContract"]))
+      : null,
     status: string(first(plan, ["status"]), "PLANNED").toUpperCase(),
     weekStart: string(first(plan, ["week_start", "weekStart", "start_date", "startDate"])),
     weekEnd: string(first(plan, ["week_end", "weekEnd", "end_date", "endDate"])),
@@ -1221,6 +1390,12 @@ export const normalizeSettingsResponse = (value: unknown): { settings: SocialSet
   const response = object(object(value).data || value);
   const raw = object(first(response, ["settings", "social_manager_settings", "socialManagerSettings"]) || response);
   const brand = object(first(raw, ["brand_profile", "brandProfile"]));
+  const visualBrand = object(first(raw, ["visual_brand", "visualBrand"]));
+  const brandLogoContract = normalizeBrandLogoContract(
+    first(raw, ["brand_logo_contract", "brandLogoContract"])
+      ?? first(visualBrand, ["logo_policy", "logoPolicy", "brand_logo_contract", "brandLogoContract"])
+      ?? first(response, ["brand_logo_contract", "brandLogoContract"]),
+  );
   const generation = object(first(raw, ["generation"]));
   const dailyGeneration = object(first(raw, ["daily_generation", "dailyGeneration"]));
   const defaultPosting = object(first(raw, ["default_posting_time", "defaultPostingTime"]));
@@ -1268,6 +1443,7 @@ export const normalizeSettingsResponse = (value: unknown): { settings: SocialSet
   const settings: SocialSettings = {
     raw: JSON.parse(JSON.stringify(raw)),
     brandProfile: string(first(brand, ["promise", "positioning"]) ?? first(raw, ["brand_profile_text", "brandProfileText"]), DEFAULT_SOCIAL_SETTINGS.brandProfile),
+    brandLogoContract,
     targetAudience: strings(first(brand, ["primary_audience", "primaryAudience"]) ?? first(raw, ["target_audience", "targetAudience"])).join("\n") || DEFAULT_SOCIAL_SETTINGS.targetAudience,
     contentPillars,
     dailyGenerationTime: clock(dailyGeneration, string(first(raw, ["daily_generation_time", "dailyGenerationTime"]), DEFAULT_SOCIAL_SETTINGS.dailyGenerationTime)),
@@ -1290,7 +1466,7 @@ export const normalizeSettingsResponse = (value: unknown): { settings: SocialSet
     allowTemplateVisualFallback: boolean(first(generation, ["allow_template_only_visual_fallback", "allowTemplateOnlyVisualFallback"]), DEFAULT_SOCIAL_SETTINGS.allowTemplateVisualFallback),
     maxContentRevisions: number(first(generation, ["max_content_revisions", "maxContentRevisions"])) ?? DEFAULT_SOCIAL_SETTINGS.maxContentRevisions,
     maxImageRetries: number(first(generation, ["max_image_retries", "maxImageRetries"])) ?? DEFAULT_SOCIAL_SETTINGS.maxImageRetries,
-    defaultVisualMode: string(first(generation, ["default_visual_mode", "defaultVisualMode"]), DEFAULT_SOCIAL_SETTINGS.defaultVisualMode) as SocialSettings["defaultVisualMode"],
+    defaultVisualMode: settingsVisualMode(first(generation, ["default_visual_mode", "defaultVisualMode"]), DEFAULT_SOCIAL_SETTINGS.defaultVisualMode),
     monthlyCostLimit: number(first(costControls, ["monthly_budget_inr", "monthlyBudgetInr"]) ?? first(raw, ["monthly_cost_limit", "monthlyCostLimit"])) ?? DEFAULT_SOCIAL_SETTINGS.monthlyCostLimit,
     duplicateLookbackDays: number(first(duplicatePrevention, ["lookback_days", "lookbackDays"]) ?? first(raw, ["duplicate_lookback_days", "duplicateLookbackDays"])) ?? DEFAULT_SOCIAL_SETTINGS.duplicateLookbackDays,
     financialDisclaimer: string(first(disclosures, ["financial_disclaimer", "financialDisclaimer"]) ?? first(raw, ["financial_disclaimer", "financialDisclaimer"]), DEFAULT_SOCIAL_SETTINGS.financialDisclaimer),
@@ -1595,7 +1771,7 @@ export const regenerationPayload = (value: unknown) => {
       : {}),
     ...(targetFormat ? { target_format: targetFormat as SocialFormat } : {}),
     ...(first(request, ["visual_mode", "visualMode"])
-      ? { visual_mode: string(first(request, ["visual_mode", "visualMode"])).toUpperCase() }
+      ? { visual_mode: visualMode(first(request, ["visual_mode", "visualMode"])) }
       : {}),
     ...(number(first(request, ["asset_sequence", "assetSequence"]))
       ? { asset_sequence: number(first(request, ["asset_sequence", "assetSequence"])) as number }
@@ -1605,6 +1781,10 @@ export const regenerationPayload = (value: unknown) => {
 
 export const settingsPayload = (settings: SocialSettings) => {
   const raw = JSON.parse(JSON.stringify(settings.raw || {})) as UnknownRecord;
+  // Live verification fields are response-only. Never echo an enriched root
+  // contract (including its temporary reference URL/status) into a settings save.
+  delete raw.brand_logo_contract;
+  delete raw.brandLogoContract;
   const [generationHour, generationMinute] = settings.dailyGenerationTime.split(":").map(Number);
   const [postingHour, postingMinute] = settings.defaultPostingTime.split(":").map(Number);
   const [planningHour, planningMinute] = settings.weeklyPlanningTime.split(":").map(Number);
@@ -1632,6 +1812,7 @@ export const settingsPayload = (settings: SocialSettings) => {
     pillar.enabled ? pillar.ratio : 0,
   ]));
   const brand = object(raw.brand_profile);
+  const visualBrand = object(raw.visual_brand);
   const generation = object(raw.generation);
   const research = object(raw.research);
   const watchlists = object(raw.watchlists);
@@ -1644,8 +1825,30 @@ export const settingsPayload = (settings: SocialSettings) => {
   const weeklyPlanning = object(raw.weekly_planning);
   const community = object(raw.community);
   const analytics = object(raw.analytics);
+  const brandLogoPayload = {
+    contract_version: settings.brandLogoContract.contractVersion,
+    policy_version: settings.brandLogoContract.policyVersion,
+    required: true,
+    method: settings.brandLogoContract.method,
+    reference_asset_id: settings.brandLogoContract.referenceAssetId,
+    reference_checksum_sha256: settings.brandLogoContract.referenceChecksumSha256,
+    reference_mime_type: settings.brandLogoContract.referenceMimeType,
+    reference_width: settings.brandLogoContract.referenceWidth,
+    reference_height: settings.brandLogoContract.referenceHeight,
+    input_fidelity: settings.brandLogoContract.inputFidelity,
+    placement_strategy: settings.brandLogoContract.placementStrategy,
+    locked_corner: null,
+    target_width_px: settings.brandLogoContract.targetWidthPx,
+    accepted_width_range_px: settings.brandLogoContract.acceptedWidthRangePx,
+    readiness_status: "VERIFY_BEFORE_GENERATION",
+  };
   return {
     ...raw,
+    visual_brand: {
+      ...visualBrand,
+      use_logo: true,
+      logo_policy: brandLogoPayload,
+    },
     brand_profile: {
       ...brand,
       promise: settings.brandProfile,

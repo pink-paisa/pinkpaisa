@@ -1,4 +1,5 @@
 import { SocialAsset, SocialDraft, SocialGenerationRun, SocialReadiness } from "./types";
+import { aggregateBrandLogoEvidence } from "./socialBrandLogo";
 
 export type DraftWorkflowAction =
   | "save"
@@ -130,12 +131,14 @@ export const provenanceLabels = (draft: SocialDraft): string[] => {
 
   const mode = String(draft.visualMode || assetMode(image || {} as SocialAsset)).toUpperCase();
   if (mode === "AI_ARTWORK_ONLY") labels.push("Artwork · AI — No overlay");
+  if (mode === "AI_BRANDED_ARTWORK") labels.push("Artwork · AI — Approved logo reference baked in");
   if (mode === "AI_VISUAL_WITH_EXACT_OVERLAY") labels.push("Text · Verified overlay");
   if (mode === "FULL_AI_GRAPHIC") {
     if (assets.some(isAiNativeFullGraphicAsset)) labels.push(AI_NATIVE_FULL_GRAPHIC_LABEL);
     else labels.push("Headline · AI-rendered and validated", "Brand elements · Overlay");
   }
   if (mode === "MANUAL_TEMPLATE") labels.push("Legacy · Manual template");
+  labels.push(...aggregateBrandLogoEvidence(assets, draft.brandLogoContract).labels);
   const creativeStyle = assets.map(assetCreativeStyle).find(Boolean);
   if (creativeStyle === "EDITORIAL_ICON_GRID") labels.push("Style · Editorial icon grid");
   if (creativeStyle === "BOLD_EDITORIAL_COLLAGE") labels.push("Style · Bold editorial collage");

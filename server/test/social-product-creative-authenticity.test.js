@@ -6,6 +6,10 @@ const sharp = require("sharp");
 
 const { callOpenAiImage } = require("../services/social/socialAiImageService");
 const {
+  CANONICAL_BRAND_BADGE_SHA256,
+  buildBrandLogoContract,
+} = require("../services/social/socialBrandLogoPolicy");
+const {
   compositeAuthenticProduct,
   downloadAllowlistedProductImage,
   resolveVerifiedProductRecord,
@@ -27,16 +31,22 @@ async function pngBuffer({ width = 240, height = 320, alpha = 1 } = {}) {
   }).png().toBuffer();
 }
 
-test("OpenAI product-image path generates a background and never calls the reference-edit endpoint", async () => {
+test("OpenAI product-image path edits only with the canonical logo and never uploads authentic product bytes", async () => {
   let generated = 0;
   let edited = 0;
   const payloads = [];
+  const productReference = await pngBuffer();
+  const brandLogoContract = await buildBrandLogoContract({
+    draftLike: { idempotency_key: "product-logo-reference-test" },
+    recommendation: { format: "PRODUCT_FEATURE", topic: "Authentic product" },
+  });
+  let uploadedBytes = null;
   const result = await callOpenAiImage({
     model: "gpt-image-2",
     prompt: "Generate only a text-free product-free background.",
     size: "1088x1360",
     quality: "medium",
-    reference: { buffer: await pngBuffer() },
+    brandLogoContract,
     dependencies: {
       openaiClient: {
         images: {
@@ -45,18 +55,25 @@ test("OpenAI product-image path generates a background and never calls the refer
             payloads.push(payload);
             return { id: "background-response", data: [{ b64_json: Buffer.from("background-bytes").toString("base64") }] };
           },
-          edit: async () => {
+          edit: async (payload) => {
             edited += 1;
-            throw new Error("Authentic product pixels must never reach images.edit");
+            payloads.push(payload);
+            return { id: "background-response", data: [{ b64_json: Buffer.from("background-bytes").toString("base64") }] };
           },
         },
+      },
+      toOpenAiFile: async (buffer) => {
+        uploadedBytes = buffer;
+        return { canonicalLogoUpload: true };
       },
     },
   });
 
-  assert.equal(generated, 1);
-  assert.equal(edited, 0);
-  assert.equal(Object.hasOwn(payloads[0], "image"), false);
+  assert.equal(generated, 0);
+  assert.equal(edited, 1);
+  assert.equal(Object.hasOwn(payloads[0], "input_fidelity"), false);
+  assert.equal(checksum(uploadedBytes), CANONICAL_BRAND_BADGE_SHA256);
+  assert.equal(uploadedBytes.equals(productReference), false);
   assert.equal(result.buffer.toString(), "background-bytes");
 });
 

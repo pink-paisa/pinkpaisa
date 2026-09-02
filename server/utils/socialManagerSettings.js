@@ -3,6 +3,24 @@ const AdminSettings = require("../models/AdminSettings");
 const SOCIAL_MANAGER_SETTINGS_KEY = "social_media_manager";
 const SOCIAL_MANAGER_TIMEZONE = "Asia/Kolkata";
 const SETTINGS_CACHE_MS = 30 * 1000;
+const REQUIRED_BRAND_LOGO_POLICY = Object.freeze({
+  contract_version: 1,
+  policy_version: "pink-paisa-mandatory-ai-baked-v1",
+  required: true,
+  method: "AI_REFERENCE_BAKED",
+  reference_asset_id: "pink-paisa-profile-badge-v1",
+  reference_url: "/pink-paisa-logo.png",
+  reference_checksum_sha256: "0cf39611014a2e674bec396a43335f023c803aaffb61256c004bfcb6fabc92e9",
+  reference_mime_type: "image/png",
+  reference_width: 512,
+  reference_height: 512,
+  input_fidelity: "high",
+  placement_strategy: "ADAPTIVE_SAFE_CORNER_LOCKED_PER_DRAFT",
+  locked_corner: null,
+  target_width_px: 210,
+  accepted_width_range_px: Object.freeze([180, 240]),
+  readiness_status: "VERIFY_BEFORE_GENERATION",
+});
 
 const CONTENT_PILLAR_KEYS = [
   "money_education",
@@ -36,6 +54,7 @@ const SOCIAL_OBJECTIVES = Object.freeze([
 
 const SOCIAL_VISUAL_MODES = Object.freeze([
   "AI_VISUAL_WITH_EXACT_OVERLAY",
+  "AI_BRANDED_ARTWORK",
   "AI_ARTWORK_ONLY",
   "FULL_AI_GRAPHIC",
   "MANUAL_TEMPLATE",
@@ -90,7 +109,7 @@ const SOCIAL_SERIES_KEYS = Object.freeze([
 const SOCIAL_HOOK_FORMULA = Object.freeze(["HOOK", "TENSION", "VALUE", "IDENTITY", "CTA"]);
 
 const DEFAULT_SOCIAL_MANAGER_SETTINGS = Object.freeze({
-  settings_version: 4,
+  settings_version: 5,
   feature_enabled: true,
   brand_profile: {
     name: "Pink Paisa",
@@ -137,6 +156,7 @@ const DEFAULT_SOCIAL_MANAGER_SETTINGS = Object.freeze({
     text_color: "#30282B",
     secondary_color: "#8BA888",
     use_logo: true,
+    logo_policy: REQUIRED_BRAND_LOGO_POLICY,
   },
   business_priorities: [],
   important_dates: [],
@@ -568,7 +588,7 @@ function normaliseSocialManagerSettings(input = {}) {
   );
 
   return {
-    settings_version: 4,
+    settings_version: 5,
     feature_enabled: parseBoolean(merged.feature_enabled, defaults.feature_enabled),
     brand_profile: {
       name: normalizeString(merged.brand_profile.name, defaults.brand_profile.name, 100),
@@ -609,7 +629,13 @@ function normaliseSocialManagerSettings(input = {}) {
         defaults.visual_brand.secondary_color,
         20
       ).toUpperCase(),
-      use_logo: parseBoolean(merged.visual_brand.use_logo, defaults.visual_brand.use_logo),
+      // The legacy flag remains readable for old clients, but generation policy
+      // is fail-closed and cannot be switched off.
+      use_logo: true,
+      logo_policy: {
+        ...REQUIRED_BRAND_LOGO_POLICY,
+        accepted_width_range_px: [...REQUIRED_BRAND_LOGO_POLICY.accepted_width_range_px],
+      },
     },
     business_priorities: normalizeStringArray(merged.business_priorities, [], 20, 500),
     important_dates: normalizeImportantDates(merged.important_dates),
@@ -653,9 +679,11 @@ function normaliseSocialManagerSettings(input = {}) {
       ),
       max_content_revisions: clampInteger(merged.generation.max_content_revisions, 3, 1, 3),
       max_image_retries: clampInteger(merged.generation.max_image_retries, 3, 1, 3),
-      default_visual_mode: SOCIAL_VISUAL_MODES.includes(merged.generation.default_visual_mode)
-        ? merged.generation.default_visual_mode
-        : defaults.generation.default_visual_mode,
+      default_visual_mode: merged.generation.default_visual_mode === "AI_ARTWORK_ONLY"
+        ? "AI_BRANDED_ARTWORK"
+        : SOCIAL_VISUAL_MODES.includes(merged.generation.default_visual_mode)
+          ? merged.generation.default_visual_mode
+          : defaults.generation.default_visual_mode,
       fallback_mode: "DISABLED",
     },
     daily_generation: {
@@ -907,14 +935,33 @@ function validateSocialManagerSettings(input, { partial = false } = {}) {
     }
   }
 
-  if (input.settings_version !== undefined && ![2, 3, 4].includes(Number(input.settings_version))) {
-    issues.push("settings_version must be 2, 3, or 4");
+  if (input.settings_version !== undefined && ![2, 3, 4, 5].includes(Number(input.settings_version))) {
+    issues.push("settings_version must be 2, 3, 4, or 5");
   }
   if (input.weekly_planning?.companion_stories_enabled === false && Number(input.settings_version || 4) >= 4) {
     issues.push("weekly_planning.companion_stories_enabled cannot be disabled for the approved daily Story cadence");
   }
   if (input.approval?.require_human_approval === false) {
     issues.push("approval.require_human_approval cannot be disabled");
+  }
+  if (input.visual_brand?.use_logo === false) {
+    issues.push("visual_brand.use_logo cannot be disabled");
+  }
+  if (input.generation?.default_visual_mode === "AI_ARTWORK_ONLY") {
+    issues.push(
+      "generation.default_visual_mode cannot be AI_ARTWORK_ONLY because BRAND_LOGO_REQUIRED; use AI_BRANDED_ARTWORK"
+    );
+  }
+  const logoPolicy = input.visual_brand?.logo_policy;
+  if (logoPolicy && isPlainObject(logoPolicy)) {
+    for (const [key, expected] of Object.entries(REQUIRED_BRAND_LOGO_POLICY)) {
+      if (logoPolicy[key] === undefined) continue;
+      const actual = logoPolicy[key];
+      const matches = Array.isArray(expected)
+        ? JSON.stringify(actual) === JSON.stringify(expected)
+        : actual === expected;
+      if (!matches) issues.push(`visual_brand.logo_policy.${key} is locked by the mandatory brand policy`);
+    }
   }
   if (input.research?.require_source_for_current_claims === false) {
     issues.push("research.require_source_for_current_claims cannot be disabled");
@@ -1526,6 +1573,7 @@ function buildSocialManagerRuntimeSettings(input = {}) {
       text_color: settings.visual_brand.text_color,
       secondary_color: settings.visual_brand.secondary_color,
       use_logo: settings.visual_brand.use_logo,
+      logo_policy: clone(settings.visual_brand.logo_policy),
     },
     publishing_enabled: settings.publishing.enabled,
     auto_publish: settings.publishing.auto_publish,
@@ -1651,6 +1699,7 @@ module.exports = {
   DEFAULT_GROWTH_CONTENT_MIX,
   GROWTH_CONTENT_MIX_KEYS,
   DEFAULT_SOCIAL_MANAGER_SETTINGS,
+  REQUIRED_BRAND_LOGO_POLICY,
   SETTINGS_CACHE_MS,
   SOCIAL_MANAGER_SETTINGS_KEY,
   SOCIAL_MANAGER_TIMEZONE,

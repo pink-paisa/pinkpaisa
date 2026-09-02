@@ -3,7 +3,100 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SocialToday } from "./SocialToday";
 import { normalizeDraft } from "./adapters";
-import { EMPTY_READINESS } from "./types";
+import {
+  EMPTY_READINESS,
+  SocialBrandLogoContract,
+  SocialBrandLogoEvidence,
+  SocialBrandLogoSceneEvidence,
+} from "./types";
+
+const logoChecksum = "0cf39611014a2e674bec396a43335f023c803aaffb61256c004bfcb6fabc92e9";
+const validatedBaseChecksum = "a".repeat(64);
+const finalAssetChecksum = "b".repeat(64);
+const readyLogoContract: SocialBrandLogoContract = {
+  contractVersion: 1,
+  policyVersion: "pink-paisa-mandatory-ai-baked-v1",
+  required: true,
+  method: "AI_REFERENCE_BAKED",
+  referenceAssetId: "pink-paisa-profile-badge-v1",
+  referenceChecksumSha256: logoChecksum,
+  referenceMimeType: "image/png",
+  referenceWidth: 512,
+  referenceHeight: 512,
+  referenceUrl: "/pink-paisa-logo.png",
+  inputFidelity: "high",
+  placementStrategy: "ADAPTIVE_SAFE_CORNER_LOCKED_PER_DRAFT",
+  lockedCorner: "TOP_RIGHT",
+  targetWidthPx: 210,
+  acceptedWidthRangePx: [180, 240],
+  readinessStatus: "READY",
+};
+const passedLogoEvidence = (outcome = "PASS"): SocialBrandLogoEvidence => ({
+  referenceAssetId: readyLogoContract.referenceAssetId,
+  referenceChecksumSha256: logoChecksum,
+  method: "AI_REFERENCE_BAKED",
+  inputFidelity: "high",
+  generationMethod: "openai_images_edit_reference",
+  referenceValidationMethod: "",
+  sourceProvenance: "generated_from_approved_source",
+  referenceUsedForGeneration: true,
+  referenceUsedForValidation: true,
+  validatedAssetChecksumSha256: validatedBaseChecksum,
+  validatedAsset: "openai_normalized_final",
+  requestedCorner: "TOP_RIGHT",
+  observedCorner: "TOP_RIGHT",
+  normalizedBoundingBox: { x: 0.72, y: 0.03, width: 0.2, height: 0.2 },
+  logoCount: 1,
+  identityChecks: { wording: true, profile: true, colors: true },
+  validatorModel: "gpt-5.6-luna",
+  validatorResponseId: "logo-validation-1",
+  outcome,
+  postGenerationLogoOverlayApplied: false,
+  finalAssetPreservation: {
+    method: "locked_safe_box_overlay_exclusion_v1",
+    finalAssetRole: "final_publishable_asset",
+    sourceValidationResponseId: "logo-validation-1",
+    sourceValidatedAssetChecksumSha256: validatedBaseChecksum,
+    finalPublishableAssetChecksumSha256: finalAssetChecksum,
+    pixelOverlayApplied: null,
+    programmaticCopyOrBrandPixelsInsideExcludedBox: false,
+    postGenerationLogoOverlayApplied: false,
+  },
+  allScenesPassed: null,
+  validatedSceneCount: null,
+  expectedSceneCount: null,
+  sceneEvidence: [],
+});
+
+const passedLogoSceneEvidence = (sceneIndex: number, outcome = "PASS"): SocialBrandLogoSceneEvidence => {
+  const evidence = passedLogoEvidence(outcome);
+  return {
+    referenceAssetId: evidence.referenceAssetId,
+    referenceChecksumSha256: evidence.referenceChecksumSha256,
+    method: evidence.method,
+    inputFidelity: evidence.inputFidelity,
+    generationMethod: evidence.generationMethod,
+    referenceValidationMethod: evidence.referenceValidationMethod,
+    sourceProvenance: evidence.sourceProvenance,
+    referenceUsedForGeneration: evidence.referenceUsedForGeneration,
+    referenceUsedForValidation: evidence.referenceUsedForValidation,
+    validatedAssetChecksumSha256: String(sceneIndex + 1).repeat(64),
+    validatedAsset: evidence.validatedAsset,
+    requestedCorner: evidence.requestedCorner,
+    observedCorner: evidence.observedCorner,
+    normalizedBoundingBox: evidence.normalizedBoundingBox,
+    logoCount: evidence.logoCount,
+    identityChecks: evidence.identityChecks,
+    validatorModel: evidence.validatorModel,
+    validatorResponseId: `logo-scene-validation-${sceneIndex}`,
+    outcome,
+    postGenerationLogoOverlayApplied: false,
+    finalAssetPreservation: null,
+    sceneIndex,
+    extractedAtSeconds: sceneIndex === 0 ? 1.5 : 5,
+    extractedFrameChecksumSha256: String(sceneIndex + 1).repeat(64),
+  };
+};
 
 const renderToday = (
   onGenerate = vi.fn(),
@@ -64,8 +157,12 @@ const fullAiDraft = (provenance: Record<string, unknown>) => {
       image_provider: "OpenAI",
       image_model: "gpt-image-2",
       image_generation_status: "VALIDATED",
+      checksum_sha256: finalAssetChecksum,
       source_provenance: "generated",
-      provenance,
+      provenance: {
+        base_image: { checksum_sha256: validatedBaseChecksum },
+        ...provenance,
+      },
     }],
   });
   if (!draft) throw new Error("The FULL_AI_GRAPHIC fixture must normalize");
@@ -119,14 +216,13 @@ describe("SocialToday generation controls", () => {
     expect(screen.getByRole("button", { name: /Generate Today’s Post/ })).toBeDisabled();
   });
 
-  it("defaults eligible generation to the complete AI-native no-overlay mode", async () => {
+  it("defaults new generation to the server's AI-native complete graphic mode", async () => {
     const user = userEvent.setup();
     const onGenerate = renderToday();
 
     await user.click(screen.getByText("Advanced visual mode"));
     const visualMode = screen.getAllByRole("combobox")[2] as HTMLSelectElement;
     expect(visualMode).toHaveValue("FULL_AI_GRAPHIC");
-    expect(screen.getByRole("option", { name: /AI-native complete graphic.*Recommended, no overlay/i })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: /Generate Today’s Post/ }));
     expect(onGenerate).toHaveBeenCalledWith(expect.objectContaining({
@@ -134,15 +230,34 @@ describe("SocialToday generation controls", () => {
     }));
   });
 
-  it("allows a general Story request to use complete AI-native no-overlay mode", async () => {
+  it("allows AI-branded artwork only for the same explicit format/objective matrix as the server", async () => {
+    const user = userEvent.setup();
+    const onGenerate = renderToday();
+    const selects = screen.getAllByRole("combobox");
+
+    await user.selectOptions(selects[0], "SINGLE_IMAGE");
+    await user.selectOptions(selects[1], "EDUCATION");
+    await user.click(screen.getByText("Advanced visual mode"));
+    expect(screen.getByRole("option", { name: /AI-branded artwork/ })).toBeEnabled();
+    await user.selectOptions(selects[2], "AI_BRANDED_ARTWORK");
+
+    await user.click(screen.getByRole("button", { name: /Generate Today’s Post/ }));
+    expect(onGenerate).toHaveBeenCalledWith(expect.objectContaining({
+      requested_format: "SINGLE_IMAGE",
+      visual_mode: "AI_BRANDED_ARTWORK",
+    }));
+  });
+
+  it("does not send the server-ineligible branded-artwork mode for Stories", async () => {
     const user = userEvent.setup();
     const onGenerate = renderToday();
     const selects = screen.getAllByRole("combobox");
 
     await user.selectOptions(selects[0], "STORY");
+    await user.selectOptions(selects[1], "EDUCATION");
     await user.click(screen.getByText("Advanced visual mode"));
     expect(selects[2]).toHaveValue("FULL_AI_GRAPHIC");
-    expect(screen.getByRole("option", { name: /AI-native complete graphic/ })).toBeEnabled();
+    expect(screen.getByRole("option", { name: /AI-branded artwork/ })).toBeDisabled();
 
     await user.click(screen.getByRole("button", { name: /Generate Today’s Post/ }));
     expect(onGenerate).toHaveBeenCalledWith(expect.objectContaining({
@@ -151,27 +266,140 @@ describe("SocialToday generation controls", () => {
     }));
   });
 
-  it("keeps artwork-only disabled until format and objective are explicitly eligible", async () => {
+  it("never offers legacy artwork-only for a new generation request", async () => {
     const user = userEvent.setup();
-    const onGenerate = renderToday();
-    const selects = screen.getAllByRole("combobox");
-    const artworkOnly = screen.getByRole("option", { name: /AI artwork only/ }) as HTMLOptionElement;
-
-    expect(artworkOnly).toBeDisabled();
+    renderToday();
+    expect(screen.queryByRole("option", { name: /AI artwork only/i })).not.toBeInTheDocument();
     await user.click(screen.getByText("Advanced visual mode"));
-    expect(screen.getByText(/Choose Single Image or Carousel/)).toBeVisible();
+    expect(screen.getByText(/Legacy artwork-only is unavailable for new generation/i)).toBeVisible();
+  });
 
-    await user.selectOptions(selects[0], "SINGLE_IMAGE");
-    await user.selectOptions(selects[1], "EDUCATION");
-    expect(artworkOnly).not.toBeDisabled();
-    await user.selectOptions(selects[2], "AI_ARTWORK_ONLY");
-    await user.click(screen.getByRole("button", { name: /Generate Today’s Post/ }));
+  it("shows approved-reference validation and no-overlay provenance for a fully validated image", () => {
+    const draft = fullAiDraft({ overlay: { method: "none", image_ai_used_for_text: true } });
+    draft.visualMode = "AI_BRANDED_ARTWORK";
+    draft.brandLogoContract = readyLogoContract;
+    draft.assets[0].visualMode = "AI_BRANDED_ARTWORK";
+    draft.assets[0].brandLogoEvidence = passedLogoEvidence();
+    renderReviewDraft(draft);
 
-    expect(onGenerate).toHaveBeenCalledWith(expect.objectContaining({
-      requested_format: "SINGLE_IMAGE",
-      requested_post_type: "EDUCATION",
-      visual_mode: "AI_ARTWORK_ONLY",
+    expect(screen.getAllByText("Logo · AI-rendered from approved reference — validated").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Post-generation logo overlay · None").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Logo · Missing or failed validation")).not.toBeInTheDocument();
+  });
+
+  it("blocks a failed carousel slide and offers targeted slide regeneration", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const draft = fullAiDraft({ overlay: { method: "none", image_ai_used_for_text: true } });
+    draft.visualMode = "AI_BRANDED_ARTWORK";
+    draft.brandLogoContract = readyLogoContract;
+    draft.primary.format = "CAROUSEL";
+    draft.assets = [1, 2].map((slideNumber) => ({
+      ...draft.assets[0],
+      id: `asset-slide-${slideNumber}`,
+      url: `/uploads/social/slide-${slideNumber}.jpg`,
+      finalUrl: `/uploads/social/slide-${slideNumber}.jpg`,
+      previewUrl: `/uploads/social/slide-${slideNumber}.jpg`,
+      slideNumber,
+      visualMode: "AI_BRANDED_ARTWORK",
+      brandLogoEvidence: passedLogoEvidence(slideNumber === 1 ? "PASS" : "FAIL"),
     }));
+    renderReviewDraft(draft, onAction);
+
+    expect(screen.getAllByText("Logo · Missing or failed validation").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Logo · AI-rendered from approved reference — validated").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Post-generation logo overlay · None").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: /Regenerate slide 2 with approved logo/i }));
+    expect(onAction).toHaveBeenCalledWith("regenerate", {
+      scope: "image",
+      asset_sequence: 2,
+      visual_mode: "AI_BRANDED_ARTWORK",
+    });
+  });
+
+  it("renders independent badge-validation status for every final Reel scene", () => {
+    const draft = fullAiDraft({ overlay: { method: "none", image_ai_used_for_text: true } });
+    draft.visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY";
+    draft.brandLogoContract = readyLogoContract;
+    draft.primary.format = "REEL";
+    const sceneEvidence = [passedLogoSceneEvidence(0), passedLogoSceneEvidence(1)];
+    draft.assets = [{
+      ...draft.assets[0],
+      role: "FINAL_VIDEO",
+      type: "reel_video",
+      mediaKind: "VIDEO",
+      mimeType: "video/mp4",
+      url: "/uploads/social/final-reel.mp4",
+      finalUrl: "/uploads/social/final-reel.mp4",
+      previewUrl: "/uploads/social/final-reel.mp4",
+      visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+      brandLogoEvidence: {
+        ...passedLogoEvidence(),
+        allScenesPassed: true,
+        validatedSceneCount: 2,
+        expectedSceneCount: 2,
+        sceneEvidence,
+      },
+    }];
+
+    renderReviewDraft(draft);
+
+    expect(screen.getByRole("region", { name: "Final video logo validation" })).toBeVisible();
+    expect(screen.getByText("2 / 2 scenes validated")).toBeVisible();
+    expect(screen.getByText("Scene 1")).toBeVisible();
+    expect(screen.getByText("Scene 2")).toBeVisible();
+    expect(screen.getByText("Checked at 1.5s")).toBeVisible();
+    expect(screen.getByText("Checked at 5s")).toBeVisible();
+    expect(screen.queryByText(/No final-frame logo evidence/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the missing expected Reel scene, blocks aggregate validation, and targets only that scene", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    const draft = fullAiDraft({ overlay: { method: "none", image_ai_used_for_text: true } });
+    draft.visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY";
+    draft.brandLogoContract = readyLogoContract;
+    draft.primary.format = "REEL";
+    draft.assets = [{
+      ...draft.assets[0],
+      role: "FINAL_VIDEO",
+      type: "reel_video",
+      mediaKind: "VIDEO",
+      mimeType: "video/mp4",
+      url: "/uploads/social/incomplete-reel.mp4",
+      finalUrl: "/uploads/social/incomplete-reel.mp4",
+      previewUrl: "/uploads/social/incomplete-reel.mp4",
+      visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+      brandLogoEvidence: {
+        ...passedLogoEvidence(),
+        allScenesPassed: false,
+        validatedSceneCount: 2,
+        expectedSceneCount: 3,
+        sceneEvidence: [
+          passedLogoSceneEvidence(0),
+          {
+            ...passedLogoSceneEvidence(1, "FAIL"),
+            protectedContentOverlapPresent: true,
+            issues: ["Badge intrudes on the approved scene headline."],
+          },
+        ],
+      },
+    }];
+
+    renderReviewDraft(draft, onAction);
+
+    expect(screen.getByText("2 / 3 scenes validated")).toBeVisible();
+    expect(screen.getByText("Scene 3")).toBeVisible();
+    expect(screen.getByText(/No final-frame logo evidence was returned for this scene/i)).toBeVisible();
+    expect(screen.getByText(/badge overlaps protected copy/i)).toBeVisible();
+    expect(screen.getByText(/Badge intrudes on the approved scene headline/i)).toBeVisible();
+    expect(screen.getAllByText("Logo · Missing or failed validation").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: /Regenerate scene 3 with approved logo/i }));
+    expect(onAction).toHaveBeenCalledWith("regenerate", {
+      scope: "image",
+      asset_sequence: 4,
+      visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    });
   });
 
   it("shows the v2 FULL_AI_GRAPHIC asset as AI-native with no overlay", () => {
@@ -212,7 +440,7 @@ describe("SocialToday generation controls", () => {
     renderReviewDraft(draft, onAction);
 
     await user.click(screen.getByText("Advanced · regeneration and overrides"));
-    await user.click(screen.getByRole("button", { name: /Regenerate as AI-native — no overlay/i }));
+    await user.click(screen.getByRole("button", { name: /Regenerate as AI-native with approved logo/i }));
     expect(onAction).toHaveBeenCalledWith("regenerate", {
       scope: "image",
       visual_mode: "FULL_AI_GRAPHIC",
@@ -236,7 +464,7 @@ describe("SocialToday generation controls", () => {
 
     await user.click(screen.getByText("Advanced · regeneration and overrides"));
     expect(screen.getByText(/preserves its frozen weekly slot, clears the current approval and schedule/i)).toBeVisible();
-    await user.click(screen.getByRole("button", { name: /Regenerate as AI-native — no overlay/i }));
+    await user.click(screen.getByRole("button", { name: /Regenerate as AI-native with approved logo/i }));
     expect(onAction).toHaveBeenCalledWith("regenerate", {
       scope: "image",
       visual_mode: "FULL_AI_GRAPHIC",

@@ -17,6 +17,8 @@ Before the maintenance window:
 - Confirm an audited production `ffmpeg`/`ffprobe` installation, explicit executable paths, and working H.264 video plus AAC audio encoders.
 - Select exactly one Social orchestration schedule owner. Internal PM2 is the default; n8n schedules must remain inactive while the internal owner flag is true.
 - Schedule a human reviewer for the first weekly plan, first creative and first provider publication.
+- Verify both packaged canonical badge copies have SHA-256 `0cf39611014a2e674bec396a43335f023c803aaffb61256c004bfcb6fabc92e9`; a mismatch is a failed release gate.
+- Treat the first feed and multi-frame Story generations as separately authorized paid canaries. Deployment alone must not trigger them.
 
 The weekly feed maximum (default five non-Story feed posts per Asia/Kolkata week) is a business invariant enforced by the server. It is not a request-count limit. Per the administrator directive, there is no Social Media Manager or Instagram-integration request-count throttle; do not add one during deployment or reintroduce the old SMM 429 message.
 
@@ -374,9 +376,13 @@ From the admin, run **Check connections** and require truthful results:
 2. Confirm at least eight materially different candidates and no more than the configured maximum selected feed posts.
 3. Approve the plan and produce one selected post.
 4. Verify AI strategy/copy/compliance/visual stages, provider attempts/models/cost metadata and source provenance.
-5. Verify one of the two accepted active-asset contracts:
-   - protected exact-overlay: retained OpenAI original plus a separate validated `sharp_svg_overlay` final; or
-   - native v2: byte-preserving provider original plus a `sharp_resize_encode_only_v1` normalized original and an `openai_generated_graphic_passthrough` final whose checksum matches the normalized bytes, with `overlay.method=none` and `pixel_overlay_applied=false`.
+5. Verify the mandatory v1 badge contract on every new publishable asset: canonical reference/checksum, `AI_REFERENCE_BAKED`, high fidelity, frozen safe corner, one recognized badge, deterministic bounding-box match, registered-mark check, no protected-content overlap, validator response ID, and `post_generation_logo_overlay_applied=false`.
+   - protected exact-overlay: retained OpenAI original with the validated AI-baked badge plus a separate `sharp_svg_overlay` copy final whose compositor masks the frozen badge safe box;
+   - branded artwork: normalized AI artwork with the validated badge, no other on-image text and no pixel overlay;
+   - native v3: byte-preserving normalized original and `openai_generated_graphic_passthrough` final whose checksum matches, with the badge identity validated separately from ordinary poster text;
+   - product: the validated AI-branded background plus exact authentic catalogue pixels placed locally without obscuring the badge;
+   - Reel/video: passing storyboard evidence and one independently validated extracted frame for every final MP4 scene.
+   - Immediately before the Instagram provider call, require the server to re-read and SHA-256 hash every final stored asset; any missing, unsupported or changed byte stream must fail closed without contacting Meta.
 6. Force or observe one mocked/staging failure path and confirm no completed draft is created from a terminal AI/compliance/image failure.
 7. Approve the current revision and confirm publishing readiness remains blocked while the publishing gate is off.
 

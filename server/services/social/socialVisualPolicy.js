@@ -1,5 +1,6 @@
 const VISUAL_MODES = Object.freeze([
   "AI_VISUAL_WITH_EXACT_OVERLAY",
+  "AI_BRANDED_ARTWORK",
   "AI_ARTWORK_ONLY",
   "FULL_AI_GRAPHIC",
 ]);
@@ -97,7 +98,11 @@ function recommendationFacts(recommendation = {}) {
   };
 }
 
-function visualModeEligibility(visualMode, recommendation = {}, { allowManualTemplate = false } = {}) {
+function visualModeEligibility(
+  visualMode,
+  recommendation = {},
+  { allowManualTemplate = false, allowHistoricalArtworkOnly = false } = {},
+) {
   const mode = normalizeEnum(visualMode);
   const facts = recommendationFacts(recommendation);
   const reasons = [];
@@ -109,6 +114,15 @@ function visualModeEligibility(visualMode, recommendation = {}, { allowManualTem
   }
 
   if (mode === "AI_ARTWORK_ONLY") {
+    if (!allowHistoricalArtworkOnly) reasons.push("BRAND_LOGO_REQUIRED");
+    if (!ARTWORK_ONLY_FORMATS.has(facts.format)) reasons.push("FORMAT_REQUIRES_EXACT_OVERLAY");
+    if (!ARTWORK_ONLY_OBJECTIVES.has(facts.objective)) reasons.push("OBJECTIVE_REQUIRES_EXACT_OVERLAY");
+    if (facts.has_verified_product) reasons.push("AUTHENTIC_PRODUCT_REQUIRES_EXACT_OVERLAY");
+    if (facts.affiliate) reasons.push("AFFILIATE_CONTENT_REQUIRES_EXACT_OVERLAY");
+    if (facts.promotional) reasons.push("PROMOTIONAL_CONTENT_REQUIRES_EXACT_OVERLAY");
+  }
+
+  if (mode === "AI_BRANDED_ARTWORK") {
     if (!ARTWORK_ONLY_FORMATS.has(facts.format)) reasons.push("FORMAT_REQUIRES_EXACT_OVERLAY");
     if (!ARTWORK_ONLY_OBJECTIVES.has(facts.objective)) reasons.push("OBJECTIVE_REQUIRES_EXACT_OVERLAY");
     if (facts.has_verified_product) reasons.push("AUTHENTIC_PRODUCT_REQUIRES_EXACT_OVERLAY");
@@ -150,12 +164,25 @@ function resolveSocialVisualMode({
   recommendation = {},
   strict = false,
   allowManualTemplate = false,
+  allowHistoricalArtworkOnly = false,
 } = {}) {
   const requested = normalizeEnum(requestedVisualMode || fallbackVisualMode || "AI_VISUAL_WITH_EXACT_OVERLAY");
-  const requestedEligibility = visualModeEligibility(requested, recommendation, { allowManualTemplate });
+  const requestedEligibility = visualModeEligibility(requested, recommendation, {
+    allowManualTemplate,
+    allowHistoricalArtworkOnly,
+  });
+  const brandedReplacement = requested === "AI_ARTWORK_ONLY"
+    ? visualModeEligibility("AI_BRANDED_ARTWORK", recommendation, { allowManualTemplate })
+    : null;
   const resolution = {
     requested,
-    effective: requestedEligibility.eligible ? requested : "AI_VISUAL_WITH_EXACT_OVERLAY",
+    effective: requestedEligibility.eligible
+      ? requested
+      : requested === "AI_ARTWORK_ONLY"
+        && requestedEligibility.reasons.includes("BRAND_LOGO_REQUIRED")
+        && brandedReplacement?.eligible
+        ? "AI_BRANDED_ARTWORK"
+        : "AI_VISUAL_WITH_EXACT_OVERLAY",
     eligible: requestedEligibility.eligible,
     reasons: requestedEligibility.reasons,
   };
@@ -164,12 +191,18 @@ function resolveSocialVisualMode({
   return resolution;
 }
 
-function assertSocialVisualModeEligible({ visualMode, recommendation = {}, allowManualTemplate = false } = {}) {
+function assertSocialVisualModeEligible({
+  visualMode,
+  recommendation = {},
+  allowManualTemplate = false,
+  allowHistoricalArtworkOnly = false,
+} = {}) {
   return resolveSocialVisualMode({
     requestedVisualMode: visualMode,
     recommendation,
     strict: true,
     allowManualTemplate,
+    allowHistoricalArtworkOnly,
   });
 }
 

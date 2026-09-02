@@ -9,6 +9,10 @@ const {
   cleanupStagedFullAiGraphic,
 } = require("../services/social/socialAiImageService");
 const {
+  CANONICAL_BRAND_BADGE_ID,
+  CANONICAL_BRAND_BADGE_SHA256,
+} = require("../services/social/socialBrandLogoPolicy");
+const {
   replaceDraftWithSuppliedFullAiGraphic,
   _private: {
     buildNativeFullAiGraphicAssetRows,
@@ -61,6 +65,40 @@ function passingValidation(blocks = textManifest) {
   };
 }
 
+function passingLogoValidation(contract) {
+  const box = contract.safe_corner.target_box;
+  return {
+    decision: "PASS",
+    badgeId: CANONICAL_BRAND_BADGE_ID,
+    referenceChecksumSha256: CANONICAL_BRAND_BADGE_SHA256,
+    approvedLogoPresent: true,
+    referenceIdentityMatch: true,
+    wordmarkExactMatch: true,
+    iconGeometryMatch: true,
+    brandColourMatch: true,
+    registeredMarkRecognizable: true,
+    singleBadgeOccurrence: true,
+    observedBadgeCount: 1,
+    observedBadgeWidthPx: 210,
+    safeCornerMatch: true,
+    fullyInsideSafeBox: true,
+    observedCorner: contract.locked_corner,
+    normalizedBoundingBox: {
+      x: box.left / box.canvas_width,
+      y: box.top / box.canvas_height,
+      width: box.width / box.canvas_width,
+      height: box.height / box.canvas_height,
+    },
+    mobileLegible: true,
+    protectedContentOverlapPresent: false,
+    unapprovedTextPresent: false,
+    observedUnapprovedText: null,
+    unrelatedLogoOrWatermarkPresent: false,
+    issues: [],
+    response_id: "resp-logo-reference-1",
+  };
+}
+
 function memoryStore(records) {
   return async ({ fileName, buffer }) => {
     const row = {
@@ -95,6 +133,7 @@ async function stagedFixture() {
         validatorInput = input;
         return passingValidation(input.expectedTextBlocks);
       },
+      validateBrandLogoReference: async ({ contract }) => passingLogoValidation(contract),
     },
   });
   return { sourceBuffer, stores, validatorInput, stage };
@@ -112,6 +151,16 @@ test("supplied FULL_AI_GRAPHIC uses fill resize/encoding only and stores distinc
   assert.equal(stage.normalization.renderer, "sharp_resize_encode_only_v1");
   assert.equal(stage.normalization.resize_fit, "fill");
   assert.equal(stage.normalization.pixel_overlay_applied, false);
+  assert.equal(stage.contract_version, 3);
+  assert.equal(stage.brand_logo_contract.reference_asset_id, CANONICAL_BRAND_BADGE_ID);
+  assert.equal(stage.brand_logo_evidence.outcome, "PASS");
+  assert.equal(stage.brand_logo_evidence.method, "EXTERNAL_REFERENCE_VISUAL_MATCH");
+  assert.equal(stage.brand_logo_evidence.input_fidelity, "not_applicable");
+  assert.equal(stage.brand_logo_evidence.source_provenance, "generated_without_reference");
+  assert.equal(stage.brand_logo_evidence.reference_used_for_generation, false);
+  assert.equal(stage.brand_logo_evidence.reference_used_for_validation, true);
+  assert.equal(stage.brand_logo_evidence.validated_asset_checksum_sha256, stage.normalized.checksum_sha256);
+  assert.equal(stage.brand_logo_evidence.post_generation_logo_overlay_applied, false);
   assert.equal(stage.provider_original.mime_type, "image/png");
   assert.equal(stage.provider_response_id, null);
   assert.equal(stage.generation_tool, "codex_builtin_imagegen");
@@ -200,7 +249,7 @@ test("legacy FULL_AI_GRAPHIC v1 branded-finish provenance remains accepted", () 
   assert.equal(visualModeProvenancePassed(asset, "FULL_AI_GRAPHIC", approvedCopy), true);
 });
 
-test("native v2 final asset validates and passes manager readiness", async () => {
+test("historical native v2 final asset remains readable and passes manager readiness", async () => {
   const { stage } = await stagedFixture();
   const draftId = new mongoose.Types.ObjectId();
   const runId = new mongoose.Types.ObjectId();

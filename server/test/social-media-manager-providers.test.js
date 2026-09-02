@@ -1,6 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const mongoose = require("mongoose");
 const sharp = require("sharp");
+
+const SocialPublication = require("../models/SocialPublication");
 
 const { RESEARCH_OUTPUT_SCHEMA } = require("../services/social/socialSchemas");
 const {
@@ -283,6 +286,104 @@ test("scheduled readiness blocks early publication and permits a due schedule", 
     });
     assert.equal(due.ready, true);
   });
+});
+
+test("publishing readiness accepts a complete ordered mixed-media Story sequence", async () => {
+  await withPublishingEnv("true", () => {
+    const fixture = readyFixture();
+    const recommendation = fixture.draft.current_package.primaryRecommendation;
+    recommendation.format = "STORY";
+    recommendation.formatContent = {
+      format: "STORY",
+      frameCount: 3,
+      frames: [
+        { frameNumber: 1, copy: "Start with one calm check." },
+        { frameNumber: 2, copy: "Verify the important details." },
+        { frameNumber: 3, copy: "Pause, then decide." },
+      ],
+    };
+    recommendation.onPostCopy.storyFrames = recommendation.formatContent.frames;
+    fixture.settings.weekly_planning = { companion_stories_enabled: true };
+    fixture.assets = [
+      { mime_type: "image/jpeg", url: "https://media.pinkpaisa.in/social/story-1.jpg" },
+      { mime_type: "video/mp4", url: "https://media.pinkpaisa.in/social/story-2.mp4" },
+      { mime_type: "image/png", url: "https://media.pinkpaisa.in/social/story-3.png" },
+    ].map((asset, index) => ({
+      ...fixture.assets[0],
+      ...asset,
+      _id: `story-asset-${index + 1}`,
+      slide_number: index + 1,
+      provenance: { caption_policy: { method: "story_frame_overlay" } },
+    }));
+
+    const ready = buildReadiness({
+      ...fixture,
+      now: new Date("2026-08-22T09:00:00.000Z"),
+      publishNow: true,
+    });
+    assert.equal(ready.ready, true);
+    assert.deepEqual(ready.asset_urls, fixture.assets.map((asset) => asset.url));
+    assert.deepEqual(ready.asset_mime_types, ["image/jpeg", "video/mp4", "image/png"]);
+    assert.deepEqual(ready.asset_sequences, [1, 2, 3]);
+
+    const incomplete = buildReadiness({
+      ...fixture,
+      assets: fixture.assets.slice(0, 2),
+      now: new Date("2026-08-22T09:00:00.000Z"),
+      publishNow: true,
+    });
+    assert.equal(incomplete.ready, false);
+    assert.ok(incomplete.blockers.some((blocker) => blocker.code === "story_asset_count_mismatch"));
+
+    const unordered = buildReadiness({
+      ...fixture,
+      assets: fixture.assets.map((asset, index) => ({ ...asset, slide_number: index === 1 ? 3 : index + 1 })),
+      now: new Date("2026-08-22T09:00:00.000Z"),
+      publishNow: true,
+    });
+    assert.equal(unordered.ready, false);
+    assert.ok(unordered.blockers.some((blocker) => blocker.code === "story_asset_sequence_invalid"));
+  });
+});
+
+test("a published multi-frame Story model requires one ordered authoritative media ID per frame", async () => {
+  const base = {
+    draft_id: new mongoose.Types.ObjectId(),
+    generation_run_id: new mongoose.Types.ObjectId(),
+    idempotency_key: "story-model-identities",
+    provider: "INSTAGRAM_GRAPH",
+    approved_revision: 1,
+    status: "PUBLISHED",
+    content_type: "STORY",
+    asset_ids: [new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId(), new mongoose.Types.ObjectId()],
+    asset_urls: [
+      "https://media.pinkpaisa.in/story-model-1.jpg",
+      "https://media.pinkpaisa.in/story-model-2.mp4",
+      "https://media.pinkpaisa.in/story-model-3.jpg",
+    ],
+    caption_hash: "a".repeat(64),
+    asset_fingerprint: "b".repeat(64),
+    payload_fingerprint: "c".repeat(64),
+    readiness_snapshot: { ready: true },
+    external_publication_id: "story-model-media-1",
+  };
+  const complete = new SocialPublication({
+    ...base,
+    external_publication_ids: ["story-model-media-1", "story-model-media-2", "story-model-media-3"],
+  });
+  await complete.validate();
+
+  const incomplete = new SocialPublication({
+    ...base,
+    draft_id: new mongoose.Types.ObjectId(),
+    idempotency_key: "story-model-identities-incomplete",
+    payload_fingerprint: "d".repeat(64),
+    external_publication_ids: ["story-model-media-1", "story-model-media-2"],
+  });
+  await assert.rejects(
+    () => incomplete.validate(),
+    /one ordered authoritative Meta media identifier per asset/i,
+  );
 });
 
 test("Instagram caption assembly preserves early affiliate disclosure, CTA, and hashtags", () => {
@@ -643,6 +744,112 @@ test("a successful Meta publish with failed media enrichment stays published and
   });
 });
 
+test("durable publishing records every authoritative ID for a multi-frame Story", async () => {
+  await withPublishingEnv("true", async () => {
+    const fixture = readyFixture();
+    const recommendation = fixture.draft.current_package.primaryRecommendation;
+    recommendation.format = "STORY";
+    recommendation.formatContent = {
+      format: "STORY",
+      frameCount: 3,
+      frames: [
+        { frameNumber: 1, copy: "Start with one calm check." },
+        { frameNumber: 2, copy: "Verify the important details." },
+        { frameNumber: 3, copy: "Pause, then decide." },
+      ],
+    };
+    recommendation.onPostCopy.storyFrames = recommendation.formatContent.frames;
+    fixture.settings.weekly_planning = { companion_stories_enabled: true };
+    fixture.assets = ["jpg", "mp4", "png"].map((extension, index) => ({
+      ...fixture.assets[0],
+      _id: `story-durable-asset-${index + 1}`,
+      slide_number: index + 1,
+      url: `https://media.pinkpaisa.in/social/story-durable-${index + 1}.${extension}`,
+      mime_type: extension === "mp4" ? "video/mp4" : `image/${extension === "jpg" ? "jpeg" : extension}`,
+      provenance: { caption_policy: { method: "story_frame_overlay" } },
+    }));
+    fixture.draft.asset_ids = fixture.assets.map((asset) => asset._id);
+    fixture.draft.save = async () => fixture.draft;
+    const caption = buildInstagramCaption(recommendation);
+    const { buildPublicationFingerprint } = require("../services/social/socialCompliance");
+    const payloadFingerprint = buildPublicationFingerprint({
+      recommendation: { ...recommendation, caption },
+      assetUrls: fixture.assets.map((asset) => asset.url),
+    });
+    const publication = {
+      _id: "publication-story-durable",
+      draft_id: fixture.draft._id,
+      status: "QUEUED",
+      attempt_count: 0,
+      retry_count: 0,
+      max_attempts: 4,
+      payload_fingerprint: payloadFingerprint,
+      child_creation_ids: [],
+      external_publication_ids: [],
+      external_permalinks: [],
+      async save() { return this; },
+    };
+    const mediaIds = ["story-meta-1", "story-meta-2", "story-meta-3"];
+    const creationIds = ["story-container-1", "story-container-2", "story-container-3"];
+    const dependencies = {
+      SocialPostDraft: { findById: async () => fixture.draft },
+      SocialAsset: { find: () => ({ sort: async () => fixture.assets }) },
+      SocialPublication: {
+        findOne: async () => publication,
+        findOneAndUpdate: async () => {
+          publication.status = "VALIDATING";
+          publication.attempt_count += 1;
+          return publication;
+        },
+      },
+      SocialAuditLog: { create: async (entry) => entry },
+      getInstagramConnectionSummary: async () => fixture.connection,
+      syncWeeklyPlanFromDraft: async () => {},
+      publishInstagramDraft: async (input) => {
+        assert.equal(input.contentType, "story");
+        assert.deepEqual(input.assetUrls, fixture.assets.map((asset) => asset.url));
+        assert.deepEqual(input.assetMimeTypes, ["image/jpeg", "video/mp4", "image/png"]);
+        const checkpoint = {
+          status: "published",
+          content_type: "story",
+          creation_id: creationIds[0],
+          creation_ids: creationIds,
+          child_creation_ids: creationIds,
+          media_id: mediaIds[0],
+          media_ids: mediaIds,
+          permalink: null,
+          permalinks: [],
+          story_frames: mediaIds.map((mediaId, index) => ({
+            sequence: index + 1,
+            creation_id: creationIds[index],
+            media_id: mediaId,
+            status: "published",
+          })),
+        };
+        await input.onProgress(checkpoint);
+        return {
+          ...checkpoint,
+          connection: { instagram_username: "pinkpaisa" },
+          enrichment_warning: null,
+        };
+      },
+    };
+
+    const result = await publishSocialDraft({
+      draftId: fixture.draft._id,
+      settings: fixture.settings,
+      dependencies,
+    });
+
+    assert.equal(result.status, "PUBLISHED");
+    assert.equal(publication.external_publication_id, mediaIds[0]);
+    assert.deepEqual(publication.external_publication_ids, mediaIds);
+    assert.equal(publication.provider_response_metadata.story_frame_count, 3);
+    assert.deepEqual(fixture.draft.publication_json.external_publication_ids, mediaIds);
+    assert.equal(fixture.draft.status, "PUBLISHED");
+  });
+});
+
 test("a due scheduled readiness failure becomes a visible failed draft and linked manual action", async () => {
   await withPublishingEnv("true", async () => {
     const fixture = readyFixture();
@@ -743,6 +950,56 @@ test("stale post-checkpoint publication is quarantined as uncertain without retr
   assert.equal(audits[0].metadata.manual_action_id, "manual-stale-publish-1");
   assert.equal(weeklySyncs[0].status, "FAILED");
   assert.equal(weeklySyncs[0].publicationId, "publication-1");
+});
+
+test("a stale Story sequence safely resumes after a fully checkpointed published-frame prefix", async () => {
+  const now = new Date("2026-08-22T10:00:00.000Z");
+  const stale = {
+    _id: "publication-story-prefix",
+    draft_id: "draft-story-prefix",
+    content_type: "STORY",
+    asset_urls: ["https://media.example/1.jpg", "https://media.example/2.jpg", "https://media.example/3.jpg"],
+    status: "PUBLISHING",
+    lease_expires_at: new Date("2026-08-22T09:55:00.000Z"),
+    provider_checkpoint: {
+      status: "story_frame_published",
+      media_ids: ["story-prefix-media-1"],
+      story_frames: [
+        { sequence: 1, status: "published", creation_id: "story-prefix-container-1", media_id: "story-prefix-media-1" },
+        { sequence: 2, status: "pending", creation_id: null, media_id: null },
+        { sequence: 3, status: "pending", creation_id: null, media_id: null },
+      ],
+    },
+  };
+  const draft = {
+    _id: stale.draft_id,
+    generation_run_id: "run-story-prefix",
+    status: "PUBLISHING",
+    async save() { return this; },
+  };
+  const audits = [];
+  let manualActions = 0;
+  const result = await recoverStaleSocialPublications({
+    now,
+    dependencies: {
+      SocialPublication: {
+        find: () => ({ sort: () => ({ limit: async () => [stale] }) }),
+        findOneAndUpdate: async (_query, update) => ({ ...stale, ...update.$set }),
+      },
+      SocialPostDraft: { findById: async () => draft },
+      SocialManualAction: {
+        findOneAndUpdate: async () => { manualActions += 1; return null; },
+      },
+      SocialAuditLog: { create: async (entry) => { audits.push(entry); return entry; } },
+      syncWeeklyPlanFromDraft: async () => {},
+    },
+  });
+
+  assert.deepEqual(result, { inspected: 1, requeued: 1, uncertain: 0 });
+  assert.equal(draft.status, "FAILED");
+  assert.equal(draft.last_error.is_retriable, true);
+  assert.equal(manualActions, 0);
+  assert.equal(audits[0].action, "PUBLISH_REQUEUED_AFTER_STALE_LEASE");
 });
 
 test("an administrator reconciles an uncertain publication atomically with an authoritative Meta media ID and no provider call", async () => {
@@ -1158,6 +1415,40 @@ function mockedAssetStore(stored) {
   };
 }
 
+function passingBrandLogoValidation({ contract, responseId = "resp-brand-logo-test" } = {}) {
+  const box = contract.safe_corner.target_box;
+  return {
+    decision: "PASS",
+    badgeId: contract.reference_asset_id,
+    referenceChecksumSha256: contract.reference_checksum_sha256,
+    approvedLogoPresent: true,
+    referenceIdentityMatch: true,
+    wordmarkExactMatch: true,
+    iconGeometryMatch: true,
+    brandColourMatch: true,
+    registeredMarkRecognizable: true,
+    singleBadgeOccurrence: true,
+    observedBadgeCount: 1,
+    observedBadgeWidthPx: contract.target_width_px,
+    safeCornerMatch: true,
+    fullyInsideSafeBox: true,
+    observedCorner: contract.locked_corner,
+    normalizedBoundingBox: {
+      x: box.left / box.canvas_width,
+      y: box.top / box.canvas_height,
+      width: box.width / box.canvas_width,
+      height: box.height / box.canvas_height,
+    },
+    mobileLegible: true,
+    protectedContentOverlapPresent: false,
+    unapprovedTextPresent: false,
+    observedUnapprovedText: null,
+    unrelatedLogoOrWatermarkPresent: false,
+    issues: [],
+    response_id: responseId,
+  };
+}
+
 test("single-image generation invokes the configured OpenAI image provider for original artwork", async () => {
   const calls = [];
   const stored = [];
@@ -1179,6 +1470,7 @@ test("single-image generation invokes the configured OpenAI image provider for o
           usage: { input_tokens: 11, output_tokens: 0, total_tokens: 11 },
         };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation({ contract }),
       storeCampaignAsset: mockedAssetStore(stored),
     },
   });
@@ -1194,7 +1486,9 @@ test("single-image generation invokes the configured OpenAI image provider for o
   assert.equal(result.provider, "openai");
   assert.equal(result.image_count, 1);
   assert.equal(result.original_visuals[0].response_id, "img-single-1");
-  assert.equal(result.original_visuals[0].source_provenance, "generated_without_reference");
+  assert.equal(result.original_visuals[0].source_provenance, "generated_from_approved_source");
+  assert.equal(result.original_visuals[0].brand_logo_reference.reference_asset_id, "pink-paisa-profile-badge-v1");
+  assert.equal(result.original_visuals[0].brand_logo_evidence.outcome, "PASS");
   assert.doesNotMatch(result.original_visuals[0].source_provenance, /template/i);
 });
 
@@ -1250,6 +1544,7 @@ test("carousel generation invokes OpenAI once for every required original visual
         calls.push(input);
         return { buffer: await generatedImageBuffer(calls.length), response_id: `img-carousel-${calls.length}`, usage: {} };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation({ contract }),
       storeCampaignAsset: mockedAssetStore(stored),
     },
   });
@@ -1412,12 +1707,14 @@ test("product image generation passes the verified authentic product reference w
         calls.push(input);
         return { buffer: generated, response_id: "img-product-1", usage: {} };
       },
+      validateBrandLogoReference: async ({ contract }) => passingBrandLogoValidation({ contract }),
       storeCampaignAsset: mockedAssetStore(stored),
     },
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(Object.hasOwn(calls[0], "reference"), false);
+  assert.equal(calls[0].brandLogoContract.reference_asset_id, "pink-paisa-profile-badge-v1");
+  assert.equal(calls[0].brandLogoContract.input_fidelity, "high");
   assert.match(calls[0].prompt, /BACKGROUND ONLY/i);
   assert.match(calls[0].prompt, /do not render, depict, imitate, redraw, retouch or include any product/i);
   assert.equal(result.original_visuals[0].source_provenance, "generated_from_approved_source");

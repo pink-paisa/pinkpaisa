@@ -6,6 +6,11 @@ import {
   isAiNativeFullGraphicAsset,
   provenanceLabels,
 } from "./socialWorkflow";
+import {
+  INVALID_AI_LOGO_LABEL,
+  NO_LOGO_OVERLAY_LABEL,
+  VALIDATED_AI_LOGO_LABEL,
+} from "./socialBrandLogo";
 import { SocialDraft, SocialGenerationRun, SocialReadiness } from "./types";
 
 const readiness = { blockers: [] } as unknown as SocialReadiness;
@@ -93,6 +98,7 @@ describe("AI artwork-only eligibility", () => {
 describe("truthful provenance labels", () => {
   it.each([
     ["AI_VISUAL_WITH_EXACT_OVERLAY", "Text · Verified overlay"],
+    ["AI_BRANDED_ARTWORK", "Artwork · AI — Approved logo reference baked in"],
     ["AI_ARTWORK_ONLY", "Artwork · AI — No overlay"],
     ["FULL_AI_GRAPHIC", "Headline · AI-rendered and validated"],
   ] as const)("labels %s accurately", (mode, expected) => {
@@ -101,6 +107,84 @@ describe("truthful provenance labels", () => {
 
   it("keeps legacy manual-template provenance readable", () => {
     expect(provenanceLabels(draft("NEEDS_REVIEW", "MANUAL_TEMPLATE"))).toContain("Legacy · Manual template");
+  });
+
+  it("requires approved-logo evidence on every publishable asset", () => {
+    const checksum = "0cf39611014a2e674bec396a43335f023c803aaffb61256c004bfcb6fabc92e9";
+    const baseChecksum = "a".repeat(64);
+    const branded = draft("NEEDS_REVIEW", "AI_BRANDED_ARTWORK", {
+      brandLogoContract: {
+        contractVersion: 1,
+        policyVersion: "pink-paisa-mandatory-ai-baked-v1",
+        required: true,
+        method: "AI_REFERENCE_BAKED",
+        referenceAssetId: "pink-paisa-profile-badge-v1",
+        referenceChecksumSha256: checksum,
+        referenceMimeType: "image/png",
+        referenceWidth: 512,
+        referenceHeight: 512,
+        referenceUrl: "/pink-paisa-logo.png",
+        inputFidelity: "high",
+        placementStrategy: "ADAPTIVE_SAFE_CORNER_LOCKED_PER_DRAFT",
+        lockedCorner: "TOP_RIGHT",
+        targetWidthPx: 210,
+        acceptedWidthRangePx: [180, 240],
+        readinessStatus: "READY",
+      },
+      assets: [1, 2].map((slideNumber) => ({
+        checksumSha256: String(slideNumber).repeat(64),
+        provider: "OpenAI",
+        model: "gpt-image-2",
+        role: "FINAL_COMPOSED",
+        mediaKind: "IMAGE",
+        visualMode: "AI_BRANDED_ARTWORK",
+        provenance: { base_image: { checksum_sha256: baseChecksum } },
+        sourceProvenance: "generated",
+        slideNumber,
+        url: `/slide-${slideNumber}.png`,
+        finalUrl: `/slide-${slideNumber}.png`,
+        brandLogoEvidence: {
+          referenceAssetId: "pink-paisa-profile-badge-v1",
+          referenceChecksumSha256: checksum,
+          method: "AI_REFERENCE_BAKED",
+          inputFidelity: "high",
+          generationMethod: "openai_images_edit_reference",
+          referenceValidationMethod: "",
+          sourceProvenance: "generated_from_approved_source",
+          referenceUsedForGeneration: true,
+          referenceUsedForValidation: true,
+          validatedAssetChecksumSha256: baseChecksum,
+          validatedAsset: "openai_normalized_final",
+          requestedCorner: "TOP_RIGHT",
+          observedCorner: "TOP_RIGHT",
+          normalizedBoundingBox: { x: 0.72, y: 0.03, width: 0.2, height: 0.2 },
+          logoCount: 1,
+          identityChecks: { wording: true, colors: true },
+          validatorModel: "gpt-5.6-luna",
+          validatorResponseId: `validation-${slideNumber}`,
+          outcome: slideNumber === 1 ? "PASS" : "FAIL",
+          postGenerationLogoOverlayApplied: false,
+          finalAssetPreservation: {
+            method: "locked_safe_box_overlay_exclusion_v1",
+            finalAssetRole: "final_publishable_asset",
+            sourceValidationResponseId: `validation-${slideNumber}`,
+            sourceValidatedAssetChecksumSha256: baseChecksum,
+            finalPublishableAssetChecksumSha256: String(slideNumber).repeat(64),
+            pixelOverlayApplied: null,
+            programmaticCopyOrBrandPixelsInsideExcludedBox: false,
+            postGenerationLogoOverlayApplied: false,
+          },
+        },
+      } as unknown as SocialDraft["assets"][number])),
+    });
+
+    expect(provenanceLabels(branded)).toContain(INVALID_AI_LOGO_LABEL);
+    expect(provenanceLabels(branded)).toContain(NO_LOGO_OVERLAY_LABEL);
+    expect(provenanceLabels(branded)).not.toContain(VALIDATED_AI_LOGO_LABEL);
+
+    branded.assets[1].brandLogoEvidence!.outcome = "PASS";
+    expect(provenanceLabels(branded)).toContain(VALIDATED_AI_LOGO_LABEL);
+    expect(provenanceLabels(branded)).not.toContain(INVALID_AI_LOGO_LABEL);
   });
 
   it("labels the v2 FULL_AI_GRAPHIC contract as AI-native with no overlay", () => {

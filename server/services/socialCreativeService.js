@@ -14,6 +14,10 @@ const {
   serializePinkPaisaArtDirection,
 } = require("./social/socialArtDirection");
 const { assertSocialVisualModeEligible } = require("./social/socialVisualPolicy");
+const {
+  brandLogoEvidencePassed,
+  serializeBrandLogoContract,
+} = require("./social/socialBrandLogoPolicy");
 
 const RENDER_VERSION = "social-creative-v2";
 const MAX_BASE_IMAGE_BYTES = 25 * 1024 * 1024;
@@ -412,7 +416,6 @@ function fullAiTextBlocksForRenderItem(item = {}, total = 1) {
   };
   if (storyCopy) {
     const storyBlocks = [
-      { key: "brand_name", text: BRAND.name },
       { key: "story_copy", text: storyCopy },
       ...componentIfDistinct("affiliate_disclosure", approvedCopy.affiliateDisclosure),
       ...componentIfDistinct("cta", approvedCopy.cta),
@@ -422,12 +425,11 @@ function fullAiTextBlocksForRenderItem(item = {}, total = 1) {
     return storyBlocks.filter((block) => nonEmptyText(block.text));
   }
   const blocks = [
-    { key: "brand_name", text: BRAND.name },
     { key: "headline", text: nonEmptyText(item.headline) },
     ...(nonEmptyText(item.body) ? [{ key: "supporting_text", text: nonEmptyText(item.body) }] : []),
     ...(Number(total) > 1 ? [{ key: "sequence_label", text: `${Number(item.sequence || 1)}/${Number(total)}` }] : []),
   ].filter((block) => nonEmptyText(block.text));
-  if (blocks.length < 2) {
+  if (blocks.length < 1) {
     const error = new Error("FULL_AI_GRAPHIC requires an approved headline for every complete graphic");
     error.code = "social_full_ai_graphic_text_contract_invalid";
     throw error;
@@ -540,10 +542,27 @@ function calculateTextLayout({
   return layout;
 }
 
-function buildBrandBaseSvg({ width, height, hasBaseImage, artDirection = "EDITORIAL_ICON_GRID" }) {
+function logoSafeExclusionMarkup(targetBox = null, maskId = "brandLogoSafeExclusion") {
+  if (!targetBox || ![targetBox.left, targetBox.top, targetBox.width, targetBox.height].every(Number.isFinite)) {
+    return { definition: "", open: "", close: "" };
+  }
+  const clearance = Math.max(Number(targetBox.minimum_clear_space_px || 24), 0);
+  const left = Math.max(Number(targetBox.left) - clearance, 0);
+  const top = Math.max(Number(targetBox.top) - clearance, 0);
+  const width = Number(targetBox.width) + (clearance * 2);
+  const height = Number(targetBox.height) + (clearance * 2);
+  return {
+    definition: `<mask id="${maskId}"><rect width="100%" height="100%" fill="white" /><rect x="${left}" y="${top}" width="${width}" height="${height}" rx="12" fill="black" /></mask>`,
+    open: `<g mask="url(#${maskId})">`,
+    close: "</g>",
+  };
+}
+
+function buildBrandBaseSvg({ width, height, hasBaseImage, artDirection = "EDITORIAL_ICON_GRID", brandLogoSafeBox = null }) {
   const { palette } = BRAND;
   const direction = resolvePinkPaisaArtDirection({}, artDirection);
   const collage = direction.id === "BOLD_EDITORIAL_COLLAGE";
+  const exclusion = logoSafeExclusionMarkup(brandLogoSafeBox, "brandLogoBaseSafeExclusion");
   const background = hasBaseImage
     ? collage
       ? `<rect width="${width}" height="${height}" fill="${palette.ink}" fill-opacity="0.05" />
@@ -572,8 +591,9 @@ function buildBrandBaseSvg({ width, height, hasBaseImage, artDirection = "EDITOR
         <stop offset="52%" stop-color="#B80F4D" />
         <stop offset="100%" stop-color="#F05A47" />
       </linearGradient>
+      ${exclusion.definition}
     </defs>
-    ${background}
+    ${exclusion.open}${background}${exclusion.close}
   </svg>`);
 }
 
@@ -677,14 +697,15 @@ function buildCollageOverlay({ width, height, layout, sequenceLabel }) {
   return `${copy}${sequenceMarkup}`;
 }
 
-function buildCopyOverlaySvg({ width, height, layout, sequence, total, artDirection = "EDITORIAL_ICON_GRID" }) {
+function buildCopyOverlaySvg({ width, height, layout, sequence, total, artDirection = "EDITORIAL_ICON_GRID", brandLogoSafeBox = null }) {
   const direction = resolvePinkPaisaArtDirection({}, artDirection);
   const sequenceLabel = total > 1 ? `${sequence}/${total}` : "";
   const markup = direction.id === "BOLD_EDITORIAL_COLLAGE"
     ? buildCollageOverlay({ width, height, layout, sequenceLabel })
     : buildEditorialOverlay({ width, height, layout, sequenceLabel });
+  const exclusion = logoSafeExclusionMarkup(brandLogoSafeBox, "brandLogoCopySafeExclusion");
   return Buffer.from(`<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" data-art-direction="${direction.id}" data-layout-surface="${layout.surface_kind}">
-    ${markup}
+    <defs>${exclusion.definition}</defs>${exclusion.open}${markup}${exclusion.close}
   </svg>`);
 }
 
@@ -783,6 +804,7 @@ function assertOpenAiOriginalBaseImage(baseImage, {
   fullAiGraphic = false,
   artworkOnly = false,
   productReferenceUrl = null,
+  brandLogoContract = null,
 } = {}) {
   if (!baseImage?.buffer || !Buffer.isBuffer(baseImage.buffer)) {
     const error = new Error("An OpenAI-generated original visual is required before exact-copy composition");
@@ -872,24 +894,43 @@ function assertOpenAiOriginalBaseImage(baseImage, {
       throw error;
     }
   }
+  const logoContract = brandLogoContract
+    || baseImage.brand_logo_contract
+    || baseImage.brandLogoContract
+    || baseImage.provenance?.brand_logo_contract
+    || null;
+  const logoEvidence = baseImage.brand_logo_evidence
+    || baseImage.brandLogoEvidence
+    || baseImage.brand_logo_validation
+    || baseImage.brandLogoValidation
+    || baseImage.provenance?.brand_logo_evidence
+    || baseImage.provenance?.brand_logo_validation
+    || null;
+  if (!logoContract || !brandLogoEvidencePassed(logoEvidence, logoContract, actualChecksum)) {
+    const error = new Error("The generated image does not have passing evidence for the mandatory AI-baked Pink Paisa badge");
+    error.code = "social_brand_logo_evidence_invalid";
+    throw error;
+  }
   if (fullAiGraphic) {
     const contractVersion = Number(baseImage.full_ai_graphic_contract_version
       || baseImage.fullAiGraphicContractVersion
       || baseImage.provenance?.full_ai_graphic_contract_version
       || 0);
-    if (contractVersion === 2) {
+    if ([2, 3].includes(contractVersion)) {
       const validation = baseImage.poster_validation || baseImage.posterValidation;
       const storedBlocks = baseImage.expected_text_blocks || baseImage.expectedTextBlocks || [];
       const normalization = asPlainObject(baseImage.normalization);
       if (
         stableStringify(storedBlocks) !== stableStringify(expectedTextBlocks)
-        || !fullAiPosterValidationPassed(validation, expectedTextBlocks)
+        || !fullAiPosterValidationPassed(validation, expectedTextBlocks, {
+          requireBrandIdentity: contractVersion < 3,
+        })
         || normalization.renderer !== "sharp_resize_encode_only_v1"
         || normalization.resize_fit !== "fill"
         || normalization.pixel_overlay_applied !== false
         || String(normalization.output_checksum_sha256 || "").toLowerCase() !== actualChecksum
       ) {
-        const error = new Error("FULL_AI_GRAPHIC v2 requires a passing independent complete-poster validation and resize/encoding-only normalization");
+        const error = new Error(`FULL_AI_GRAPHIC v${contractVersion} requires a passing independent complete-poster validation and resize/encoding-only normalization`);
         error.code = "social_full_ai_graphic_poster_invalid";
         throw error;
       }
@@ -935,7 +976,7 @@ function assertOpenAiOriginalBaseImage(baseImage, {
   };
 }
 
-async function renderCanvas({ canvas, baseImage, overlaySvg, logo, layout, artDirection }) {
+async function renderCanvas({ canvas, baseImage, overlaySvg, logo, layout, artDirection, brandLogoSafeBox = null }) {
   const sharp = getSharp();
   const composites = [];
   let pipeline;
@@ -946,7 +987,7 @@ async function renderCanvas({ canvas, baseImage, overlaySvg, logo, layout, artDi
       .jpeg({ quality: 92, mozjpeg: true })
       .toBuffer();
     pipeline = sharp(normalizedBase);
-    composites.push({ input: buildBrandBaseSvg({ ...canvas, hasBaseImage: true, artDirection }), top: 0, left: 0 });
+    composites.push({ input: buildBrandBaseSvg({ ...canvas, hasBaseImage: true, artDirection, brandLogoSafeBox }), top: 0, left: 0 });
   } else {
     pipeline = sharp({
       create: {
@@ -956,7 +997,7 @@ async function renderCanvas({ canvas, baseImage, overlaySvg, logo, layout, artDi
         background: BRAND.palette.cream,
       },
     });
-    composites.push({ input: buildBrandBaseSvg({ ...canvas, hasBaseImage: false, artDirection }), top: 0, left: 0 });
+    composites.push({ input: buildBrandBaseSvg({ ...canvas, hasBaseImage: false, artDirection, brandLogoSafeBox }), top: 0, left: 0 });
   }
   composites.push({ input: overlaySvg, top: 0, left: 0 });
   if (logo?.buffer) {
@@ -1024,7 +1065,11 @@ function manualFlagsForProvenance(provenance, logoAvailable = true, usageRightsS
   return Array.from(new Set(flags));
 }
 
-function fullAiPosterValidationPassed(validation = {}, expectedTextBlocks = []) {
+function fullAiPosterValidationPassed(
+  validation = {},
+  expectedTextBlocks = [],
+  { requireBrandIdentity = true } = {},
+) {
   const expected = Array.isArray(expectedTextBlocks)
     ? expectedTextBlocks.map((block) => nonEmptyText(block?.text)).filter(Boolean)
     : [];
@@ -1034,7 +1079,7 @@ function fullAiPosterValidationPassed(validation = {}, expectedTextBlocks = []) 
   return expected.length > 0
     && validation.decision === "PASS"
     && validation.exactTextMatch === true
-    && validation.brandIdentityMatch === true
+    && (!requireBrandIdentity || validation.brandIdentityMatch === true)
     && validation.mobileLegible === true
     && validation.safeAreaPassed === true
     && validation.unapprovedTextPresent === false
@@ -1083,8 +1128,57 @@ async function validateSocialAsset(assetLike, options = {}) {
   const manualReviewStatus = options.manualReviewStatus || options.manual_review_status || asset.manual_review_status || "pending";
   const provenance = asset.source_provenance || asset.provenance?.base_image?.source_provenance || "brand_template";
   const fullAiGraphic = asset.visual_mode === "FULL_AI_GRAPHIC";
-  const fullAiGraphicV2 = fullAiGraphic && Number(asset.provenance?.full_ai_graphic_contract_version || 0) === 2;
+  const fullAiGraphicContractVersion = Number(asset.provenance?.full_ai_graphic_contract_version || 0);
+  const fullAiGraphicNative = fullAiGraphic && [2, 3].includes(fullAiGraphicContractVersion);
   const artworkOnly = asset.visual_mode === "AI_ARTWORK_ONLY";
+  const brandedArtwork = asset.visual_mode === "AI_BRANDED_ARTWORK";
+  const artworkWithoutCopyOverlay = artworkOnly || brandedArtwork;
+  const brandLogoContract = asset.provenance?.brand_logo_contract
+    || asset.brand_logo_contract
+    || null;
+  const brandLogoEvidence = asset.brand_logo_evidence
+    || asset.provenance?.brand_logo_evidence
+    || asset.provenance?.base_image?.brand_logo_evidence
+    || null;
+  const mandatoryBrandLogoPolicy = Boolean(brandLogoContract);
+  const finalLogoPreservation = brandLogoEvidence?.final_asset_preservation
+    || brandLogoEvidence?.finalAssetPreservation
+    || null;
+  const baseImageChecksum = String(asset.provenance?.base_image?.checksum_sha256 || "").trim().toLowerCase();
+  const evidenceValidatedChecksum = String(
+    brandLogoEvidence?.validated_asset_checksum_sha256
+    || brandLogoEvidence?.validatedAssetChecksumSha256
+    || "",
+  ).trim().toLowerCase();
+  const evidenceExpectedChecksum = fullAiGraphicNative ? String(actualChecksum || "").toLowerCase() : baseImageChecksum;
+  const brandLogoEvidenceCoversFinalAsset = fullAiGraphicNative
+    ? (
+      asset.provenance?.overlay?.method === "none"
+      && asset.provenance?.overlay?.pixel_overlay_applied === false
+      && String(asset.provenance?.base_image?.checksum_sha256 || "").toLowerCase()
+        === String(actualChecksum || "").toLowerCase()
+      && brandLogoEvidence?.validated_asset === "final_publishable_asset"
+      && finalLogoPreservation?.method === "checksum_identical_ai_passthrough_v1"
+      && finalLogoPreservation?.source_validated_asset_checksum_sha256 === evidenceValidatedChecksum
+      && finalLogoPreservation?.source_validated_asset_checksum_sha256 === baseImageChecksum
+      && finalLogoPreservation?.final_publishable_asset_checksum_sha256 === String(actualChecksum || "").toLowerCase()
+      && finalLogoPreservation?.pixel_overlay_applied === false
+    )
+    : (
+      ["openai_normalized_final", "openai_normalized_with_authentic_product_final"].includes(
+        brandLogoEvidence?.validated_asset,
+      )
+      && finalLogoPreservation?.final_asset_role === "final_publishable_asset"
+      && finalLogoPreservation?.method === "locked_safe_box_overlay_exclusion_v1"
+      && finalLogoPreservation?.source_validated_asset_checksum_sha256 === evidenceValidatedChecksum
+      && finalLogoPreservation?.source_validated_asset_checksum_sha256 === baseImageChecksum
+      && finalLogoPreservation?.final_publishable_asset_checksum_sha256 === String(actualChecksum || "").toLowerCase()
+      && finalLogoPreservation?.programmatic_copy_or_brand_pixels_inside_excluded_box === false
+      && finalLogoPreservation?.post_generation_logo_overlay_applied === false
+    );
+  const mandatoryBrandLogoPassed = mandatoryBrandLogoPolicy
+    && brandLogoEvidencePassed(brandLogoEvidence || {}, brandLogoContract, evidenceExpectedChecksum)
+    && brandLogoEvidenceCoversFinalAsset;
   const fullAiTextValidation = overlay.text_rendering?.full_ai_graphic_text_validation
     || asset.provenance?.base_image?.text_validation
     || null;
@@ -1115,7 +1209,7 @@ async function validateSocialAsset(assetLike, options = {}) {
   const nativeStoryTextPassed = storyRequiredText.every((expected) => (
     storyVisibleText.some((visible) => visible.includes(expected))
   ));
-  const storyOnFrameRenderingPassed = fullAiGraphicV2
+  const storyOnFrameRenderingPassed = fullAiGraphicNative
     ? (
       captionPolicy.method === "story_frame_ai_native"
       && captionPolicy.pixel_overlay_applied === false
@@ -1124,7 +1218,9 @@ async function validateSocialAsset(assetLike, options = {}) {
       && overlay.text_rendering?.method === "openai_image_baked_in_exact_copy"
       && overlay.text_rendering?.pixel_overlay_applied === false
       && nativeStoryTextPassed
-      && fullAiPosterValidationPassed(fullAiPosterValidation, fullAiExpectedTextBlocks)
+      && fullAiPosterValidationPassed(fullAiPosterValidation, fullAiExpectedTextBlocks, {
+        requireBrandIdentity: fullAiGraphicContractVersion < 3,
+      })
     )
     : (
       captionPolicy.method === "story_frame_overlay"
@@ -1156,7 +1252,9 @@ async function validateSocialAsset(assetLike, options = {}) {
     || asset.manual_review_flags
     || manualFlagsForProvenance(
       provenance,
-      Boolean(overlay.logo?.source) || (fullAiGraphicV2 && fullAiPosterValidation?.brandIdentityMatch === true),
+      mandatoryBrandLogoPolicy
+        ? mandatoryBrandLogoPassed
+        : Boolean(overlay.logo?.source) || (fullAiGraphicNative && fullAiPosterValidation?.brandIdentityMatch === true),
       asset.usage_rights_status || "unknown",
       artworkOnly,
     ),
@@ -1188,31 +1286,33 @@ async function validateSocialAsset(assetLike, options = {}) {
     ),
     checklistItem(
       "approved_copy_integrity",
-      artworkOnly ? "Approved draft copy checksum is retained outside the artwork" : "Overlay copy equals the approved draft copy",
+      artworkWithoutCopyOverlay ? "Approved draft copy checksum is retained outside the artwork" : "Overlay copy equals the approved draft copy",
       stableStringify(overlay.approved_copy || {}) === stableStringify(expectedCopy)
         && (!storedCopyChecksum || storedCopyChecksum === expectedCopyChecksum) ? "PASS" : "FAIL",
       `copy sha256:${expectedCopyChecksum}`,
     ),
     checklistItem(
       "programmatic_text_overlay",
-      artworkOnly
-        ? "Artwork-only final contains no composited overlay pixels"
-        : fullAiGraphicV2
+      artworkWithoutCopyOverlay
+        ? "AI artwork final contains no composited copy or logo pixels"
+        : fullAiGraphicNative
           ? "The complete AI-rendered poster text and brand identity were independently validated"
           : fullAiGraphic ? "AI-rendered short headline was independently validated" : "Exact copy was applied programmatically",
-      artworkOnly
+      artworkWithoutCopyOverlay
         ? (
           asset.renderer === "sharp_resize_only"
           && asset.provenance?.overlay?.method === "none"
           && overlay.text_rendering?.method === "none"
-          && artworkOnlyValidation?.decision === "PASS"
-          && artworkOnlyValidation?.hasVisibleText === false
-          && artworkOnlyValidation?.hasLogoOrWatermark === false
-          && artworkOnlyValidation?.validated_asset === "openai_provider_original"
+          && (brandedArtwork
+            ? mandatoryBrandLogoPassed
+            : artworkOnlyValidation?.decision === "PASS"
+              && artworkOnlyValidation?.hasVisibleText === false
+              && artworkOnlyValidation?.hasLogoOrWatermark === false
+              && artworkOnlyValidation?.validated_asset === "openai_provider_original")
             ? "PASS"
             : "FAIL"
         )
-        : fullAiGraphicV2
+        : fullAiGraphicNative
         ? (
           asset.renderer === "openai_generated_graphic_passthrough"
           && asset.provenance?.renderer === "openai_generated_graphic_passthrough"
@@ -1220,7 +1320,9 @@ async function validateSocialAsset(assetLike, options = {}) {
           && asset.provenance?.overlay?.pixel_overlay_applied === false
           && overlay.text_rendering?.method === "openai_image_baked_in_exact_copy"
           && overlay.text_rendering?.pixel_overlay_applied === false
-          && fullAiPosterValidationPassed(fullAiPosterValidation, fullAiExpectedTextBlocks)
+          && fullAiPosterValidationPassed(fullAiPosterValidation, fullAiExpectedTextBlocks, {
+            requireBrandIdentity: fullAiGraphicContractVersion < 3,
+          })
             ? "PASS"
             : "FAIL"
         )
@@ -1234,28 +1336,32 @@ async function validateSocialAsset(assetLike, options = {}) {
             : "FAIL"
         )
         : (overlay.text_rendering?.method === "sharp_svg_overlay" && overlay.text_rendering?.image_ai_used_for_text === false ? "PASS" : "FAIL"),
-      artworkOnly
-        ? "AI_ARTWORK_ONLY requires resize/encoding only plus independent zero-text/logo validation"
-        : fullAiGraphicV2
-          ? "FULL_AI_GRAPHIC v2 requires exact poster validation and zero post-generation pixel overlays"
+      artworkWithoutCopyOverlay
+        ? brandedArtwork
+          ? "AI_BRANDED_ARTWORK requires resize/encoding only plus independently validated reference-baked logo"
+          : "Historical AI_ARTWORK_ONLY requires resize/encoding only plus independent zero-text/logo validation"
+        : fullAiGraphicNative
+          ? `FULL_AI_GRAPHIC v${fullAiGraphicContractVersion} requires exact poster validation and zero post-generation pixel overlays`
           : fullAiGraphic ? "FULL_AI_GRAPHIC requires an exact-text validation result" : "Important overlay text was rendered programmatically",
     ),
     checklistItem(
       "safe_area",
-      artworkOnly ? "Artwork-only mode has no text safe-area dependency" : "Text remains inside the configured mobile safe area",
-      artworkOnly || (fullAiGraphicV2 ? fullAiPosterValidation?.safeAreaPassed === true : overlay.layout?.within_safe_area === true) ? "PASS" : "FAIL",
-      artworkOnly
+      artworkWithoutCopyOverlay ? "Artwork mode has no text safe-area dependency" : "Text remains inside the configured mobile safe area",
+      artworkWithoutCopyOverlay || (fullAiGraphicNative ? fullAiPosterValidation?.safeAreaPassed === true : overlay.layout?.within_safe_area === true) ? "PASS" : "FAIL",
+      artworkWithoutCopyOverlay
         ? "Not applicable: the final image has no text overlay"
-        : fullAiGraphicV2
+        : fullAiGraphicNative
           ? fullAiPosterValidation?.safeAreaPassed === true ? "Independent poster validation passed" : "AI-rendered text extends outside safe margins"
           : overlay.layout?.within_safe_area === true ? "Calculated text bounds fit" : "Copy needs a shorter layout or manual adjustment",
     ),
     checklistItem(
       "brand_identity",
-      artworkOnly ? "No logo or wordmark was composited" : "Approved Pink Paisa identity is present",
-      artworkOnly
+      mandatoryBrandLogoPolicy ? "Approved Pink Paisa badge is AI-rendered from the locked reference" : artworkOnly ? "No logo or wordmark was composited" : "Approved Pink Paisa identity is present",
+      mandatoryBrandLogoPolicy
+        ? mandatoryBrandLogoPassed ? "PASS" : "FAIL"
+        : artworkOnly
         ? (!overlay.logo?.source && asset.provenance?.overlay?.method === "none" ? "PASS" : "FAIL")
-        : fullAiGraphicV2
+        : fullAiGraphicNative
           ? (
             overlay.brand_name === BRAND.name
             && overlay.logo?.method === "openai_image_baked_in"
@@ -1265,27 +1371,29 @@ async function validateSocialAsset(assetLike, options = {}) {
               : "FAIL"
           )
           : (overlay.brand_name === BRAND.name && Boolean(overlay.logo?.source) ? "PASS" : "FAIL"),
-      artworkOnly
+      mandatoryBrandLogoPolicy
+        ? mandatoryBrandLogoPassed ? "Exactly one safe, recognizable reference-baked badge passed independent validation" : "Mandatory reference-baked badge evidence is missing or failed"
+        : artworkOnly
         ? "Brand identity remains in the caption/account context"
-        : fullAiGraphicV2 ? "Pink Paisa identity is baked into and independently validated in the AI image" : overlay.logo?.source || "Approved wordmark was not found",
+        : fullAiGraphicNative ? "Pink Paisa identity is baked into and independently validated in the AI image" : overlay.logo?.source || "Approved wordmark was not found",
     ),
     checklistItem(
       "rupee_glyph",
       "The ₹ glyph is preserved when approved copy uses it",
-      artworkOnly || fullAiGraphic || !copyContainsRupee || renderedTextContainsRupee ? "PASS" : "FAIL",
-      artworkOnly ? "Not applicable: approved copy is not rendered in artwork-only mode" : copyContainsRupee ? "Approved copy contains ₹" : "Approved copy does not use ₹",
+      artworkWithoutCopyOverlay || fullAiGraphic || !copyContainsRupee || renderedTextContainsRupee ? "PASS" : "FAIL",
+      artworkWithoutCopyOverlay ? "Not applicable: approved copy is not rendered in artwork mode" : copyContainsRupee ? "Approved copy contains ₹" : "Approved copy does not use ₹",
     ),
     checklistItem(
       "contrast",
       "Visible text contrast meets the mobile readability threshold",
-      artworkOnly || (fullAiGraphicV2 ? fullAiPosterValidation?.mobileLegible === true : minimumContrast >= 4.5) ? "PASS" : "FAIL",
-      artworkOnly
+      artworkWithoutCopyOverlay || (fullAiGraphicNative ? fullAiPosterValidation?.mobileLegible === true : minimumContrast >= 4.5) ? "PASS" : "FAIL",
+      artworkWithoutCopyOverlay
         ? "Not applicable: the final image has no text overlay"
-        : fullAiGraphicV2 ? "Independent mobile-legibility validation" : `Reference contrast ${minimumContrast.toFixed(2)}:1`,
+        : fullAiGraphicNative ? "Independent mobile-legibility validation" : `Reference contrast ${minimumContrast.toFixed(2)}:1`,
     ),
   ];
 
-  if (fullAiGraphicV2) {
+  if (fullAiGraphicNative) {
     const baseChecksum = String(asset.provenance?.base_image?.checksum_sha256 || "").toLowerCase();
     checklist.push(checklistItem(
       "no_post_generation_pixel_overlay",
@@ -1297,6 +1405,36 @@ async function validateSocialAsset(assetLike, options = {}) {
         ? "PASS"
         : "FAIL",
       baseChecksum ? `normalized/final sha256:${baseChecksum}` : "Normalized OpenAI checksum is missing",
+    ));
+  }
+
+  if (mandatoryBrandLogoPolicy) {
+    checklist.push(checklistItem(
+      "mandatory_ai_baked_brand_logo",
+      "Exactly one approved Pink Paisa badge is AI-rendered from the locked reference",
+      mandatoryBrandLogoPassed ? "PASS" : "FAIL",
+      mandatoryBrandLogoPassed
+        ? `Reference ${brandLogoContract.reference_asset_id || brandLogoContract.badge_id}; ${brandLogoEvidence.observed_corner || brandLogoEvidence.observedCorner || "locked corner"}`
+        : "The canonical logo identity, count, placement, size, or mobile-legibility check failed",
+    ));
+    checklist.push(checklistItem(
+      "no_post_generation_logo_overlay",
+      "No programmatic logo overlay was applied after AI generation",
+      asset.provenance?.post_generation_logo_overlay_applied === false
+        && asset.provenance?.logo?.post_generation_logo_overlay_applied === false
+        && (brandLogoEvidence.post_generation_logo_overlay_applied === false
+          || brandLogoEvidence.postGenerationLogoOverlayApplied === false)
+        ? "PASS"
+        : "FAIL",
+      "Sharp may resize/encode or render approved copy, but it must never composite the logo",
+    ));
+    checklist.push(checklistItem(
+      "final_asset_logo_preservation",
+      "The validated badge remains protected in the final publishable pixels",
+      brandLogoEvidenceCoversFinalAsset ? "PASS" : "FAIL",
+      fullAiGraphicNative
+        ? "The normalized AI graphic is the byte-identical final asset"
+        : "All programmatic copy and decorative pixels are excluded from the locked logo safe box",
     ));
   }
 
@@ -1442,10 +1580,15 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
     throw error;
   }
   const allowTemplateOnly = manualTemplateMode;
+  if (allowTemplateOnly) {
+    const error = new Error("Programmatic brand-template fallback is disabled by the mandatory AI-baked logo policy");
+    error.code = "social_brand_logo_ai_reference_required";
+    throw error;
+  }
   const visualMode = allowTemplateOnly
     ? "MANUAL_TEMPLATE"
     : String(options.visualMode || options.visual_mode || recommendation.visualBrief?.visualMode || recommendation.visual_brief?.visualMode || "AI_VISUAL_WITH_EXACT_OVERLAY").toUpperCase();
-  if (!["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC", "MANUAL_TEMPLATE"].includes(visualMode)) {
+  if (!["AI_VISUAL_WITH_EXACT_OVERLAY", "AI_BRANDED_ARTWORK", "AI_ARTWORK_ONLY", "FULL_AI_GRAPHIC", "MANUAL_TEMPLATE"].includes(visualMode)) {
     const error = new Error(`Unsupported social visual mode: ${visualMode}`);
     error.code = "social_visual_mode_unsupported";
     throw error;
@@ -1453,12 +1596,16 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
   if (!allowTemplateOnly) assertSocialVisualModeEligible({ visualMode, recommendation });
   const fullAiGraphic = visualMode === "FULL_AI_GRAPHIC";
   const artworkOnly = visualMode === "AI_ARTWORK_ONLY";
+  const brandedArtwork = visualMode === "AI_BRANDED_ARTWORK";
+  const artworkWithoutCopyOverlay = artworkOnly || brandedArtwork;
   const artDirection = resolvePinkPaisaArtDirection(
     recommendation,
     options.artDirection || options.art_direction,
   );
   const artDirectionRecord = serializePinkPaisaArtDirection(artDirection);
-  const logo = artworkOnly ? null : await loadBrandLogo(options.logoPath || options.logo_path);
+  // The canonical badge is already rendered by OpenAI from the locked reference.
+  // Sharp may render approved copy, but must never composite a second logo.
+  const logo = null;
   const captionContract = buildSocialCaptionContract(recommendation);
   const captionPolicy = {
     method: socialFormat === "STORY" ? "story_frame_overlay" : "instagram_caption_only",
@@ -1512,13 +1659,29 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
     for (let index = 0; index < renderItems.length; index += 1) {
     const item = renderItems[index];
     const baseImage = await readLocalBaseImage(baseImageForSequence(options, index));
-    const fullAiGraphicV2 = fullAiGraphic && Number(
+    const fullAiGraphicContractVersion = fullAiGraphic ? Number(
       baseImage?.full_ai_graphic_contract_version
       || baseImage?.fullAiGraphicContractVersion
       || baseImage?.provenance?.full_ai_graphic_contract_version
       || 0,
-    ) === 2;
-    const assetCaptionPolicy = socialFormat === "STORY" && fullAiGraphicV2
+    ) : 0;
+    const fullAiGraphicNative = fullAiGraphic && [2, 3].includes(fullAiGraphicContractVersion);
+    const brandLogoContract = baseImage?.brand_logo_contract
+      || baseImage?.brandLogoContract
+      || draft.brand_logo_contract
+      || draft.brandLogoContract
+      || options.brandLogoContract
+      || options.brand_logo_contract
+      || null;
+    const brandLogoEvidence = baseImage?.brand_logo_evidence
+      || baseImage?.brandLogoEvidence
+      || baseImage?.brand_logo_validation
+      || baseImage?.brandLogoValidation
+      || null;
+    const brandLogoSafeBox = brandLogoContract?.safe_corner?.target_box
+      || brandLogoContract?.safeCorner?.targetBox
+      || null;
+    const assetCaptionPolicy = socialFormat === "STORY" && fullAiGraphicNative
       ? {
         ...captionPolicy,
         method: "story_frame_ai_native",
@@ -1529,7 +1692,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         ...captionPolicy,
         ...(socialFormat === "STORY" ? { pixel_overlay_applied: true, text_rendering: "sharp_svg_overlay" } : {}),
       };
-    const expectedFullAiTextBlocks = fullAiGraphicV2
+    const expectedFullAiTextBlocks = fullAiGraphicNative
       ? fullAiTextBlocksForRenderItem(item, renderItems.length)
       : [];
     if (!baseImage && !allowTemplateOnly) {
@@ -1545,6 +1708,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         fullAiGraphic,
         artworkOnly,
         productReferenceUrl,
+        brandLogoContract,
       });
       if (socialFormat === "CAROUSEL" && originalChecksums.has(validatedOriginal.actualChecksum)) {
         const error = new Error("Every carousel slide requires a distinct OpenAI-generated original visual");
@@ -1562,7 +1726,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
     const effectiveUsageRights = normalizeUsageRights(
       baseUsageRights || configuredUsageRights || (baseImage ? "unknown" : "owned"),
     );
-    const layout = artworkOnly || fullAiGraphicV2
+    const layout = artworkWithoutCopyOverlay || fullAiGraphicNative
       ? {
         safe_area: null,
         card: null,
@@ -1583,19 +1747,19 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
     const approvedCopyChecksum = sha256(Buffer.from(stableStringify(item.approved_copy), "utf8"));
     const overlayJson = {
       schema_version: 1,
-      brand_name: artworkOnly ? null : BRAND.name,
+      brand_name: artworkWithoutCopyOverlay || fullAiGraphic ? null : BRAND.name,
       art_direction: artDirectionRecord,
       approved_copy: item.approved_copy,
       approved_copy_checksum_sha256: approvedCopyChecksum,
       copy_source_path: item.source_path,
-      rendered_text: fullAiGraphicV2 ? item.approved_copy : {
-        headline: artworkOnly ? null : item.headline,
-        body: artworkOnly || fullAiGraphic ? null : item.body,
+      rendered_text: fullAiGraphicNative ? item.approved_copy : {
+        headline: artworkWithoutCopyOverlay ? null : item.headline,
+        body: artworkWithoutCopyOverlay || fullAiGraphic ? null : item.body,
         headline_lines: layout.headline_lines,
         body_lines: layout.body_lines,
       },
-      ...(fullAiGraphicV2 ? { rendered_text_blocks: expectedFullAiTextBlocks } : {}),
-      text_rendering: fullAiGraphicV2 ? {
+      ...(fullAiGraphicNative ? { rendered_text_blocks: expectedFullAiTextBlocks } : {}),
+      text_rendering: fullAiGraphicNative ? {
         method: "openai_image_baked_in_exact_copy",
         image_ai_used_for_text: true,
         pixel_overlay_applied: false,
@@ -1604,7 +1768,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         full_ai_graphic_poster_validation: baseImage?.poster_validation || null,
         exact_copy_preserved_in_overlay_json: true,
       } : {
-        method: artworkOnly ? "none" : fullAiGraphic ? "openai_image_with_validated_short_headline" : "sharp_svg_overlay",
+        method: artworkWithoutCopyOverlay ? "none" : fullAiGraphic ? "openai_image_with_validated_short_headline" : "sharp_svg_overlay",
         image_ai_used_for_text: fullAiGraphic,
         full_ai_graphic_text_validation: fullAiGraphic ? baseImage?.text_validation || null : null,
         artwork_only_visual_validation: artworkOnly ? baseImage?.artwork_validation || null : null,
@@ -1613,25 +1777,75 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       typography: BRAND.fonts,
       palette: BRAND.palette,
       layout,
-      logo: fullAiGraphicV2
-        ? { method: "openai_image_baked_in", source: null, image_ai_used_for_logo: true }
-        : logo ? { source: logo.source, checksum_sha256: logo.checksum_sha256 } : { source: null },
+      logo: {
+        method: "openai_reference_baked",
+        reference_asset_id: brandLogoContract?.reference_asset_id || brandLogoContract?.badge_id || null,
+        reference_checksum_sha256: brandLogoContract?.reference_checksum_sha256 || brandLogoContract?.checksum_sha256 || null,
+        image_ai_used_for_logo: true,
+        post_generation_logo_overlay_applied: false,
+      },
       sequence: item.sequence,
       total_assets: renderItems.length,
     };
-    const overlaySvg = artworkOnly || fullAiGraphicV2 ? null : buildCopyOverlaySvg({
+    const overlaySvg = artworkWithoutCopyOverlay || fullAiGraphicNative ? null : buildCopyOverlaySvg({
       ...canvas,
       layout,
       sequence: item.sequence,
       total: renderItems.length,
       artDirection: artDirection.id,
+      brandLogoSafeBox,
     });
-    const buffer = fullAiGraphicV2
+    const buffer = fullAiGraphicNative
       ? Buffer.from(baseImage.buffer)
-      : artworkOnly
+      : artworkWithoutCopyOverlay
       ? await renderArtworkOnlyCanvas({ canvas, baseImage })
-      : await renderCanvas({ canvas, baseImage, overlaySvg, logo, layout, artDirection: artDirection.id });
+      : await renderCanvas({
+        canvas,
+        baseImage,
+        overlaySvg,
+        logo,
+        layout,
+        artDirection: artDirection.id,
+        brandLogoSafeBox,
+      });
     const baseImageChecksum = validatedOriginal?.actualChecksum || (baseImage?.buffer ? sha256(baseImage.buffer) : null);
+    const renderedFinalChecksum = sha256(buffer);
+    const finalBrandLogoEvidence = !brandLogoEvidence
+      ? brandLogoEvidence
+      : fullAiGraphicNative
+      ? {
+        ...brandLogoEvidence,
+        validated_asset: "final_publishable_asset",
+        final_asset_preservation: {
+          method: "checksum_identical_ai_passthrough_v1",
+          source_validation_response_id: brandLogoEvidence.validator_response_id
+            || brandLogoEvidence.validatorResponseId
+            || brandLogoEvidence.response_id
+            || brandLogoEvidence.responseId
+            || null,
+          source_validated_asset_checksum_sha256: baseImageChecksum,
+          final_publishable_asset_checksum_sha256: renderedFinalChecksum,
+          pixel_overlay_applied: false,
+          post_generation_logo_overlay_applied: false,
+        },
+      }
+      : {
+        ...brandLogoEvidence,
+        final_asset_preservation: {
+          method: "locked_safe_box_overlay_exclusion_v1",
+          final_asset_role: "final_publishable_asset",
+          source_validation_response_id: brandLogoEvidence.validator_response_id
+            || brandLogoEvidence.validatorResponseId
+            || brandLogoEvidence.response_id
+            || brandLogoEvidence.responseId
+            || null,
+          excluded_target_box: brandLogoSafeBox,
+          source_validated_asset_checksum_sha256: baseImageChecksum,
+          final_publishable_asset_checksum_sha256: renderedFinalChecksum,
+          programmatic_copy_or_brand_pixels_inside_excluded_box: false,
+          post_generation_logo_overlay_applied: false,
+        },
+      };
     const providerOriginal = asPlainObject(baseImage?.provider_original || baseImage?.providerOriginal);
     const retainedOriginalVisual = nonEmptyText(providerOriginal.url)
       ? {
@@ -1654,22 +1868,22 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         width: Number(baseImage.width || canvas.width),
         height: Number(baseImage.height || canvas.height),
       } : null);
-    const fullAiManifestChecksum = fullAiGraphicV2
+    const fullAiManifestChecksum = fullAiGraphicNative
       ? sha256(Buffer.from(stableStringify(expectedFullAiTextBlocks), "utf8"))
       : null;
-    const effectiveRenderer = fullAiGraphicV2
+    const effectiveRenderer = fullAiGraphicNative
       ? "openai_generated_graphic_passthrough"
-      : artworkOnly ? "sharp_resize_only" : "sharp_svg_overlay";
-    const effectiveRenderVersion = fullAiGraphicV2
-      ? "social-full-ai-graphic-native-v2"
+      : artworkWithoutCopyOverlay ? "sharp_resize_only" : "sharp_svg_overlay";
+    const effectiveRenderVersion = fullAiGraphicNative
+      ? `social-full-ai-graphic-native-v${fullAiGraphicContractVersion}`
       : RENDER_VERSION;
     const provenance = {
       renderer: effectiveRenderer,
       render_version: effectiveRenderVersion,
-      ...(fullAiGraphicV2 ? {
-        full_ai_graphic_contract_version: 2,
+      ...(fullAiGraphicNative ? {
+        full_ai_graphic_contract_version: fullAiGraphicContractVersion,
         full_ai_graphic_manifest: {
-          contract_version: 2,
+          contract_version: fullAiGraphicContractVersion,
           expected_text_blocks: expectedFullAiTextBlocks,
           checksum_sha256: fullAiManifestChecksum,
           approved_copy_checksum_sha256: approvedCopyChecksum,
@@ -1677,7 +1891,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       } : {}),
       base_image: {
         type: baseImage
-          ? (fullAiGraphicV2
+          ? (fullAiGraphicNative
             ? "openai_generated_complete_graphic"
             : productReferenceUrl ? "openai_background_with_authentic_product_composite" : "openai_generated_original_visual")
           : "manual_emergency_brand_template",
@@ -1701,7 +1915,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         authentic_product_composition: baseImage?.authentic_product_composition || baseImage?.authenticProductComposition || null,
         contains_approved_copy_by_design: fullAiGraphic,
         text_validation: baseImage?.text_validation || null,
-        poster_validation: fullAiGraphicV2 ? baseImage?.poster_validation || null : null,
+        poster_validation: fullAiGraphicNative ? baseImage?.poster_validation || null : null,
         artwork_validation: baseImage?.artwork_validation || null,
         perceptual_hash_64: baseImage?.perceptual_hash_64 || baseImage?.perceptualHash64 || null,
         provider_original: baseImage?.provider_original || baseImage?.providerOriginal || null,
@@ -1718,21 +1932,26 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
         }
         : null,
       overlay: {
-        method: artworkOnly || fullAiGraphicV2 ? "none" : fullAiGraphic ? "sharp_branded_finish_after_validated_ai_headline" : "sharp_svg_overlay",
-        copy_source: artworkOnly ? null : item.source_path,
+        method: artworkWithoutCopyOverlay || fullAiGraphicNative ? "none" : fullAiGraphic ? "sharp_branded_finish_after_validated_ai_headline" : "sharp_svg_overlay",
+        copy_source: artworkWithoutCopyOverlay ? null : item.source_path,
         approved_copy_checksum_sha256: approvedCopyChecksum,
         image_ai_used_for_text: fullAiGraphic,
-        ...(fullAiGraphicV2 ? { pixel_overlay_applied: false } : {}),
-        creative_style: artworkOnly ? null : artDirectionRecord,
-        layout_variant: artworkOnly ? null : layout.layout_variant,
-        decorative_elements: artworkOnly || fullAiGraphicV2 ? "none" : "sharp_svg_nontext_v1",
+        ...(fullAiGraphicNative ? { pixel_overlay_applied: false } : {}),
+        creative_style: artworkWithoutCopyOverlay ? null : artDirectionRecord,
+        layout_variant: artworkWithoutCopyOverlay ? null : layout.layout_variant,
+        decorative_elements: artworkWithoutCopyOverlay || fullAiGraphicNative ? "none" : "sharp_svg_nontext_v1",
       },
       creative_style: artDirectionRecord,
       caption_policy: assetCaptionPolicy,
-      logo: fullAiGraphicV2
-        ? { method: "openai_image_baked_in", source: null }
-        : logo ? { source: logo.source, checksum_sha256: logo.checksum_sha256 } : null,
-      ...(fullAiGraphicV2 ? {
+      brand_logo_contract: brandLogoContract ? serializeBrandLogoContract(brandLogoContract) : null,
+      brand_logo_evidence: finalBrandLogoEvidence,
+      logo: {
+        method: "openai_reference_baked",
+        reference_asset_id: brandLogoContract?.reference_asset_id || brandLogoContract?.badge_id || null,
+        reference_checksum_sha256: brandLogoContract?.reference_checksum_sha256 || brandLogoContract?.checksum_sha256 || null,
+        post_generation_logo_overlay_applied: false,
+      },
+      ...(fullAiGraphicNative ? {
         final_pixel_contract: {
           method: "normalized_ai_bytes_passthrough",
           normalized_checksum_sha256: baseImageChecksum,
@@ -1740,6 +1959,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
           pixel_overlay_applied: false,
         },
       } : {}),
+      post_generation_logo_overlay_applied: false,
     };
     const fileName = `${slugify(identity.draftKey)}-${version}-${canvas.aspect_ratio.replace(":", "x")}-${String(index + 1).padStart(2, "0")}.jpg`;
     const stored = await storeAsset({ fileName, buffer });
@@ -1751,7 +1971,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       stagedFiles.push(stagedFile);
       if (typeof options.onStagedFile === "function") await options.onStagedFile(stagedFile);
     }
-    const finalChecksum = sha256(buffer);
+    const finalChecksum = renderedFinalChecksum;
     const storedChecksum = String(stored?.checksum_sha256 || "").trim().toLowerCase();
     const finalStorageProvider = String(stored?.storage_provider || "").trim().toLowerCase();
     if (!nonEmptyText(stored?.url) || !nonEmptyText(stored?.storage_key)) {
@@ -1794,6 +2014,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       renderer: effectiveRenderer,
       asset_role: "FINAL_COMPOSED",
       visual_mode: visualMode,
+      brand_logo_evidence: finalBrandLogoEvidence,
       render_version: effectiveRenderVersion,
       overlay_json: overlayJson,
       approved_copy_checksum_sha256: approvedCopyChecksum,
@@ -1810,7 +2031,19 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       image_generated_at: baseImage ? new Date() : null,
       image_usage: baseImage?.usage || null,
       original_visual: retainedOriginalVisual,
-      reference_assets: productReferenceUrl && baseImage ? [{
+      reference_assets: [
+        {
+          reference_type: "BRAND_LOGO",
+          url: brandLogoContract?.reference_url || "/pink-paisa-logo.png",
+          checksum_sha256: brandLogoContract?.reference_checksum_sha256 || brandLogoContract?.checksum_sha256 || null,
+          mime_type: "image/png",
+          width: 512,
+          height: 512,
+          source_bytes_preserved: false,
+          usage_rights_status: "owned",
+          authenticity_must_be_preserved: false,
+        },
+        ...(productReferenceUrl && baseImage ? [{
         reference_type: "PRODUCT_IMAGE",
         ...(objectIdOrNull(recommendation.verifiedProductId || recommendation.verified_product_id, AssetModel)
           ? { product_id: objectIdOrNull(recommendation.verifiedProductId || recommendation.verified_product_id, AssetModel) }
@@ -1831,7 +2064,8 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
           === baseImage.reference_image_checksum_sha256,
         usage_rights_status: baseImage.authentic_product_reference?.usage_rights_status || "admin_confirmed",
         authenticity_must_be_preserved: true,
-      }] : [],
+        }] : []),
+      ],
       is_active: true,
       deleted_at: null,
     };
@@ -1843,11 +2077,11 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       manualReviewFlags: [
         ...manualFlagsForProvenance(
           effectiveProvenance,
-          Boolean(logo) || (fullAiGraphicV2 && baseImage?.poster_validation?.brandIdentityMatch === true),
+          brandLogoEvidencePassed(finalBrandLogoEvidence || {}, brandLogoContract, baseImageChecksum),
           effectiveUsageRights,
           artworkOnly,
-        ).filter((flag) => !(fullAiGraphicV2 && flag === "BASE_IMAGE_CONTAINS_UNAPPROVED_TEXT")),
-        ...(fullAiGraphicV2 ? ["AI_NATIVE_EXACT_TEXT_AND_BRAND"] : []),
+        ).filter((flag) => !(fullAiGraphicNative && flag === "BASE_IMAGE_CONTAINS_UNAPPROVED_TEXT")),
+        ...(fullAiGraphicNative ? ["AI_NATIVE_EXACT_TEXT_AND_BRAND"] : []),
         ...(productReferenceUrl ? ["AUTHENTIC_PRODUCT_PACKAGING_LABEL_VARIANT_QUANTITY"] : []),
       ],
     });
@@ -1905,7 +2139,7 @@ async function renderSocialDraftAssets(draftLike, options = {}) {
       validation_status: invalid ? "invalid" : manualReviewRequired ? "needs_manual_review" : "valid",
       manual_review_required: manualReviewRequired,
       manual_review_flags: Array.from(new Set(results.flatMap((asset) => asset.manual_review_flags || []))),
-      renderer: results[0]?.renderer || (artworkOnly ? "sharp_resize_only" : "sharp_svg_overlay"),
+      renderer: results[0]?.renderer || (artworkWithoutCopyOverlay ? "sharp_resize_only" : "sharp_svg_overlay"),
       render_version: RENDER_VERSION,
     };
   } catch (error) {

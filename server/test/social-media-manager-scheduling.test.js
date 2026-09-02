@@ -269,7 +269,8 @@ test("manual generation rejects an ineligible artwork-only format before queuein
     }),
     (error) => error.code === "social_visual_mode_ineligible"
       && error.statusCode === 409
-      && error.visual_mode_resolution?.effective === "AI_VISUAL_WITH_EXACT_OVERLAY",
+      && error.visual_mode_resolution?.effective === "AI_VISUAL_WITH_EXACT_OVERLAY"
+      && error.visual_mode_resolution?.reasons?.includes("BRAND_LOGO_REQUIRED"),
   );
   assert.equal(createCalls, 0);
 });
@@ -297,13 +298,14 @@ test("manual artwork-only generation requires a concrete eligible format and obj
       () => requestGeneration({ triggerType: "MANUAL", force: true, generationRequest, dependencies }),
       (error) => error.code === "social_visual_mode_ineligible"
         && error.statusCode === 409
-        && error.visual_mode_resolution?.effective === "AI_VISUAL_WITH_EXACT_OVERLAY",
+        && ["AI_BRANDED_ARTWORK", "AI_VISUAL_WITH_EXACT_OVERLAY"].includes(error.visual_mode_resolution?.effective)
+        && error.visual_mode_resolution?.reasons?.includes("BRAND_LOGO_REQUIRED"),
     );
   }
   assert.equal(createCalls, 0);
 });
 
-test("manual generation persists the eligible artwork-only resolution on the queued run", async () => {
+test("manual generation rejects historical artwork-only and directs eligible requests to branded artwork", async () => {
   let createdRecord = null;
   const dependencies = {
     getSocialManagerSettings: async () => ({
@@ -320,24 +322,23 @@ test("manual generation persists the eligible artwork-only resolution on the que
     },
     SocialAuditLog: { create: async (record) => record },
   };
-  const result = await requestGeneration({
-    triggerType: "MANUAL",
-    force: true,
-    generationRequest: {
-      requested_format: "SINGLE_IMAGE",
-      requested_post_type: "EDUCATION",
-      visual_mode: "AI_ARTWORK_ONLY",
-    },
-    dependencies,
-  });
-  assert.equal(result.reused, false);
-  assert.equal(createdRecord.generation_request.visual_mode, "AI_ARTWORK_ONLY");
-  assert.deepEqual(createdRecord.generation_request.visual_mode_resolution, {
-    requested: "AI_ARTWORK_ONLY",
-    effective: "AI_ARTWORK_ONLY",
-    eligible: true,
-    reasons: [],
-  });
+  await assert.rejects(
+    () => requestGeneration({
+      triggerType: "MANUAL",
+      force: true,
+      generationRequest: {
+        requested_format: "SINGLE_IMAGE",
+        requested_post_type: "EDUCATION",
+        visual_mode: "AI_ARTWORK_ONLY",
+      },
+      dependencies,
+    }),
+    (error) => error.code === "social_visual_mode_ineligible"
+      && error.statusCode === 409
+      && error.visual_mode_resolution?.effective === "AI_BRANDED_ARTWORK"
+      && error.visual_mode_resolution?.reasons?.includes("BRAND_LOGO_REQUIRED"),
+  );
+  assert.equal(createdRecord, null);
 });
 
 test("runDueSocialGeneration returns not_due before 08:00 Asia/Kolkata without touching models", async () => {

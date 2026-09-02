@@ -25,6 +25,7 @@ const {
   updateSocialManagerSettings,
 } = require("../services/social/socialManagerService");
 const { getSocialManagerSettings } = require("../utils/socialManagerSettings");
+const { attachVerifiedBrandLogoReadiness } = require("../services/social/socialBrandLogoPolicy");
 const { reconcileUncertainPublication } = require("../services/social/socialPublishingService");
 const {
   deleteGeneratedContent,
@@ -366,7 +367,7 @@ async function addMetrics(req, res) {
 async function getSettings(_req, res) {
   try {
     const [settings, today] = await Promise.all([getSocialManagerSettings(), getTodayRecommendation()]);
-    res.json({ settings, readiness: today.readiness });
+    res.json({ settings: await attachVerifiedBrandLogoReadiness(settings), readiness: today.readiness });
   } catch (error) {
     sendError(res, error);
   }
@@ -376,7 +377,11 @@ async function updateSettings(req, res) {
   try {
     const settings = await updateSocialManagerSettings(req.body?.settings || req.body || {}, context(req));
     const today = await getTodayRecommendation();
-    res.json({ message: "Social Media Manager settings saved", settings, readiness: today.readiness });
+    res.json({
+      message: "Social Media Manager settings saved",
+      settings: await attachVerifiedBrandLogoReadiness(settings),
+      readiness: today.readiness,
+    });
   } catch (error) {
     sendError(res, error, 400);
   }

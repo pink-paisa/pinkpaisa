@@ -260,7 +260,7 @@ function fullAiAsset() {
   return asset;
 }
 
-test("approval readiness accepts each truthful active visual-mode contract", () => {
+test("approval readiness keeps truthful pre-policy visual-mode contracts readable", () => {
   for (const [mode, asset] of [
     ["AI_VISUAL_WITH_EXACT_OVERLAY", exactAsset()],
     ["AI_ARTWORK_ONLY", artworkOnlyAsset()],
@@ -423,7 +423,7 @@ test("approval readiness binds each internally checksummed asset to current sequ
   assert.match(truncatedReadiness.issues.join(" | "), /complete approved CAROUSEL sequence \(1, 2, 3\)/i);
 });
 
-test("copy fingerprints recompose Story legal/CTA pixels while FULL_AI body-only edits preserve image calls", () => {
+test("copy fingerprints recompose Story legal/CTA pixels while FULL_AI and historical artwork-only edits preserve image calls", () => {
   const storyBefore = { primaryRecommendation: recommendation("STORY") };
   const storyAfter = clone(storyBefore);
   storyAfter.primaryRecommendation.cta = "Updated CTA that must be rendered on the final Story frame.";

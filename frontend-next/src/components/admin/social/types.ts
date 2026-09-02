@@ -27,15 +27,91 @@ export type SocialFormat =
 
 export type SocialFormatPreference = "AUTO_CHOOSE" | SocialFormat;
 
-export type SocialVisualMode = "AI_VISUAL_WITH_EXACT_OVERLAY" | "AI_ARTWORK_ONLY" | "FULL_AI_GRAPHIC";
+export type SocialVisualMode = "AI_VISUAL_WITH_EXACT_OVERLAY" | "AI_BRANDED_ARTWORK" | "FULL_AI_GRAPHIC";
 
-export type SocialStoredVisualMode = SocialVisualMode | "MANUAL_TEMPLATE";
+export type SocialStoredVisualMode = SocialVisualMode | "AI_ARTWORK_ONLY" | "MANUAL_TEMPLATE";
+
+export type SocialResolvedVisualMode = Exclude<SocialStoredVisualMode, "MANUAL_TEMPLATE">;
 
 export type SocialVisualModeResolution = {
-  requested: SocialVisualMode;
-  effective: SocialVisualMode;
+  requested: SocialResolvedVisualMode;
+  effective: SocialResolvedVisualMode;
   eligible: boolean;
   reasons: string[];
+};
+
+export type SocialBrandLogoContract = {
+  contractVersion: number;
+  policyVersion: string;
+  required: boolean;
+  method: string;
+  referenceAssetId: string;
+  referenceChecksumSha256: string;
+  referenceMimeType: string;
+  referenceWidth: number | null;
+  referenceHeight: number | null;
+  referenceUrl: string;
+  inputFidelity: string;
+  placementStrategy: string;
+  lockedCorner: string | null;
+  targetWidthPx: number | null;
+  acceptedWidthRangePx: number[];
+  readinessStatus: string;
+};
+
+export type SocialBrandLogoValidationEvidence = {
+  referenceAssetId: string;
+  referenceChecksumSha256: string;
+  method: string;
+  inputFidelity: string;
+  generationMethod: string;
+  referenceValidationMethod: string;
+  sourceProvenance: string;
+  referenceUsedForGeneration: boolean | null;
+  referenceUsedForValidation: boolean | null;
+  validatedAssetChecksumSha256: string;
+  validatedAsset: string;
+  requestedCorner: string;
+  observedCorner: string;
+  normalizedBoundingBox: {
+    x: number | null;
+    y: number | null;
+    width: number | null;
+    height: number | null;
+  } | null;
+  logoCount: number | null;
+  identityChecks: Record<string, boolean | number | string>;
+  validatorModel: string;
+  validatorResponseId: string;
+  outcome: string;
+  postGenerationLogoOverlayApplied: boolean | null;
+  finalAssetPreservation: {
+    method: string;
+    finalAssetRole: string;
+    sourceValidationResponseId: string;
+    sourceValidatedAssetChecksumSha256: string;
+    finalPublishableAssetChecksumSha256: string;
+    pixelOverlayApplied: boolean | null;
+    programmaticCopyOrBrandPixelsInsideExcludedBox: boolean | null;
+    postGenerationLogoOverlayApplied: boolean | null;
+  } | null;
+  registeredMarkRecognizable?: boolean | null;
+  protectedContentOverlapPresent?: boolean | null;
+  issues?: string[];
+};
+
+export type SocialBrandLogoSceneEvidence = SocialBrandLogoValidationEvidence & {
+  sceneIndex: number | null;
+  sourceAssetSequence: number | null;
+  extractedAtSeconds: number | null;
+  extractedFrameChecksumSha256: string;
+};
+
+export type SocialBrandLogoEvidence = SocialBrandLogoValidationEvidence & {
+  allScenesPassed: boolean | null;
+  validatedSceneCount: number | null;
+  expectedSceneCount: number | null;
+  sceneEvidence: SocialBrandLogoSceneEvidence[];
 };
 
 export type SocialGenerationScope = "FULL_POST" | "STRATEGY" | "COPY" | "IMAGE" | "FORMAT_CHANGE" | "COMPLIANCE";
@@ -98,7 +174,7 @@ export type SocialGenerationRequestSnapshot = {
   requestedFormat: SocialFormatPreference;
   requestedPostType: string;
   generationScope: SocialGenerationScope;
-  visualMode: SocialVisualMode;
+  visualMode: SocialResolvedVisualMode;
   adminInstructions: string;
   verifiedProductId: string;
   requestId: string;
@@ -138,6 +214,7 @@ export type SocialCandidateSummary = {
 
 export type SocialGenerationRun = {
   id: string;
+  brandLogoContract: SocialBrandLogoContract | null;
   status: SocialRunStatus;
   currentStage: SocialRunStage | string;
   generationRequest: SocialGenerationRequestSnapshot | null;
@@ -300,8 +377,10 @@ export type SocialAsset = {
   prompt: string;
   generationStatus: string;
   generationAttempts: number;
+  checksumSha256: string;
   sourceProvenance: string;
   provenance: Record<string, unknown>;
+  brandLogoEvidence: SocialBrandLogoEvidence | null;
   status: string;
   manualReviewRequired: boolean;
   manualReviewStatus: string;
@@ -472,6 +551,7 @@ export type SocialContentMixSnapshot = {
 
 export type SocialWeeklyPlan = {
   id: string;
+  brandLogoContract: SocialBrandLogoContract | null;
   status: string;
   weekStart: string;
   weekEnd: string;
@@ -640,6 +720,7 @@ export type SocialDraft = {
   visualMode: SocialStoredVisualMode;
   fullAiReady: boolean;
   visualModeResolution: SocialVisualModeResolution | null;
+  brandLogoContract: SocialBrandLogoContract | null;
   primary: SocialRecommendation;
   captionContract: SocialCaptionContract | null;
   alternatives: SocialAlternative[];
@@ -768,6 +849,7 @@ export type SocialPillarSetting = {
 export type SocialSettings = {
   raw: Record<string, unknown>;
   brandProfile: string;
+  brandLogoContract: SocialBrandLogoContract;
   targetAudience: string;
   contentPillars: SocialPillarSetting[];
   dailyGenerationTime: string;
@@ -832,6 +914,24 @@ export const EMPTY_READINESS: SocialReadiness = {
 export const DEFAULT_SOCIAL_SETTINGS: SocialSettings = {
   raw: {},
   brandProfile: "Wealth | Wellness | Women. Simple, warm and practical financial education for Indian women.",
+  brandLogoContract: {
+    contractVersion: 1,
+    policyVersion: "pink-paisa-mandatory-ai-baked-v1",
+    required: true,
+    method: "AI_REFERENCE_BAKED",
+    referenceAssetId: "pink-paisa-profile-badge-v1",
+    referenceChecksumSha256: "",
+    referenceMimeType: "image/png",
+    referenceWidth: 512,
+    referenceHeight: 512,
+    referenceUrl: "",
+    inputFidelity: "high",
+    placementStrategy: "ADAPTIVE_SAFE_CORNER_LOCKED_PER_DRAFT",
+    lockedCorner: null,
+    targetWidthPx: 210,
+    acceptedWidthRangePx: [180, 240],
+    readinessStatus: "NOT_CONFIGURED",
+  },
   targetAudience: "Indian women, young professionals, first-time investors and women building financial confidence.",
   contentPillars: [
     { name: "Money Education", ratio: 25, enabled: true },

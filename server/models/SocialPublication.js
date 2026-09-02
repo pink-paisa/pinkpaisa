@@ -147,7 +147,19 @@ const SocialPublicationSchema = new mongoose.Schema(
       trim: true,
       set: (value) => String(value || "").trim() || null,
     },
+    external_publication_ids: {
+      type: [String],
+      default: [],
+      validate: {
+        validator: (value) => Array.isArray(value)
+          && value.length <= 10
+          && new Set(value.map((item) => String(item || "").trim())).size === value.length
+          && value.every((item) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,299}$/.test(String(item || "").trim())),
+        message: "Published Meta media identifiers must be unique, authoritative identifiers",
+      },
+    },
     external_permalink: { type: String, default: null, trim: true },
+    external_permalinks: { type: [String], default: [] },
     provider_checkpoint: { type: mongoose.Schema.Types.Mixed, default: null },
     provider_response_metadata: { type: mongoose.Schema.Types.Mixed, default: null },
     tracked_url_delivery: { type: trackedUrlDeliverySchema, default: null },
@@ -185,6 +197,19 @@ SocialPublicationSchema.index(
 SocialPublicationSchema.pre("validate", function validatePublishedIdentity() {
   if (this.status === "PUBLISHED" && !String(this.external_publication_id || "").trim()) {
     this.invalidate("external_publication_id", "PUBLISHED publications require Meta's published media identifier");
+  }
+  if (this.status === "PUBLISHED" && this.content_type === "STORY") {
+    const expectedCount = Array.isArray(this.asset_urls) ? this.asset_urls.length : 0;
+    const mediaIds = Array.isArray(this.external_publication_ids)
+      ? this.external_publication_ids.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const historicalSingleStory = expectedCount === 1 && mediaIds.length === 0 && Boolean(String(this.external_publication_id || "").trim());
+    if (!historicalSingleStory && (mediaIds.length !== expectedCount || mediaIds[0] !== String(this.external_publication_id || "").trim())) {
+      this.invalidate(
+        "external_publication_ids",
+        "A published Story sequence requires one ordered authoritative Meta media identifier per asset",
+      );
+    }
   }
 });
 

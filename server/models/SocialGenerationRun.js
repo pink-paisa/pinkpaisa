@@ -47,6 +47,7 @@ const SOCIAL_FORMATS = [
 
 const VISUAL_MODES = [
   "AI_VISUAL_WITH_EXACT_OVERLAY",
+  "AI_BRANDED_ARTWORK",
   "AI_ARTWORK_ONLY",
   "FULL_AI_GRAPHIC",
   "MANUAL_TEMPLATE",
@@ -327,6 +328,7 @@ const SocialGenerationRunSchema = new mongoose.Schema(
     request_fingerprint: { type: String, default: null, trim: true, index: true },
     input_snapshot_hash: { type: String, default: null, trim: true, index: true },
     generation_request: { type: generationRequestSchema, default: () => ({}) },
+    brand_logo_contract: { type: mongoose.Schema.Types.Mixed, default: null },
     generation_mode: {
       type: String,
       enum: ["FULL_AI", "ADMIN_MANUAL", "LEGACY_PARTIAL_AI", "LEGACY_FALLBACK"],

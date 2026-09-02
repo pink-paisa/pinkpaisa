@@ -17,6 +17,15 @@ const {
 } = require("./socialArtDirection");
 const { buildSocialCaptionContract } = require("./socialCaptionPolicy");
 const { assertSocialVisualModeEligible } = require("./socialVisualPolicy");
+const {
+  AI_BRANDED_ARTWORK_MODE,
+  BRAND_LOGO_CONTRACT_VERSION,
+  CANONICAL_BRAND_BADGE_ID,
+  CANONICAL_BRAND_BADGE_SHA256,
+  brandLogoEvidencePassed,
+  buildBrandLogoContract,
+  serializeBrandLogoContract,
+} = require("./socialBrandLogoPolicy");
 
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 const DEFAULT_TIMEOUT_MS = 180000;
@@ -142,7 +151,9 @@ function approvedSupportingTextForSequence(recommendation = {}, sequence = 1) {
   return [supportingText, interactionCopy].filter(Boolean).join("\n");
 }
 
-function fullAiGraphicTextBlocksForSequence(recommendation = {}, sequence = 1, total = 1) {
+function fullAiGraphicTextBlocksForSequence(recommendation = {}, sequence = 1, total = 1, options = {}) {
+  const contractVersion = Math.max(Number(options.contractVersion || options.contract_version || 2), 1);
+  const brandNameBlock = contractVersion >= 3 ? [] : [{ key: "brand_name", text: "Pink Paisa" }];
   const format = trimText(recommendation.format).toUpperCase();
   const headline = approvedHeadlineForSequence(recommendation, sequence);
   const supportingText = approvedSupportingTextForSequence(recommendation, sequence);
@@ -165,7 +176,7 @@ function fullAiGraphicTextBlocksForSequence(recommendation = {}, sequence = 1, t
       return normalized && !headline.includes(normalized) ? [{ key, text: normalized }] : [];
     };
     return normalizeExpectedTextBlocks([
-      { key: "brand_name", text: "Pink Paisa" },
+      ...brandNameBlock,
       { key: "story_copy", text: headline },
       ...(Number(sequence) === 1
         ? componentIfDistinct("affiliate_disclosure", contract.components.affiliate_disclosure)
@@ -180,7 +191,7 @@ function fullAiGraphicTextBlocksForSequence(recommendation = {}, sequence = 1, t
     ]);
   }
   return normalizeExpectedTextBlocks([
-    { key: "brand_name", text: "Pink Paisa" },
+    ...brandNameBlock,
     { key: "headline", text: headline },
     ...(supportingText ? [{ key: "supporting_text", text: supportingText }] : []),
     ...(format === "CAROUSEL" && Number(total) > 1
@@ -288,7 +299,39 @@ function visualRequestsForRecommendation(recommendation = {}) {
   }];
 }
 
-function buildProductionImagePrompt({ recommendation = {}, request = {}, sequence = 1, total = 1, visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY" }) {
+function brandLogoPromptInstructions(contract = null) {
+  const serialized = contract ? serializeBrandLogoContract(contract) : null;
+  const corner = serialized?.locked_corner || serialized?.safe_corner?.corner || "the locked adaptive safe corner";
+  const box = serialized?.safe_corner?.target_box;
+  const boxDirection = box
+    ? `Keep the entire badge inside the locked ${corner} box (left ${box.left}px, top ${box.top}px, width ${box.width}px, height ${box.height}px on the ${box.canvas_width}x${box.canvas_height} final canvas).`
+    : `Keep the entire badge in ${corner} with generous mobile-safe clear space.`;
+  return [
+    `The supplied input image is the one canonical Pink Paisa profile badge (${CANONICAL_BRAND_BADGE_ID}, SHA-256 ${CANONICAL_BRAND_BADGE_SHA256}).`,
+    "Preserve its circular artwork, interlaced PP symbol, PINK PAISA wordmark, registered mark, exact colours, geometry and proportions faithfully; do not redraw, restyle, crop, distort, recolour, substitute or transcribe it.",
+    `Place that supplied badge exactly once. ${boxDirection}`,
+    "Do not add a second Pink Paisa wordmark, badge or logo. Do not treat the letters inside the supplied badge as ordinary poster-copy text.",
+    "The badge must be integrated by this OpenAI image edit. No post-generation logo overlay or fallback is permitted.",
+  ].join(" ");
+}
+
+function brandLogoRetryDirection(request = {}) {
+  const retryNumber = Math.min(Math.max(Number(request.brand_logo_retry_number || 0), 0), 2);
+  if (!retryNumber) return null;
+  return retryNumber === 1
+    ? "Canonical badge retry: simplify and clear the locked badge corner, enlarge the supplied badge toward 210px, preserve the reference exactly and keep every decorative element outside its clear space."
+    : "Canonical badge final retry: use the cleanest possible locked-corner treatment; reproduce the supplied badge exactly once at 210px with high contrast, no crop, no redraw, no duplicate wordmark and no nearby decoration.";
+}
+
+function buildProductionImagePrompt({
+  recommendation = {},
+  request = {},
+  sequence = 1,
+  total = 1,
+  visualMode = "AI_VISUAL_WITH_EXACT_OVERLAY",
+  fullAiGraphicContractVersion = 3,
+  brandLogoContract = null,
+}) {
   const creativePrompt = trimText(request.prompt);
   if (!creativePrompt) {
     const error = new Error(`AI visual brief is missing an image prompt for visual ${sequence}`);
@@ -300,9 +343,13 @@ function buildProductionImagePrompt({ recommendation = {}, request = {}, sequenc
   const formatContent = getContentPackage(recommendation) || {};
   const exactOverlayMode = visualMode === "AI_VISUAL_WITH_EXACT_OVERLAY";
   const artworkOnlyMode = visualMode === "AI_ARTWORK_ONLY";
+  const brandedArtworkMode = visualMode === AI_BRANDED_ARTWORK_MODE;
+  const referenceBackedMode = exactOverlayMode || brandedArtworkMode || visualMode === "FULL_AI_GRAPHIC";
   const artDirection = resolvePinkPaisaArtDirection(recommendation, request.art_direction || request.artDirection);
   const fullAiTextBlocks = visualMode === "FULL_AI_GRAPHIC"
-    ? fullAiGraphicTextBlocksForSequence(recommendation, sequence, total)
+    ? fullAiGraphicTextBlocksForSequence(recommendation, sequence, total, {
+      contractVersion: fullAiGraphicContractVersion,
+    })
     : [];
   const prohibitedObjectValues = [
     ...stringList(request.prohibited_objects),
@@ -320,6 +367,7 @@ function buildProductionImagePrompt({ recommendation = {}, request = {}, sequenc
   const fullAiRetryDirection = visualMode === "FULL_AI_GRAPHIC"
     ? fullAiGraphicRetryDirection(request)
     : null;
+  const logoRetryDirection = referenceBackedMode ? brandLogoRetryDirection(request) : null;
   const technicalDirection = [
     `Instagram format: ${format || "SINGLE_IMAGE"}; visual ${sequence} of ${total}.`,
     `Approved art direction: ${artDirection.id} — ${artDirection.label}.`,
@@ -329,19 +377,23 @@ function buildProductionImagePrompt({ recommendation = {}, request = {}, sequenc
     "Specify a coherent subject, setting, composition, camera angle, lighting, background, mood, culturally appropriate styling, required objects and an uncluttered mobile-first focal hierarchy.",
     exactOverlayMode
       ? (format === "STORY"
-        ? "Integrate intentional high-contrast text-safe space inside safe margins for exact Story copy, required first-frame affiliate disclosure, final-frame CTA/general disclaimer, and the Pink Paisa logo. The safe space must belong to the selected editorial composition rather than appearing as a blank or floating card. Render no text, letters, numbers, currency symbols or logos in the generated artwork."
-        : "Integrate intentional high-contrast text-safe space for an exact headline/supporting-copy overlay and Pink Paisa logo. The safe space must be part of the selected editorial grid or collage composition rather than a blank area or floating card. CTA and disclosures will be assembled once in the Instagram caption. Render no text, letters, numbers, currency symbols or logos in the generated artwork.")
+        ? "Integrate intentional high-contrast text-safe space inside safe margins for exact Story copy, required first-frame affiliate disclosure and final-frame CTA/general-disclaimer overlays. The safe space must belong to the selected editorial composition rather than appearing as a blank or floating card. Render no text, letters, numbers, currency symbols or logos except the one supplied canonical Pink Paisa profile badge."
+        : "Integrate intentional high-contrast text-safe space for an exact headline/supporting-copy overlay. The safe space must be part of the selected editorial grid or collage composition rather than a blank area or floating card. CTA and disclosures will be assembled once in the Instagram caption. Render no text, letters, numbers, currency symbols or logos except the one supplied canonical Pink Paisa profile badge.")
       : artworkOnlyMode
         ? "Create full-bleed artwork with a natural mobile-first focal hierarchy. Do not reserve a text-safe area. Render absolutely no visible text, letters, numbers, currency symbols, logo, wordmark, watermark, badge, label, brand name, or other branding."
+        : brandedArtworkMode
+          ? "Create full-bleed artwork with a natural mobile-first focal hierarchy. Render no visible text, letters, numbers, currency symbols, wordmark, watermark, badge, label, or branding except the one supplied canonical Pink Paisa profile badge. Do not reserve a copy-safe area and do not invent any other typography."
         : [
           "Create the complete finished Pink Paisa poster inside the generated image. There will be no post-generation text, logo, SVG, background, brand treatment, or other pixel overlay.",
           `Render every approved visible-text block exactly once, with exact spelling and punctuation, and render no other visible text: ${JSON.stringify(fullAiTextBlocks)}.`,
-          "Treat Pink Paisa as intentional baked-in brand identity. Use the meaning of the approved manifest as the sole semantic theme for topic-specific illustrations and icons. Make every text block comfortably legible on mobile and keep it inside safe margins.",
+          "The ordinary visible-text manifest intentionally excludes the Pink Paisa brand name because the supplied canonical badge owns brand identity. Do not render a separate Pink Paisa wordmark. Use the meaning of the approved manifest as the sole semantic theme for topic-specific illustrations and icons. Make every ordinary text block comfortably legible on mobile and keep it inside safe margins.",
           format === "STORY"
             ? "Stories publish without a caption. Render the approved first-frame affiliate disclosure and final-frame CTA/general disclaimer exactly when those blocks are present in the manifest; do not add any post-generation overlay."
             : "For feed posts and Reels, CTA, affiliate disclosure, financial disclaimer and hashtags belong only in the Instagram caption and must not appear in the image unless explicitly listed above.",
         ].join(" "),
+    referenceBackedMode ? brandLogoPromptInstructions(brandLogoContract) : null,
     fullAiRetryDirection,
+    logoRetryDirection,
     "No watermark, unrelated visible logo, competitor branding, fake app interface, fake financial statement, unsupported claim, price, rating, review count, discount, stock message or guaranteed outcome.",
     requiredObjects.length
       ? `Required background objects: ${requiredObjects.join("; ")}.`
@@ -563,11 +615,25 @@ function fullAiGraphicPosterValidationPassed(validation = {}, expectedTextBlocks
     && Boolean(trimText(validation.response_id || validation.responseId));
 }
 
-async function validateFullAiGraphicPoster({ buffer, expectedTextBlocks, settings = {}, dependencies = {} }) {
+async function validateFullAiGraphicPoster({
+  buffer,
+  expectedTextBlocks,
+  contractVersion = 2,
+  brandLogoContract = null,
+  settings = {},
+  dependencies = {},
+}) {
   const blocks = normalizeExpectedTextBlocks(expectedTextBlocks);
   const validator = dependencies.validateFullAiGraphicPoster;
   if (typeof validator === "function") {
-    return validator({ buffer, expectedTextBlocks: blocks, settings, dependencies });
+    return validator({
+      buffer,
+      expectedTextBlocks: blocks,
+      contractVersion,
+      brandLogoContract: brandLogoContract ? serializeBrandLogoContract(brandLogoContract) : null,
+      settings,
+      dependencies,
+    });
   }
   const client = createOpenAiClient(dependencies);
   if (!client.responses?.create) {
@@ -628,7 +694,9 @@ async function validateFullAiGraphicPoster({ buffer, expectedTextBlocks, setting
           text: [
             "Inspect this fully AI-rendered Pink Paisa social poster after Instagram normalization.",
             `The complete ordered list of approved visible text blocks is: ${JSON.stringify(blocks)}.`,
-            "Return PASS only when every block appears exactly once with exact spelling and punctuation, in the supplied order; the Pink Paisa brand text is clear and intentional; all text is comfortably legible on mobile and inside safe margins; no additional words, letters, numbers, competitor logos, unrelated logos, or watermarks are visible.",
+            Number(contractVersion) >= 3
+              ? "The supplied canonical profile badge owns brand identity. Its internal PINK PAISA and registered-mark glyphs are exempt from the ordinary text manifest and must not be repeated or included in observedTextBlocks. Return PASS only when every ordinary block appears exactly once with exact spelling and punctuation, in the supplied order; the one badge is clear; all ordinary text is comfortably legible on mobile and inside safe margins; and no other words, letters, numbers, logos, or watermarks are visible."
+              : "Return PASS only when every block appears exactly once with exact spelling and punctuation, in the supplied order; the Pink Paisa brand text is clear and intentional; all text is comfortably legible on mobile and inside safe margins; no additional words, letters, numbers, competitor logos, unrelated logos, or watermarks are visible.",
             "Do not treat decorative non-letter shapes as text. Record the visible blocks in observedTextBlocks using the exact order above.",
           ].join("\n"),
         },
@@ -645,6 +713,318 @@ async function validateFullAiGraphicPoster({ buffer, expectedTextBlocks, setting
     },
   });
   return { ...parseStructuredText(response), response_id: responseId(response), usage: responseUsage(response) };
+}
+
+function normalizeBrandLogoEvidence(value = {}, contract = {}, settings = {}, {
+  validatedAssetChecksumSha256 = null,
+  evidenceMethod = "AI_REFERENCE_BAKED",
+  inputFidelity = "high",
+  sourceProvenance = "generated_from_approved_source",
+  referenceUsedForGeneration = true,
+} = {}) {
+  const serialized = serializeBrandLogoContract(contract);
+  const identityChecks = value.identity_checks || value.identityChecks || {};
+  const read = (camelName, snakeName, canonicalName = snakeName) => (
+    value[camelName] ?? value[snakeName] ?? identityChecks[canonicalName]
+  );
+  const approvedLogoPresent = read("approvedLogoPresent", "approved_logo_present") === true;
+  const referenceIdentityMatch = read("referenceIdentityMatch", "reference_identity_match") === true;
+  const wordmarkExactMatch = read("wordmarkExactMatch", "wordmark_exact_match") === true;
+  const iconGeometryMatch = read("iconGeometryMatch", "icon_geometry_match") === true;
+  const brandColourMatch = read("brandColourMatch", "brand_colour_match") === true;
+  const registeredMarkRecognizable = read("registeredMarkRecognizable", "registered_mark_recognizable") === true;
+  const singleBadgeOccurrence = read("singleBadgeOccurrence", "single_badge_occurrence") === true;
+  const safeCornerMatch = read("safeCornerMatch", "safe_corner_match") === true;
+  const fullyInsideSafeBox = read("fullyInsideSafeBox", "fully_inside_safe_box") === true;
+  const mobileLegible = read("mobileLegible", "mobile_legible") === true;
+  const protectedContentOverlapPresent = value.protectedContentOverlapPresent
+    ?? value.protected_content_overlap_present
+    ?? identityChecks.protected_content_overlap_present;
+  const unapprovedTextPresent = value.unapprovedTextPresent
+    ?? value.unapproved_text_present
+    ?? (identityChecks.no_unapproved_text === true ? false : identityChecks.no_unapproved_text === false ? true : undefined);
+  const unrelatedLogoOrWatermarkPresent = value.unrelatedLogoOrWatermarkPresent
+    ?? value.unrelated_logo_or_watermark_present
+    ?? (identityChecks.no_unrelated_logo_or_watermark === true
+      ? false
+      : identityChecks.no_unrelated_logo_or_watermark === false ? true : undefined);
+  const observedBadgeWidthPx = Number(
+    value.observedBadgeWidthPx
+    ?? value.observed_badge_width_px
+    ?? identityChecks.observed_badge_width_px,
+  );
+  const normalizedBoundingBox = value.normalizedBoundingBox
+    || value.normalized_bounding_box
+    || null;
+  const observedBadgeCount = Number(
+    value.observedBadgeCount
+    ?? value.observed_badge_count
+    ?? value.logo_count
+    ?? value.logoCount,
+  );
+  const observedCorner = trimText(value.observedCorner || value.observed_corner).toUpperCase();
+  const reportedBadgeId = trimText(
+    value.badgeId
+    || value.badge_id
+    || value.referenceAssetId
+    || value.reference_asset_id,
+  );
+  const reportedReferenceChecksum = trimText(
+    value.referenceChecksumSha256
+    || value.reference_checksum_sha256,
+  ).toLowerCase();
+  const responseIdentifier = trimText(
+    value.response_id
+    || value.responseId
+    || value.validator_response_id
+    || value.validatorResponseId,
+  ) || null;
+  const validatorModel = trimText(
+    value.validator_model
+    || value.validatorModel
+    || settings.models?.compliance_model
+    || settings.models?.text_model
+    || settings.compliance_model
+    || settings.text_model,
+  ) || "gpt-5.6-luna";
+  const outcome = trimText(value.outcome || value.decision).toUpperCase();
+  const acceptedWidthRange = observedBadgeWidthPx >= 180 && observedBadgeWidthPx <= 240;
+  const locallyComputedValidatedAssetChecksum = trimText(validatedAssetChecksumSha256).toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(locallyComputedValidatedAssetChecksum)) {
+    const error = new Error("Canonical badge evidence requires the locally computed SHA-256 of the exact image bytes supplied to validation");
+    error.code = "social_brand_logo_validation_invalid";
+    throw error;
+  }
+  const normalizedEvidenceMethod = trimText(evidenceMethod).toUpperCase();
+  const normalizedInputFidelity = trimText(inputFidelity).toLowerCase();
+  const normalizedSourceProvenance = trimText(sourceProvenance).toLowerCase();
+  return {
+    ...value,
+    decision: outcome,
+    badgeId: reportedBadgeId,
+    referenceChecksumSha256: reportedReferenceChecksum,
+    approvedLogoPresent,
+    referenceIdentityMatch,
+    wordmarkExactMatch,
+    iconGeometryMatch,
+    brandColourMatch,
+    registeredMarkRecognizable,
+    singleBadgeOccurrence,
+    observedBadgeCount,
+    observedBadgeWidthPx,
+    safeCornerMatch,
+    fullyInsideSafeBox,
+    observedCorner,
+    normalizedBoundingBox,
+    mobileLegible,
+    protectedContentOverlapPresent: typeof protectedContentOverlapPresent === "boolean"
+      ? protectedContentOverlapPresent
+      : null,
+    unapprovedTextPresent: typeof unapprovedTextPresent === "boolean" ? unapprovedTextPresent : null,
+    unrelatedLogoOrWatermarkPresent: typeof unrelatedLogoOrWatermarkPresent === "boolean"
+      ? unrelatedLogoOrWatermarkPresent
+      : null,
+    response_id: responseIdentifier,
+    issues: safeArray(value.issues).map(trimText).filter(Boolean),
+    reference_asset_id: reportedBadgeId,
+    reference_checksum_sha256: reportedReferenceChecksum,
+    method: normalizedEvidenceMethod,
+    input_fidelity: normalizedInputFidelity,
+    source_provenance: normalizedSourceProvenance,
+    reference_used_for_generation: referenceUsedForGeneration === true,
+    reference_used_for_validation: true,
+    validated_asset_checksum_sha256: locallyComputedValidatedAssetChecksum,
+    validatedAssetChecksumSha256: locallyComputedValidatedAssetChecksum,
+    requested_corner: serialized.locked_corner,
+    observed_corner: observedCorner,
+    normalized_bounding_box: normalizedBoundingBox,
+    logo_count: observedBadgeCount,
+    identity_checks: {
+      approved_logo_present: approvedLogoPresent,
+      reference_identity_match: referenceIdentityMatch,
+      wordmark_exact_match: wordmarkExactMatch,
+      icon_geometry_match: iconGeometryMatch,
+      brand_colour_match: brandColourMatch,
+      registered_mark_recognizable: registeredMarkRecognizable,
+      single_badge_occurrence: singleBadgeOccurrence,
+      safe_corner_match: safeCornerMatch,
+      fully_inside_safe_box: fullyInsideSafeBox,
+      accepted_width_range: acceptedWidthRange,
+      observed_badge_width_px: observedBadgeWidthPx,
+      mobile_legible: mobileLegible,
+      protected_content_overlap_present: protectedContentOverlapPresent === true,
+      no_unapproved_text: unapprovedTextPresent === false,
+      no_unrelated_logo_or_watermark: unrelatedLogoOrWatermarkPresent === false,
+    },
+    validator_model: validatorModel,
+    validator_response_id: responseIdentifier,
+    outcome,
+    post_generation_logo_overlay_applied: false,
+  };
+}
+
+async function validateBrandLogoReference({
+  generatedBuffer,
+  referenceBuffer,
+  contract,
+  expectedTextBlocks = [],
+  evidenceMethod = "AI_REFERENCE_BAKED",
+  inputFidelity = "high",
+  sourceProvenance = "generated_from_approved_source",
+  referenceUsedForGeneration = true,
+  settings = {},
+  dependencies = {},
+} = {}) {
+  const runtime = assertRuntimeBrandLogoContract(contract);
+  if (!Buffer.isBuffer(generatedBuffer) || !generatedBuffer.length) {
+    const error = new Error("A generated image is required for independent canonical badge validation");
+    error.code = "social_brand_logo_validation_invalid";
+    throw error;
+  }
+  if (!Buffer.isBuffer(referenceBuffer) || !referenceBuffer.equals(runtime.reference.buffer)) {
+    const error = new Error("Independent brand validation must receive the same verified canonical badge reference used for generation");
+    error.code = "social_brand_logo_reference_invalid";
+    throw error;
+  }
+  const validatedAssetChecksumSha256 = crypto.createHash("sha256").update(generatedBuffer).digest("hex");
+  const normalizationContext = {
+    validatedAssetChecksumSha256,
+    evidenceMethod,
+    inputFidelity,
+    sourceProvenance,
+    referenceUsedForGeneration,
+  };
+  const validator = dependencies.validateBrandLogoReference || dependencies.validateGeneratedBrandLogo;
+  if (typeof validator === "function") {
+    const result = await validator({
+      generatedBuffer,
+      referenceBuffer,
+      contract: runtime.serialized,
+      expectedTextBlocks,
+      settings,
+      dependencies,
+    });
+    return normalizeBrandLogoEvidence(result, runtime.serialized, settings, normalizationContext);
+  }
+  const client = createOpenAiClient(dependencies);
+  if (!client.responses?.create) {
+    const error = new Error("The configured OpenAI client cannot independently validate the canonical Pink Paisa badge");
+    error.code = "social_brand_logo_validator_unavailable";
+    throw error;
+  }
+  let generatedMimeType = "image/jpeg";
+  try {
+    const metadata = await sharp(generatedBuffer, { failOn: "error", limitInputPixels: 40_000_000 }).metadata();
+    if (metadata.format === "png") generatedMimeType = "image/png";
+    if (metadata.format === "webp") generatedMimeType = "image/webp";
+  } catch (cause) {
+    const error = new Error(`The generated image could not be inspected for canonical badge validation: ${cause.message}`);
+    error.code = "social_brand_logo_validation_invalid";
+    error.cause = cause;
+    throw error;
+  }
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "decision",
+      "badgeId",
+      "referenceChecksumSha256",
+      "approvedLogoPresent",
+      "referenceIdentityMatch",
+      "wordmarkExactMatch",
+      "iconGeometryMatch",
+      "brandColourMatch",
+      "registeredMarkRecognizable",
+      "singleBadgeOccurrence",
+      "observedBadgeCount",
+      "observedBadgeWidthPx",
+      "safeCornerMatch",
+      "fullyInsideSafeBox",
+      "observedCorner",
+      "normalizedBoundingBox",
+      "mobileLegible",
+      "protectedContentOverlapPresent",
+      "unapprovedTextPresent",
+      "observedUnapprovedText",
+      "unrelatedLogoOrWatermarkPresent",
+      "issues",
+    ],
+    properties: {
+      decision: { type: "string", enum: ["PASS", "REGENERATE"] },
+      badgeId: { type: "string", enum: [CANONICAL_BRAND_BADGE_ID] },
+      referenceChecksumSha256: { type: "string", enum: [CANONICAL_BRAND_BADGE_SHA256] },
+      approvedLogoPresent: { type: "boolean" },
+      referenceIdentityMatch: { type: "boolean" },
+      wordmarkExactMatch: { type: "boolean" },
+      iconGeometryMatch: { type: "boolean" },
+      brandColourMatch: { type: "boolean" },
+      registeredMarkRecognizable: { type: "boolean" },
+      singleBadgeOccurrence: { type: "boolean" },
+      observedBadgeCount: { type: "integer", minimum: 0, maximum: 5 },
+      observedBadgeWidthPx: { type: "number", minimum: 0, maximum: 1080 },
+      safeCornerMatch: { type: "boolean" },
+      fullyInsideSafeBox: { type: "boolean" },
+      observedCorner: { type: "string", enum: [runtime.serialized.locked_corner] },
+      normalizedBoundingBox: {
+        type: "object",
+        additionalProperties: false,
+        required: ["x", "y", "width", "height"],
+        properties: {
+          x: { type: "number", minimum: 0, maximum: 1 },
+          y: { type: "number", minimum: 0, maximum: 1 },
+          width: { type: "number", minimum: 0, maximum: 1 },
+          height: { type: "number", minimum: 0, maximum: 1 },
+        },
+      },
+      mobileLegible: { type: "boolean" },
+      protectedContentOverlapPresent: { type: "boolean" },
+      unapprovedTextPresent: { type: "boolean" },
+      observedUnapprovedText: { type: ["string", "null"] },
+      unrelatedLogoOrWatermarkPresent: { type: "boolean" },
+      issues: { type: "array", items: { type: "string" }, maxItems: 12 },
+    },
+  };
+  const approvedText = Array.isArray(expectedTextBlocks)
+    ? expectedTextBlocks.map((block) => trimText(block?.text || block)).filter(Boolean)
+    : [];
+  const response = await client.responses.create({
+    model: trimText(settings.models?.compliance_model || settings.models?.text_model || settings.compliance_model || settings.text_model) || "gpt-5.6-luna",
+    store: false,
+    input: [{
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: [
+            "Compare two images independently. The first image is the authoritative Pink Paisa profile-badge reference; the second is the generated social creative.",
+            `The reference identity is ${CANONICAL_BRAND_BADGE_ID} with SHA-256 ${CANONICAL_BRAND_BADGE_SHA256}.`,
+            `The generated creative must contain exactly one faithful badge in ${runtime.serialized.locked_corner}, inside ${JSON.stringify(runtime.serialized.safe_corner.target_box)}.`,
+            "Require the same circular badge, interlaced PP icon, exact PINK PAISA wordmark, recognizable registered mark, colours, geometry and proportions. Reject redraws, substitutions, misspellings, crops, distortions, recolouring, duplicates or unsafe placement.",
+            "Return the badge bounding box as normalized 0-to-1 x, y, width and height coordinates measured on the generated creative.",
+            "Set protectedContentOverlapPresent to true if the badge covers or intrudes on any headline, supporting copy, disclosure, CTA, authentic product detail, or slide/frame sequence number.",
+            `Approved ordinary poster text outside the badge is: ${JSON.stringify(approvedText)}. The PINK PAISA and registered-mark glyphs inside the reference badge are not ordinary poster text. Reject any other words, logos or watermarks.`,
+            "Return PASS only when every required identity, occurrence, safety and text check passes. Echo the canonical badge id and checksum exactly and provide an empty issues array for PASS.",
+          ].join("\n"),
+        },
+        { type: "input_image", image_url: `data:image/png;base64,${referenceBuffer.toString("base64")}` },
+        { type: "input_image", image_url: `data:${generatedMimeType};base64,${generatedBuffer.toString("base64")}` },
+      ],
+    }],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "pinkpaisa_canonical_brand_badge_validation_v1",
+        strict: true,
+        schema,
+      },
+    },
+  });
+  return normalizeBrandLogoEvidence({
+    ...parseStructuredText(response, "social_brand_logo_validation_invalid"),
+    response_id: responseId(response),
+    usage: responseUsage(response),
+  }, runtime.serialized, settings, normalizationContext);
 }
 
 function responseId(response = {}) {
@@ -693,7 +1073,29 @@ function createOpenAiClient(dependencies = {}) {
   });
 }
 
-async function callOpenAiImage({ model, prompt, size, quality, dependencies = {} }) {
+function assertRuntimeBrandLogoContract(contract) {
+  const reference = contract?.reference || {};
+  const serialized = serializeBrandLogoContract(contract || {});
+  const referenceBuffer = reference.buffer;
+  if (
+    !Buffer.isBuffer(referenceBuffer)
+    || reference.verified !== true
+    || serialized.reference_asset_id !== CANONICAL_BRAND_BADGE_ID
+    || serialized.reference_checksum_sha256 !== CANONICAL_BRAND_BADGE_SHA256
+    || crypto.createHash("sha256").update(referenceBuffer).digest("hex") !== CANONICAL_BRAND_BADGE_SHA256
+    || serialized.reference_mime_type !== "image/png"
+    || serialized.reference_width !== 512
+    || serialized.reference_height !== 512
+    || serialized.input_fidelity !== "high"
+  ) {
+    const error = new Error("A verified canonical Pink Paisa profile-badge contract is required before image generation");
+    error.code = "social_brand_logo_reference_invalid";
+    throw error;
+  }
+  return { reference, serialized };
+}
+
+async function callOpenAiImage({ model, prompt, size, quality, brandLogoContract = null, dependencies = {} }) {
   const client = createOpenAiClient(dependencies);
   const parameters = {
     model,
@@ -705,9 +1107,38 @@ async function callOpenAiImage({ model, prompt, size, quality, dependencies = {}
     n: 1,
   };
   // Authentic product pixels are deliberately never sent to a generative image
-  // endpoint. Product creatives request an empty AI background here and place
-  // the verified database image later with a guarded Sharp composite.
-  const response = await client.images.generate(parameters);
+  // endpoint. The only edit reference is the verified canonical brand badge;
+  // product creatives still place database product pixels later via guarded Sharp.
+  let response;
+  if (brandLogoContract) {
+    const { reference } = assertRuntimeBrandLogoContract(brandLogoContract);
+    if (typeof client.images?.edit !== "function") {
+      const error = new Error("The configured OpenAI client cannot perform reference-backed brand generation");
+      error.code = "social_brand_logo_reference_unsupported";
+      throw error;
+    }
+    const toOpenAiFile = dependencies.toOpenAiFile || dependencies.toFile || OpenAI.toFile;
+    if (typeof toOpenAiFile !== "function") {
+      const error = new Error("The OpenAI Uploadable adapter is unavailable for the canonical profile badge");
+      error.code = "social_brand_logo_reference_unsupported";
+      throw error;
+    }
+    const image = await toOpenAiFile(
+      reference.buffer,
+      reference.file_name || `${CANONICAL_BRAND_BADGE_ID}.png`,
+      { type: "image/png" },
+    );
+    response = await client.images.edit({
+      ...parameters,
+      image,
+      // GPT Image 2 always processes edit inputs at high fidelity and rejects
+      // an explicit input_fidelity field. Earlier GPT Image models require the
+      // explicit value to preserve the approved badge reference strongly.
+      ...(trimText(model).toLowerCase() === "gpt-image-2" ? {} : { input_fidelity: "high" }),
+    });
+  } else {
+    response = await client.images.generate(parameters);
+  }
   const providerResponseId = responseId(response);
   const usage = responseUsage(response);
   let buffer;
@@ -731,6 +1162,7 @@ async function callOpenAiImage({ model, prompt, size, quality, dependencies = {}
     buffer,
     response_id: providerResponseId,
     usage,
+    generation_method: brandLogoContract ? "openai_images_edit_reference" : "openai_images_generate",
   };
 }
 
@@ -890,6 +1322,7 @@ function requiresPromptRevision(error) {
       "social_full_ai_graphic_text_invalid",
       "social_full_ai_graphic_poster_invalid",
       "social_artwork_only_visual_invalid",
+      "social_brand_logo_validation_invalid",
       "social_carousel_original_duplicate",
       "social_carousel_original_near_duplicate",
     ].includes(code);
@@ -1203,6 +1636,9 @@ function sanitizedCompletedVisualEvidence(visual = {}) {
     text_validation: sanitizedEvidenceValue(visual.text_validation),
     poster_validation: sanitizedEvidenceValue(visual.poster_validation),
     artwork_validation: sanitizedEvidenceValue(visual.artwork_validation),
+    brand_logo_contract: sanitizedEvidenceValue(visual.brand_logo_contract),
+    brand_logo_reference: sanitizedEvidenceValue(visual.brand_logo_reference),
+    brand_logo_evidence: sanitizedEvidenceValue(visual.brand_logo_evidence || visual.brand_logo_validation),
     perceptual_hash_64: trimText(visual.perceptual_hash_64).slice(0, 64) || null,
     provider_original: sanitizedEvidenceValue(visual.provider_original),
     normalization: sanitizedEvidenceValue(visual.normalization),
@@ -1279,6 +1715,7 @@ function sanitizeImageGenerationEvidence(evidence = {}) {
     prompt_revision_estimated_cost: promptRevisionEstimatedCost,
     estimated_cost: Number(estimatedCost.toFixed(6)),
     cost_currency: trimText(evidence.cost_currency || "USD").toUpperCase(),
+    brand_logo_contract: sanitizedEvidenceValue(evidence.brand_logo_contract),
     completed_visuals: completedVisuals,
     failures,
     staged_files: sanitizedEvidenceValue(evidence.staged_files),
@@ -1388,6 +1825,9 @@ async function stageSuppliedFullAiGraphic({
   sourceBuffer,
   format,
   draftIdentity,
+  draftLike = null,
+  recommendation = null,
+  brandLogoContract = null,
   model,
   prompt,
   providerResponseId,
@@ -1456,11 +1896,41 @@ async function stageSuppliedFullAiGraphic({
     throw error;
   }
   const blocks = normalizeExpectedTextBlocks(expectedTextBlocks);
+  if (blocks.some((block) => block.key === "brand_name")) {
+    const error = new Error("FULL_AI_GRAPHIC v3 excludes brand_name from ordinary poster text because the canonical badge owns brand identity");
+    error.code = "social_full_ai_graphic_text_contract_invalid";
+    error.statusCode = 422;
+    throw error;
+  }
+  const suppliedRecommendation = {
+    ...(recommendation && typeof recommendation === "object" ? recommendation : {}),
+    format: trimText(format).toUpperCase(),
+    topic: trimText(recommendation?.topic || draftIdentity || "supplied-full-ai-graphic"),
+  };
+  const verifiedBrandLogoContract = await (dependencies.buildBrandLogoContract || buildBrandLogoContract)({
+    draftLike: {
+      ...(draftLike && typeof draftLike === "object" ? draftLike : {}),
+      idempotency_key: trimText(
+        draftLike?.idempotency_key
+        || draftLike?.idempotencyKey
+        || draftIdentity,
+      ),
+      format: suppliedRecommendation.format,
+      brand_logo_contract: brandLogoContract || draftLike?.brand_logo_contract || null,
+    },
+    recommendation: suppliedRecommendation,
+    visualMode: "FULL_AI_GRAPHIC",
+    preferredCorner: settings.visual_brand?.logo_policy?.locked_corner || null,
+    logoPath: settings.visual_brand?.logo_path || settings.brand_logo_path || null,
+    dependencies,
+  });
   const normalized = await validateAndNormalizeOriginal(sourceBuffer, format, { resizeFit: "fill", autoRotate: false });
   const validation = {
     ...await validateFullAiGraphicPoster({
       buffer: normalized.buffer,
       expectedTextBlocks: blocks,
+      contractVersion: 3,
+      brandLogoContract: verifiedBrandLogoContract,
       settings,
       dependencies,
     }),
@@ -1471,6 +1941,32 @@ async function stageSuppliedFullAiGraphic({
     error.code = "social_full_ai_graphic_poster_invalid";
     error.statusCode = 422;
     error.poster_validation = validation;
+    throw error;
+  }
+  const brandLogoEvidence = {
+    ...await validateBrandLogoReference({
+      generatedBuffer: normalized.buffer,
+      referenceBuffer: verifiedBrandLogoContract.reference.buffer,
+      contract: verifiedBrandLogoContract,
+      expectedTextBlocks: blocks,
+      evidenceMethod: "EXTERNAL_REFERENCE_VISUAL_MATCH",
+      inputFidelity: "not_applicable",
+      sourceProvenance: normalizedSourceProvenance,
+      referenceUsedForGeneration: false,
+      settings,
+      dependencies,
+    }),
+    validated_asset: "openai_normalized_final",
+    generation_method: normalizedGenerationTool || "externally_supplied_ai_image",
+    reference_validation_method: "external_reference_visual_match",
+    post_generation_logo_overlay_applied: false,
+  };
+  const normalizedChecksum = crypto.createHash("sha256").update(normalized.buffer).digest("hex");
+  if (!brandLogoEvidencePassed(brandLogoEvidence, verifiedBrandLogoContract, normalizedChecksum)) {
+    const error = new Error(`Canonical Pink Paisa badge validation failed: ${safeIssueText(brandLogoEvidence?.issues)}`);
+    error.code = "social_brand_logo_validation_invalid";
+    error.statusCode = 422;
+    error.brand_logo_validation = brandLogoEvidence;
     throw error;
   }
 
@@ -1524,7 +2020,7 @@ async function stageSuppliedFullAiGraphic({
     };
     const perceptualHash = await computePerceptualHash64(normalized.buffer);
     return {
-      contract_version: 2,
+      contract_version: 3,
       version,
       provider: "openai",
       model: normalizedModel,
@@ -1540,6 +2036,21 @@ async function stageSuppliedFullAiGraphic({
       cost_currency: trimText(costCurrency || "USD").toUpperCase() || "USD",
       expected_text_blocks: blocks,
       poster_validation: validation,
+      brand_logo_contract: serializeBrandLogoContract(verifiedBrandLogoContract),
+      brand_logo_reference: {
+        asset_type: "BRAND_LOGO",
+        reference_asset_id: verifiedBrandLogoContract.reference.badge_id,
+        source_path: verifiedBrandLogoContract.reference.source_path,
+        checksum_sha256: verifiedBrandLogoContract.reference.checksum_sha256,
+        mime_type: verifiedBrandLogoContract.reference.mime_type,
+        width: verifiedBrandLogoContract.reference.width,
+        height: verifiedBrandLogoContract.reference.height,
+        has_alpha: verifiedBrandLogoContract.reference.has_alpha,
+        file_size_bytes: verifiedBrandLogoContract.reference.file_size_bytes,
+        usage_rights_status: "owned",
+      },
+      brand_logo_evidence: brandLogoEvidence,
+      brand_logo_validation: brandLogoEvidence,
       provider_original: providerOriginal,
       normalized: {
         buffer: normalized.buffer,
@@ -1580,6 +2091,7 @@ async function stageSuppliedFullAiGraphic({
         output_width: normalized.width,
         output_height: normalized.height,
         output_mime_type: "image/jpeg",
+        post_generation_logo_overlay_applied: false,
       },
       staged_files: stagedFiles,
     };
@@ -1683,6 +2195,25 @@ async function generateSocialVisuals({
   const generationRequests = requestedAssetSequence == null
     ? requests
     : requests.filter((request) => request.sequence === requestedAssetSequence);
+  const fullAiGraphicContractVersion = normalizedVisualMode === "FULL_AI_GRAPHIC" ? 3 : null;
+  const referenceBackedMode = [
+    "AI_VISUAL_WITH_EXACT_OVERLAY",
+    AI_BRANDED_ARTWORK_MODE,
+    "FULL_AI_GRAPHIC",
+  ].includes(normalizedVisualMode);
+  // Fail closed on the canonical source bytes before any paid image request.
+  // This contract is built once and reused for every slide/frame so the safe
+  // corner remains locked to the draft across generation and regeneration.
+  const brandLogoContract = referenceBackedMode
+    ? await (dependencies.buildBrandLogoContract || buildBrandLogoContract)({
+      draftLike,
+      recommendation,
+      visualMode: normalizedVisualMode,
+      preferredCorner: settings.visual_brand?.logo_policy?.locked_corner || null,
+      logoPath: settings.visual_brand?.logo_path || settings.brand_logo_path || null,
+      dependencies,
+    })
+    : null;
   const productReference = verifiedProductReference(recommendation);
   const productVisual = format === "PRODUCT_FEATURE" || Boolean(productReference.id);
   if (productVisual && normalizedVisualMode !== "AI_VISUAL_WITH_EXACT_OVERLAY") {
@@ -1718,13 +2249,14 @@ async function generateSocialVisuals({
   }
   const referenceChecksum = reference?.checksum_sha256 || null;
 
-  const maxAttempts = Math.min(3, Math.max(Number(
+  const configuredMaxAttempts = Math.min(3, Math.max(Number(
     settings.generation?.max_image_retries
     || settings.ai_generation?.max_image_retries
     || settings.max_image_retries
     || process.env.SOCIAL_MAX_IMAGE_RETRIES
     || 3
   ), 1));
+  const maxAttempts = referenceBackedMode ? 3 : configuredMaxAttempts;
   const version = createCampaignAssetVersion();
   const identity = slugify(
     draftLike.idempotency_key
@@ -1757,6 +2289,8 @@ async function generateSocialVisuals({
       sequence: request.sequence,
       total: requests.length,
       visualMode: normalizedVisualMode,
+      fullAiGraphicContractVersion,
+      brandLogoContract,
     });
     const failures = [];
     let result = null;
@@ -1773,6 +2307,7 @@ async function generateSocialVisuals({
           prompt,
           size: imageSizeFor(format, model),
           quality: settings.models?.image_quality || settings.ai_generation?.image_quality || settings.image_quality || "medium",
+          brandLogoContract,
           dependencies,
         });
         const providerResponseId = trimText(response.response_id || response.responseId);
@@ -1798,18 +2333,23 @@ async function generateSocialVisuals({
         );
         let textValidation = null;
         let posterValidation = null;
-        let expectedTextBlocks = null;
-        let artworkValidation = null;
-        if (normalizedVisualMode === "FULL_AI_GRAPHIC") {
-          expectedTextBlocks = fullAiGraphicTextBlocksForSequence(
+        let expectedTextBlocks = normalizedVisualMode === "FULL_AI_GRAPHIC"
+          ? fullAiGraphicTextBlocksForSequence(
             recommendation,
             request.sequence,
             requests.length,
-          );
+            { contractVersion: fullAiGraphicContractVersion },
+          )
+          : null;
+        let artworkValidation = null;
+        let brandLogoEvidence = null;
+        if (normalizedVisualMode === "FULL_AI_GRAPHIC") {
           posterValidation = {
             ...await validateFullAiGraphicPoster({
               buffer: normalized.buffer,
               expectedTextBlocks,
+              contractVersion: fullAiGraphicContractVersion,
+              brandLogoContract,
               settings,
               dependencies,
             }),
@@ -1866,11 +2406,6 @@ async function generateSocialVisuals({
             throw error;
           }
         }
-        attemptValidationUsage = uniqueEvidenceUsage([
-          posterValidation,
-          textValidation,
-          artworkValidation,
-        ]);
         const perceptualHash = await computePerceptualHash64(normalized.buffer);
         if (format === "CAROUSEL") {
           const priorRows = [
@@ -1928,6 +2463,9 @@ async function generateSocialVisuals({
           model,
           response_id: providerResponseId,
           byte_preserving: true,
+          generation_method: response.generation_method || (brandLogoContract ? "openai_images_edit_reference" : "openai_images_generate"),
+          input_fidelity: brandLogoContract ? "high" : null,
+          brand_logo_reference_checksum_sha256: brandLogoContract?.reference?.checksum_sha256 || null,
         };
         let sourceBuffer = normalized.buffer;
         let stored;
@@ -2008,6 +2546,40 @@ async function generateSocialVisuals({
           });
           stagedAttemptFiles.push(stored);
         }
+        if (referenceBackedMode) {
+          brandLogoEvidence = {
+            ...await validateBrandLogoReference({
+              // Product creatives are validated after the guarded authentic
+              // product composite so the final generated base cannot obscure
+              // or damage the canonical badge.
+              generatedBuffer: sourceBuffer,
+              referenceBuffer: brandLogoContract.reference.buffer,
+              contract: brandLogoContract,
+              expectedTextBlocks: expectedTextBlocks || [],
+              settings,
+              dependencies,
+            }),
+            validated_asset: productVisual
+              ? "openai_normalized_with_authentic_product_final"
+              : "openai_normalized_final",
+            generation_method: "openai_images_edit_reference",
+            input_fidelity: "high",
+            post_generation_logo_overlay_applied: false,
+          };
+          const validatedSourceChecksum = crypto.createHash("sha256").update(sourceBuffer).digest("hex");
+          if (!brandLogoEvidencePassed(brandLogoEvidence, brandLogoContract, validatedSourceChecksum)) {
+            const error = new Error(`Canonical Pink Paisa badge validation failed: ${safeIssueText(brandLogoEvidence?.issues)}`);
+            error.code = "social_brand_logo_validation_invalid";
+            error.brand_logo_validation = brandLogoEvidence;
+            throw error;
+          }
+        }
+        attemptValidationUsage = uniqueEvidenceUsage([
+          brandLogoEvidence,
+          posterValidation,
+          textValidation,
+          artworkValidation,
+        ]);
         const actualChecksum = stored.checksum_sha256;
         result = {
           sequence: request.sequence,
@@ -2039,7 +2611,9 @@ async function generateSocialVisuals({
           output_fingerprint: paidCallEvidence.output_fingerprint,
           attempt_count: attempt,
           status: "VALIDATED",
-          source_provenance: productVisual ? "generated_from_approved_source" : "generated_without_reference",
+          source_provenance: referenceBackedMode || productVisual
+            ? "generated_from_approved_source"
+            : "generated_without_reference",
           usage_rights_status: productVisual ? reference.usage_rights_status : "api_permitted",
           reference_image_url: reference?.source_url || null,
           reference_image_checksum_sha256: referenceChecksum,
@@ -2085,8 +2659,23 @@ async function generateSocialVisuals({
           text_validation: textValidation,
           poster_validation: posterValidation,
           expected_text_blocks: expectedTextBlocks,
-          full_ai_graphic_contract_version: normalizedVisualMode === "FULL_AI_GRAPHIC" ? 2 : null,
+          full_ai_graphic_contract_version: fullAiGraphicContractVersion,
           artwork_validation: artworkValidation,
+          brand_logo_contract: brandLogoContract ? serializeBrandLogoContract(brandLogoContract) : null,
+          brand_logo_reference: brandLogoContract ? {
+            asset_type: "BRAND_LOGO",
+            reference_asset_id: brandLogoContract.reference.badge_id,
+            source_path: brandLogoContract.reference.source_path,
+            checksum_sha256: brandLogoContract.reference.checksum_sha256,
+            mime_type: brandLogoContract.reference.mime_type,
+            width: brandLogoContract.reference.width,
+            height: brandLogoContract.reference.height,
+            has_alpha: brandLogoContract.reference.has_alpha,
+            file_size_bytes: brandLogoContract.reference.file_size_bytes,
+            usage_rights_status: "owned",
+          } : null,
+          brand_logo_evidence: brandLogoEvidence,
+          brand_logo_validation: brandLogoEvidence,
           perceptual_hash_64: perceptualHash,
           provider_original: providerOriginal,
           normalization: {
@@ -2128,7 +2717,8 @@ async function generateSocialVisuals({
         ];
         const storageCleanup = await cleanupStagedFullAiGraphic(stagedFiles, dependencies);
         if (authenticReferenceCreatedThisAttempt) storedAuthenticReference = null;
-        const validationEvidence = error.poster_validation
+        const validationEvidence = error.brand_logo_validation
+          || error.poster_validation
           || error.text_validation
           || error.visual_validation
           || error.validation_response
@@ -2180,7 +2770,32 @@ async function generateSocialVisuals({
         if (attempt >= maxAttempts) break;
         const revisionRequired = requiresPromptRevision(error);
         if (!retriable && !revisionRequired) break;
-        if (normalizedVisualMode === "FULL_AI_GRAPHIC") {
+        if (error.code === "social_brand_logo_validation_invalid" && referenceBackedMode) {
+          const revisedPrompt = buildProductionImagePrompt({
+            recommendation,
+            request: {
+              ...request,
+              prompt: creativePrompt,
+              brand_logo_retry_number: attempt,
+              brand_logo_retry_failure_code: error.code,
+              ...(normalizedVisualMode === "FULL_AI_GRAPHIC" ? {
+                full_ai_retry_number: attempt,
+                full_ai_retry_failure_code: error.code,
+              } : {}),
+            },
+            sequence: request.sequence,
+            total: requests.length,
+            visualMode: normalizedVisualMode,
+            fullAiGraphicContractVersion,
+            brandLogoContract,
+          });
+          failures.at(-1).prompt_revision = sanitizedPromptRevisionEvidence({}, {
+            status: "COMPLETED",
+            method: "server_owned_canonical_badge_retry",
+            revised_prompt: revisedPrompt,
+          });
+          prompt = revisedPrompt;
+        } else if (normalizedVisualMode === "FULL_AI_GRAPHIC") {
           const revisedPrompt = buildProductionImagePrompt({
             recommendation,
             request: {
@@ -2192,6 +2807,8 @@ async function generateSocialVisuals({
             sequence: request.sequence,
             total: requests.length,
             visualMode: normalizedVisualMode,
+            fullAiGraphicContractVersion,
+            brandLogoContract,
           });
           if (revisedPrompt === prompt) {
             failures.at(-1).prompt_revision = sanitizedPromptRevisionEvidence({}, {
@@ -2232,6 +2849,8 @@ async function generateSocialVisuals({
                 sequence: request.sequence,
                 total: requests.length,
                 visualMode: normalizedVisualMode,
+                fullAiGraphicContractVersion,
+                brandLogoContract,
               })
               : null;
             if (!revisedPrompt || revisedPrompt === prompt) {
@@ -2301,7 +2920,12 @@ async function generateSocialVisuals({
         imageEstimatedCost + validationEstimatedCost + promptRevisionEstimatedCost
       ).toFixed(6));
       const error = new Error(`OpenAI image generation failed for visual ${request.sequence} after ${failures.length} attempt${failures.length === 1 ? "" : "s"}`);
-      error.code = "social_image_generation_failed";
+      const brandLogoValidationExhausted = referenceBackedMode
+        && failures.length === 3
+        && failures.at(-1)?.code === "social_brand_logo_validation_invalid";
+      error.code = brandLogoValidationExhausted
+        ? "social_brand_logo_validation_exhausted"
+        : "social_image_generation_failed";
       error.usage = aggregateUsage;
       error.estimated_cost = aggregateEstimatedCost;
       error.image_generation = sanitizeImageGenerationEvidence({
@@ -2322,6 +2946,7 @@ async function generateSocialVisuals({
         prompt_revision_estimated_cost: promptRevisionEstimatedCost,
         estimated_cost: aggregateEstimatedCost,
         cost_currency: "USD",
+        brand_logo_contract: brandLogoContract ? serializeBrandLogoContract(brandLogoContract) : null,
         completed_visuals: generated,
         failures,
         staged_files: completedStagedFiles,
@@ -2348,6 +2973,7 @@ async function generateSocialVisuals({
     provider: "openai",
     model,
     visual_mode: normalizedVisualMode,
+    brand_logo_contract: brandLogoContract ? serializeBrandLogoContract(brandLogoContract) : null,
     original_visuals: generated,
     image_count: generated.length,
     paid_image_call_count: paidImageCallCount,
@@ -2377,12 +3003,15 @@ module.exports = {
   sanitizeImageGenerationEvidence,
   stageSuppliedFullAiGraphic,
   cleanupStagedFullAiGraphic,
+  validateBrandLogoReference,
   validateFullAiGraphicPoster,
   validateFullAiGraphicText,
   validateArtworkOnlyVisual,
   visualRequestsForRecommendation,
   _private: {
     approvedHeadlineForSequence,
+    assertRuntimeBrandLogoContract,
+    brandLogoPromptInstructions,
     fullAiGraphicTextBlocksForSequence,
     createOpenAiClient,
     decodeImageResponse,

@@ -39,6 +39,7 @@ const FORMATS = [
 
 const VISUAL_MODES = [
   "AI_VISUAL_WITH_EXACT_OVERLAY",
+  "AI_BRANDED_ARTWORK",
   "AI_ARTWORK_ONLY",
   "FULL_AI_GRAPHIC",
   "MANUAL_TEMPLATE",
@@ -57,7 +58,7 @@ const FullAiTextBlockSchema = new mongoose.Schema({
 }, { _id: false });
 
 const FullAiGraphicManifestSchema = new mongoose.Schema({
-  contract_version: { type: Number, required: true, enum: [2] },
+  contract_version: { type: Number, required: true, enum: [2, 3] },
   expected_text_blocks: {
     type: [FullAiTextBlockSchema],
     required: true,
@@ -68,7 +69,7 @@ const FullAiGraphicManifestSchema = new mongoose.Schema({
           && value.length <= 40
           && new Set(value.map((block) => String(block.key || "").trim())).size === value.length;
       },
-      message: "FULL_AI_GRAPHIC v2 visible-text blocks must contain 1 to 40 unique keys",
+      message: "FULL_AI_GRAPHIC visible-text blocks must contain 1 to 40 unique keys",
     },
   },
   checksum_sha256: {
@@ -175,6 +176,7 @@ const SocialPostDraftSchema = new mongoose.Schema(
       trim: true,
     },
     visual_mode_resolution: { type: VisualModeResolutionSchema, default: null },
+    brand_logo_contract: { type: mongoose.Schema.Types.Mixed, default: null },
     caption_checksum_sha256: {
       type: String,
       default: null,

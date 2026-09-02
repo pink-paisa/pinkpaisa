@@ -40,9 +40,100 @@ const {
   _private: { digitalProductsArePromotable, productEligibleForSocialSignals },
 } = require("../services/social/socialInternalSignals");
 const { _private: { buildRenderItems, stableStringify } } = require("../services/socialCreativeService");
+const {
+  buildBrandLogoContract,
+  serializeBrandLogoContract,
+} = require("../services/social/socialBrandLogoPolicy");
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function passingBrandLogoEvidence(contract, assetChecksum) {
+  const serialized = serializeBrandLogoContract(contract);
+  const box = serialized.safe_corner.target_box;
+  return {
+    outcome: "PASS",
+    decision: "PASS",
+    reference_asset_id: serialized.reference_asset_id,
+    reference_checksum_sha256: serialized.reference_checksum_sha256,
+    badgeId: serialized.reference_asset_id,
+    referenceChecksumSha256: serialized.reference_checksum_sha256,
+    method: "AI_REFERENCE_BAKED",
+    input_fidelity: "high",
+    requested_corner: serialized.locked_corner,
+    observed_corner: serialized.locked_corner,
+    observedCorner: serialized.locked_corner,
+    logo_count: 1,
+    observedBadgeCount: 1,
+    observedBadgeWidthPx: 210,
+    normalized_bounding_box: {
+      x: box.left / box.canvas_width,
+      y: box.top / box.canvas_height,
+      width: box.width / box.canvas_width,
+      height: box.height / box.canvas_height,
+    },
+    identity_checks: {
+      approved_logo_present: true,
+      reference_identity_match: true,
+      wordmark_exact_match: true,
+      icon_geometry_match: true,
+      brand_colour_match: true,
+      registered_mark_recognizable: true,
+      single_badge_occurrence: true,
+      safe_corner_match: true,
+      fully_inside_safe_box: true,
+      accepted_width_range: true,
+      observed_badge_width_px: 210,
+      mobile_legible: true,
+      protected_content_overlap_present: false,
+      no_unapproved_text: true,
+      no_unrelated_logo_or_watermark: true,
+    },
+    approvedLogoPresent: true,
+    referenceIdentityMatch: true,
+    wordmarkExactMatch: true,
+    iconGeometryMatch: true,
+    brandColourMatch: true,
+    registeredMarkRecognizable: true,
+    singleBadgeOccurrence: true,
+    safeCornerMatch: true,
+    fullyInsideSafeBox: true,
+    mobileLegible: true,
+    protectedContentOverlapPresent: false,
+    unapprovedTextPresent: false,
+    unrelatedLogoOrWatermarkPresent: false,
+    validator_model: "test-logo-validator",
+    validator_response_id: "resp-test-logo-pass",
+    response_id: "resp-test-logo-pass",
+    validated_asset: "openai_normalized_final",
+    validated_asset_checksum_sha256: assetChecksum,
+    issues: [],
+    post_generation_logo_overlay_applied: false,
+  };
+}
+
+function withPassingBrandLogoEvidence(result, contract) {
+  const serialized = serializeBrandLogoContract(contract);
+  return {
+    ...result,
+    brand_logo_contract: serialized,
+    original_visuals: (result.original_visuals || []).map((visual) => {
+      const checksum = Buffer.isBuffer(visual.buffer)
+        ? crypto.createHash("sha256").update(visual.buffer).digest("hex")
+        : visual.checksum_sha256;
+      return {
+        ...visual,
+        checksum_sha256: checksum,
+        normalization: visual.normalization ? {
+          ...visual.normalization,
+          output_checksum_sha256: checksum,
+        } : visual.normalization,
+        brand_logo_contract: serialized,
+        brand_logo_evidence: passingBrandLogoEvidence(contract, checksum),
+      };
+    }),
+  };
 }
 
 function validAiRecommendation(index = 0, overrides = {}) {
@@ -1402,7 +1493,10 @@ function generationExecutionDependencies({ generateDailyDecision: decision, gene
     collectInternalSignals: async () => ({ summary: {}, recent_history: [], products: [], static_resources: [] }),
     collectExternalResearch: async () => ({ mode: "none", signals: [], sources: [], usage: {} }),
     generateDailyDecision: decision,
-    generateSocialVisuals: visuals,
+    generateSocialVisuals: async (input) => withPassingBrandLogoEvidence(
+      await visuals(input),
+      input.brandLogoContract,
+    ),
     SocialGenerationRun: { aggregate: async () => [] },
     SocialPostDraft: {
       create: async (value) => {
@@ -1688,7 +1782,7 @@ test("exhausted image generation is transparent and never creates or selects a d
   assert.equal(draftWrites.length, 0);
 });
 
-test("generation worker carries standard FULL_AI_GRAPHIC v2 validation into an overlay-free draft manifest", async () => {
+test("generation worker keeps historical FULL_AI_GRAPHIC v2 validation readable in an overlay-free draft manifest", async () => {
   const run = generationRunFixture("run-full-ai-v2-worker");
   run.generation_request.visual_mode = "FULL_AI_GRAPHIC";
   const packageValue = validPackage();
@@ -1710,7 +1804,7 @@ test("generation worker carries standard FULL_AI_GRAPHIC v2 validation into an o
       compliance: { passed: true },
       candidate_count: 3,
     }),
-    generateSocialVisuals: async () => ({
+    generateSocialVisuals: async ({ brandLogoContract }) => withPassingBrandLogoEvidence({
       status: "SUCCEEDED",
       provider: "openai",
       model: "gpt-image-2",
@@ -1782,7 +1876,7 @@ test("generation worker carries standard FULL_AI_GRAPHIC v2 validation into an o
         },
         failures: [],
       }],
-    }),
+    }, brandLogoContract),
     draftWrites,
   });
   dependencies.SocialPostDraft.findOne = () => ({ sort: async () => null });
@@ -1878,10 +1972,10 @@ test("image regeneration changes only assets and preserves the approved AI text 
   const dependencies = {
     getSocialManagerSettings: async () => ({ models: { image_provider: "openai", image_model: "gpt-image-2" } }),
     buildSocialManagerRuntimeSettings: (settings) => settings,
-    generateSocialVisuals: async ({ recommendation }) => {
+    generateSocialVisuals: async ({ recommendation, brandLogoContract }) => {
       imageCalls += 1;
       assert.equal(recommendation.caption, originalPackage.primaryRecommendation.caption);
-      return {
+      return withPassingBrandLogoEvidence({
         status: "SUCCEEDED",
         provider: "openai",
         model: "gpt-image-2",
@@ -1920,7 +2014,7 @@ test("image regeneration changes only assets and preserves the approved AI text 
             output_checksum_sha256: "c".repeat(64),
           },
         }],
-      };
+      }, brandLogoContract);
     },
     renderSocialDraftAssets: async (_draft, options) => {
       renderOptions = options;
@@ -3090,6 +3184,11 @@ test("single-slide carousel regeneration merges one new original with retained s
     original_ai_asset_ids: ["original-1", "original-2", "original-3"],
     save: async function save() { return this; },
   };
+  const brandLogoContract = await buildBrandLogoContract({
+    draftLike: draft,
+    recommendation: packageValue.primaryRecommendation,
+  });
+  draft.brand_logo_contract = serializeBrandLogoContract(brandLogoContract);
   const originals = [1, 2, 3].map((sequence) => ({
     _id: `original-${sequence}`,
     asset_role: "ORIGINAL_AI_VISUAL",
@@ -3109,6 +3208,8 @@ test("single-slide carousel regeneration merges one new original with retained s
     usage_rights_status: "api_permitted",
     image_provider: "openai",
     image_model: "gpt-image-2",
+    brand_logo_contract: draft.brand_logo_contract,
+    brand_logo_evidence: passingBrandLogoEvidence(brandLogoContract, String(sequence).repeat(64)),
     provenance: {
       provider: "openai",
       model: "gpt-image-2",
@@ -3142,10 +3243,10 @@ test("single-slide carousel regeneration merges one new original with retained s
       models: { image_provider: "openai", image_model: "gpt-image-2" },
     }),
     buildSocialManagerRuntimeSettings: (settings) => settings,
-    generateSocialVisuals: async ({ assetSequence, comparisonVisuals }) => {
+    generateSocialVisuals: async ({ assetSequence, comparisonVisuals, brandLogoContract: runtimeContract }) => {
       assert.equal(assetSequence, 2);
       assert.deepEqual(comparisonVisuals.map((row) => row.sequence), [1, 2, 3]);
-      return {
+      return withPassingBrandLogoEvidence({
         status: "SUCCEEDED",
         provider: "openai",
         model: "gpt-image-2",
@@ -3193,7 +3294,7 @@ test("single-slide carousel regeneration merges one new original with retained s
             output_checksum_sha256: "a".repeat(64),
           },
         }],
-      };
+      }, runtimeContract);
     },
     renderSocialDraftAssets: async (_draft, options) => {
       renderBaseImages = options.baseImages;
@@ -3235,7 +3336,10 @@ test("single-slide carousel regeneration merges one new original with retained s
   assert.equal(renderBaseImages[2].normalization.output_checksum_sha256, originals[2].checksum_sha256);
   assert.equal(insertedOriginalRows[0].original_visual.url, "/uploads/generated/campaigns/provider-original-2-new.png");
   assert.equal(insertedOriginalRows[0].provenance.provider_original.byte_preserving, true);
-  assert.equal(insertedOriginalRows[0].provenance.normalization.output_checksum_sha256, "a".repeat(64));
+  assert.equal(
+    insertedOriginalRows[0].provenance.normalization.output_checksum_sha256,
+    crypto.createHash("sha256").update(Buffer.from("new-slide-two")).digest("hex"),
+  );
   assert.deepEqual(draft.original_ai_asset_ids, ["original-1", "original-3", "original-2-new"]);
   assert.ok(updateFilters.some((filter) => filter.slide_number?.$in?.[0] === 2));
 });
@@ -3263,7 +3367,7 @@ test("visual regeneration removes an unreferenced final file when composition fa
       models: { image_provider: "openai", image_model: "gpt-image-2" },
     }),
     buildSocialManagerRuntimeSettings: (settings) => settings,
-    generateSocialVisuals: async () => ({
+    generateSocialVisuals: async ({ brandLogoContract: runtimeContract }) => withPassingBrandLogoEvidence({
       status: "SUCCEEDED",
       provider: "openai",
       model: "gpt-image-2",
@@ -3289,7 +3393,7 @@ test("visual regeneration removes an unreferenced final file when composition fa
         attempt_count: 1,
         status: "VALIDATED",
       }],
-    }),
+    }, runtimeContract),
     renderSocialDraftAssets: async () => {
       const error = new Error("asset persistence failed after final storage");
       error.code = "asset_persistence_failed";
@@ -3347,7 +3451,7 @@ test("visual regeneration preserves sanitized provider evidence on the paid rece
     }),
     buildSocialManagerRuntimeSettings: (settings) => settings,
     enforceMonthlyBudget: async () => null,
-    generateSocialVisuals: async () => ({
+    generateSocialVisuals: async ({ brandLogoContract: runtimeContract }) => withPassingBrandLogoEvidence({
       status: "SUCCEEDED",
       provider: "openai",
       model: "gpt-image-2",
@@ -3380,7 +3484,7 @@ test("visual regeneration preserves sanitized provider evidence on the paid rece
         status: "VALIDATED",
         staged_files: stagedFiles,
       }],
-    }),
+    }, runtimeContract),
     renderSocialDraftAssets: async () => { renderCalls += 1; throw new Error("must not compose after ledger failure"); },
     deleteCampaignAsset: async (file) => { deleted.push(file.storage_key); return true; },
     SocialPostDraft: { findById: async () => draft },
@@ -3439,7 +3543,7 @@ test("visual regeneration preserves a staged file when an uncertain transaction 
       models: { image_provider: "openai", image_model: "gpt-image-2" },
     }),
     buildSocialManagerRuntimeSettings: (settings) => settings,
-    generateSocialVisuals: async () => ({
+    generateSocialVisuals: async ({ brandLogoContract: runtimeContract }) => withPassingBrandLogoEvidence({
       status: "SUCCEEDED",
       provider: "openai",
       model: "gpt-image-2",
@@ -3465,7 +3569,7 @@ test("visual regeneration preserves a staged file when an uncertain transaction 
         attempt_count: 1,
         status: "VALIDATED",
       }],
-    }),
+    }, runtimeContract),
     renderSocialDraftAssets: async () => {
       const error = new Error("unknown transaction commit result");
       error.code = "UnknownTransactionCommitResult";

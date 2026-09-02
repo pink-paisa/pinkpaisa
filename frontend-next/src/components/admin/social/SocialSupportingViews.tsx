@@ -27,6 +27,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, StatusBadge } from "../AdminShared";
 import { formatConfidence } from "./adapters";
+import { brandLogoContractReady } from "./socialBrandLogo";
 import { SocialDraft, SocialReadiness, SocialSettings, SocialSignal, SocialSource } from "./types";
 
 const titleCase = (value: string) => value.toLowerCase().replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -422,6 +423,10 @@ export const SocialSettingsView = ({
 
   if (loading) return <div className="flex min-h-72 items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
 
+  const brandLogo = settings.brandLogoContract;
+  const brandLogoReady = brandLogoContractReady(brandLogo);
+  const brandLogoPreview = brandLogo.referenceUrl || "/pink-paisa-logo.png";
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -429,6 +434,30 @@ export const SocialSettingsView = ({
         <Button onClick={onSave} disabled={saving || pillarTotal !== 100}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save settings</Button>
       </div>
       {readiness.blockers.length ? <Alert className="rounded-2xl border-amber-200 bg-amber-50/70"><AlertTriangle className="h-4 w-4 text-amber-700" /><AlertTitle>Setup has {readiness.blockers.length} blocker(s)</AlertTitle><AlertDescription>{readiness.blockers.join(" · ")}</AlertDescription></Alert> : null}
+      <Card className="rounded-3xl border-primary/20 shadow-none">
+        <CardHeader>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div><CardTitle className="text-lg">Approved Pink Paisa logo</CardTitle><CardDescription>Every newly generated final image must visibly include this approved reference. The requirement cannot be disabled.</CardDescription></div>
+            <div className="flex flex-wrap gap-2"><Badge variant="secondary">Approved 512 badge</Badge><Badge variant={brandLogoReady ? "default" : "destructive"}>{brandLogoReady ? "Ready for AI generation" : "Logo setup incomplete"}</Badge></div>
+          </div>
+        </CardHeader>
+        <CardContent className="grid gap-5 md:grid-cols-[160px_minmax(0,1fr)]">
+          <div className="flex aspect-square items-center justify-center overflow-hidden rounded-3xl border border-border bg-white p-3">
+            <img src={brandLogoPreview} alt="Approved Pink Paisa 512 pixel profile badge" className="h-full w-full object-contain" />
+          </div>
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="rounded-xl border border-border/70 p-3"><p className="text-xs text-muted-foreground">Reference asset ID</p><p className="mt-1 break-all font-mono text-xs">{brandLogo.referenceAssetId || "Not configured"}</p></div>
+              <div className="rounded-xl border border-border/70 p-3"><p className="text-xs text-muted-foreground">Contract version</p><p className="mt-1 font-mono text-xs">v{brandLogo.contractVersion || "—"}</p></div>
+              <div className="rounded-xl border border-border/70 p-3"><p className="text-xs text-muted-foreground">Policy version</p><p className="mt-1 break-all font-mono text-xs">{brandLogo.policyVersion || "Not configured"}</p></div>
+              <div className="rounded-xl border border-border/70 p-3 sm:col-span-3"><p className="text-xs text-muted-foreground">Reference SHA-256</p><p className="mt-1 break-all font-mono text-xs">{brandLogo.referenceChecksumSha256 || "Not configured"}</p></div>
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-border p-3"><div><p className="text-sm font-medium">Mandatory logo policy</p><p className="text-xs text-muted-foreground">AI reference baked at high fidelity; no post-generation logo overlay.</p></div><Switch checked disabled aria-label="Approved Pink Paisa logo required on every new image" /></div>
+            <div className="flex flex-wrap gap-2 text-xs"><Badge variant="outline">{brandLogo.referenceWidth || 512} × {brandLogo.referenceHeight || 512} PNG</Badge><Badge variant="outline">Input fidelity · {titleCase(brandLogo.inputFidelity || "high")}</Badge><Badge variant="outline">Target width · {brandLogo.targetWidthPx || 210}px ({brandLogo.acceptedWidthRangePx.join("–") || "180–240"}px accepted)</Badge><Badge variant="outline">Placement · adaptive safe corner, locked per draft</Badge><Badge variant="outline">Settings corner · {brandLogo.lockedCorner || "Chosen and locked per draft"}</Badge><Badge variant="outline">Status · {titleCase(brandLogo.readinessStatus || "not configured")}</Badge></div>
+            {!brandLogoReady ? <Alert variant="destructive" className="rounded-xl"><AlertTriangle className="h-4 w-4" /><AlertTitle>Generation must remain blocked</AlertTitle><AlertDescription>The approved 512 × 512 PNG, exact SHA-256 and ready server contract are required before creating new images.</AlertDescription></Alert> : null}
+          </div>
+        </CardContent>
+      </Card>
       <div className="grid gap-5 xl:grid-cols-2">
         <Card className="rounded-3xl shadow-none">
           <CardHeader><CardTitle className="text-lg">Brand and audience</CardTitle><CardDescription>The daily strategy system treats this as policy, not optional inspiration.</CardDescription></CardHeader>
@@ -500,7 +529,7 @@ export const SocialSettingsView = ({
               <p className="mt-1 text-xs leading-5">Deterministic content and template-only visual fallbacks are disabled. Failed attempts remain visible for manual retry.</p>
             </div>
             <div className="grid grid-cols-2 gap-3"><Field label="Content revisions"><Input type="number" min="0" max="3" value={settings.maxContentRevisions} onChange={(event) => patch({ maxContentRevisions: Number(event.target.value) || 0 })} /></Field><Field label="Image retries"><Input type="number" min="0" max="3" value={settings.maxImageRetries} onChange={(event) => patch({ maxImageRetries: Number(event.target.value) || 0 })} /></Field></div>
-            <Field label="Default visual mode"><select value={settings.defaultVisualMode} onChange={(event) => patch({ defaultVisualMode: event.target.value as SocialSettings["defaultVisualMode"] })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="AI_VISUAL_WITH_EXACT_OVERLAY">AI artwork + verified overlay — Protected formats</option><option value="AI_ARTWORK_ONLY">AI artwork — No overlay (eligible posts only)</option><option value="FULL_AI_GRAPHIC">AI-native complete graphic — Recommended, no overlay</option></select></Field>
+            <Field label="Default visual mode" hint="Legacy artwork-only remains readable but cannot be selected for new generation."><select value={settings.defaultVisualMode} onChange={(event) => patch({ defaultVisualMode: event.target.value as SocialSettings["defaultVisualMode"] })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="AI_BRANDED_ARTWORK">AI-branded artwork — Approved logo reference, no overlay</option><option value="FULL_AI_GRAPHIC">AI-native complete graphic — Approved logo reference, no overlay</option><option value="AI_VISUAL_WITH_EXACT_OVERLAY">AI artwork + verified overlay — Protected formats</option></select></Field>
             <Field label="Monthly budget (₹)"><Input type="number" min="0" value={settings.monthlyCostLimit} onChange={(event) => patch({ monthlyCostLimit: Number(event.target.value) || 0 })} /></Field>
             <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3 text-sm text-sky-900">
               <p className="font-medium">Request throttles are disabled</p>

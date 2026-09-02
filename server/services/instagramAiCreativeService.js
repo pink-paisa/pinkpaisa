@@ -1,8 +1,13 @@
-const crypto = require("crypto");
 const MarketingAsset = require("../models/MarketingAsset");
-const { createCampaignAssetVersion, storeCampaignAsset } = require("./campaignAssetStorage");
-const { readAndNormalizeReferenceImage } = require("./campaignReferenceImage");
-const { generateImage } = require("./imageProviders");
+const { storeCampaignAsset } = require("./campaignAssetStorage");
+const {
+  generateSocialVisuals,
+} = require("./social/socialAiImageService");
+const {
+  assertBrandLogoEvidenceForAssets,
+  buildBrandLogoContract,
+  serializeBrandLogoContract,
+} = require("./social/socialBrandLogoPolicy");
 const {
   DEFAULT_AFFILIATE_CAMPAIGN_AI_PROMPT_TEMPLATE,
   DEFAULT_CATALOG_CAMPAIGN_AI_PROMPT_TEMPLATE,
@@ -193,6 +198,97 @@ function buildVariantPrompt({ brief, settings }) {
   return buildCreativePrompt({ brief, settings });
 }
 
+function buildBrandedBackgroundPrompt({ brief = {}, settings = {} }) {
+  const { promptType } = resolveCreativePrompt({ brief, settings });
+  const category = [brief.category, brief.subcategory].map(trimText).filter(Boolean).join(" / ") || "product";
+  const tone = normalizeList(brief.brand_context?.tone, 5).join(", ") || "premium, editorial, modern";
+  return {
+    promptType,
+    prompt: [
+      `Create a polished 4:5 Pink Paisa editorial environment for a ${category} product creative.`,
+      `Art direction: ${tone}; women-first, contemporary, credible and Instagram-native.`,
+      "Generate only the empty background, lighting, shadows and restrained category-relevant props.",
+      "Keep the right-centre area clear for one authentic catalogue product that guarded local code will place afterward.",
+      "Do not render, depict, imitate, redraw, retouch or include any product, package, label, bottle, box, container, marketplace branding or merchandise.",
+      "Do not render any headline, CTA, price, discount, claim, letters, numbers, currency symbols, watermark or logo except the supplied canonical Pink Paisa profile badge.",
+      "Place the supplied badge in the adaptive locked safe corner provided by the shared branded-image gateway and keep it completely unobstructed.",
+    ].join("\n"),
+  };
+}
+
+function buildLegacyProductRecommendation({ brief = {}, prompt }) {
+  const referenceUrl = resolveReferenceUrl(brief);
+  const productId = trimText(brief.public_product_id || brief.product_id);
+  const title = trimText(brief.title);
+  return {
+    format: "PRODUCT_FEATURE",
+    objective: "PRODUCT_PROMOTION",
+    postType: brief.is_affiliate ? "AFFILIATE" : "PRODUCT",
+    contentPillar: brief.is_affiliate
+      ? "CURATED WELLNESS AND AFFILIATE PRODUCTS"
+      : "PINK PAISA PRODUCTS",
+    topic: title || "Pink Paisa product creative",
+    visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    verifiedProductId: productId,
+    verifiedProductTitle: title,
+    verifiedProductFacts: {
+      id: productId,
+      title,
+      imageUrl: referenceUrl,
+      mediaUrl: referenceUrl,
+      category: trimText(brief.category),
+      subcategory: trimText(brief.subcategory),
+      isAffiliate: Boolean(brief.is_affiliate),
+    },
+    formatContent: {
+      format: "PRODUCT_FEATURE",
+      selectedHeadline: buildImageCopy(brief).headline,
+      productPreservationInstructions: [
+        "Place the verified catalogue product exactly once without altering, regenerating or obscuring its pixels.",
+      ],
+    },
+    visualBrief: {
+      format: "PRODUCT_FEATURE",
+      visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+      authenticProductReference: {
+        productId,
+        productTitle: title,
+        imageUrl: referenceUrl,
+      },
+      assets: [{
+        sequence: 1,
+        imagePrompt: prompt,
+        requiredObjects: [],
+        prohibitedObjects: [
+          "product",
+          "product packaging",
+          "marketplace logo",
+          "unrelated branding",
+        ],
+      }],
+    },
+  };
+}
+
+function socialImageSettings(settings = {}) {
+  return {
+    ...settings,
+    models: {
+      ...(settings.models || {}),
+      image_provider: trimText(settings.campaign_ai_provider || settings.models?.image_provider || "openai").toLowerCase(),
+      image_model: trimText(settings.campaign_ai_model || settings.models?.image_model || "gpt-image-2"),
+      image_quality: trimText(settings.campaign_ai_image_quality || settings.models?.image_quality || "medium").toLowerCase(),
+      compliance_model: trimText(settings.models?.compliance_model || settings.campaign_ai_compliance_model || "") || undefined,
+    },
+    generation: {
+      ...(settings.generation || {}),
+      // Mandatory badge generation always gets the full bounded three-attempt
+      // validation loop. There is no unbranded or composited fallback.
+      max_image_retries: 3,
+    },
+  };
+}
+
 function generationSizeForProvider(provider, model) {
   if (provider === "openai" && model === "gpt-image-2") return "1088x1360";
   if (provider === "openai") return "1024x1536";
@@ -213,10 +309,11 @@ async function processOutputForInstagram(buffer) {
     .toBuffer();
 }
 
-async function writeOutput({ run, brief, settings, fileName, buffer, sourceUrl }) {
-  const stored = await storeCampaignAsset({ fileName, buffer });
+async function writeOutput({ run, brief, settings, fileName, buffer, sourceUrl, storedAsset = null, dependencies = {} }) {
+  const stored = storedAsset || await (dependencies.storeCampaignAsset || storeCampaignAsset)({ fileName, buffer });
   const sourceAsset = brief.campaign_asset || {};
-  await MarketingAsset.findOneAndUpdate(
+  const MarketingAssetModel = dependencies.MarketingAsset || MarketingAsset;
+  await MarketingAssetModel.findOneAndUpdate(
     { url: stored.url },
     {
       $set: {
@@ -228,7 +325,7 @@ async function writeOutput({ run, brief, settings, fileName, buffer, sourceUrl }
         storage_key: stored.storage_key,
         checksum_sha256: stored.checksum_sha256,
         source_url: sourceUrl,
-        source_provenance: sourceAsset.provenance || "product_reference",
+        source_provenance: "generated_from_approved_source",
         usage_rights_status: sourceAsset.rights_status || "unknown",
         provider: settings.campaign_ai_provider,
         model: settings.campaign_ai_model,
@@ -244,65 +341,162 @@ async function writeOutput({ run, brief, settings, fileName, buffer, sourceUrl }
   };
 }
 
-async function generateAiInstagramCreative({ run, brief, settings }) {
+async function generateAiInstagramCreative({ run, brief, settings, dependencies = {} }) {
   const referenceUrl = resolveReferenceUrl(brief);
-  const reference = await readAndNormalizeReferenceImage(referenceUrl);
-  const { prompt, promptType, imageCopy } = resolveCreativePrompt({ brief, settings });
-  const generatedAt = new Date().toISOString();
-  const rawBuffer = await generateImage({
-    provider: settings.campaign_ai_provider,
-    model: settings.campaign_ai_model,
-    prompt,
-    sourceImageBuffer: reference.buffer,
-    size: generationSizeForProvider(settings.campaign_ai_provider, settings.campaign_ai_model),
-    quality: settings.campaign_ai_image_quality || "medium",
+  if (!referenceUrl) {
+    const error = new Error("A verified authentic product image is required for legacy Instagram creative generation");
+    error.code = "reference_image_required";
+    throw error;
+  }
+  const imageCopy = buildImageCopy(brief);
+  const { prompt: backgroundPrompt, promptType } = buildBrandedBackgroundPrompt({ brief, settings });
+  const recommendation = buildLegacyProductRecommendation({ brief, prompt: backgroundPrompt });
+  const draftLike = {
+    _id: run?._id || null,
+    idempotency_key: trimText(run?.campaign_id) || null,
+    format: "PRODUCT_FEATURE",
+  };
+
+  // Establish the exact runtime contract before entering the paid gateway.
+  // The canonical badge buffer is the sole generative image reference; the
+  // authentic product is resolved separately and composited only after the AI
+  // background has been returned.
+  const contractBuilder = dependencies.buildBrandLogoContract || buildBrandLogoContract;
+  const runtimeBrandLogoContract = await contractBuilder({
+    draftLike,
+    recommendation,
+    visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    preferredCorner: "TOP_LEFT",
+    logoPath: settings.visual_brand?.logo_path || settings.brand_logo_path || null,
+    dependencies,
   });
-  const processedBuffer = await processOutputForInstagram(rawBuffer);
-  const assetVersion = createCampaignAssetVersion();
+  const serializedBrandLogoContract = serializeBrandLogoContract(runtimeBrandLogoContract);
+  draftLike.brand_logo_contract = serializedBrandLogoContract;
+
+  const generateThroughGateway = dependencies.generateSocialVisuals || generateSocialVisuals;
+  const imageResult = await generateThroughGateway({
+    draftLike,
+    recommendation,
+    settings: socialImageSettings(settings),
+    visualMode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    dependencies: {
+      ...dependencies,
+      // Freeze and reuse the already-verified bytes and safe corner. This also
+      // prevents a different logo file from being selected between preflight
+      // and the OpenAI images.edit request.
+      buildBrandLogoContract: async () => runtimeBrandLogoContract,
+    },
+  });
+  const visual = Array.isArray(imageResult?.original_visuals)
+    ? imageResult.original_visuals[0]
+    : null;
+  if (!visual || !Buffer.isBuffer(visual.buffer) || !visual.url) {
+    const error = new Error("The branded-image gateway did not return one validated legacy campaign creative");
+    error.code = "social_image_generation_failed";
+    error.image_generation = imageResult?.image_generation || null;
+    throw error;
+  }
+  assertBrandLogoEvidenceForAssets([visual], { contract: runtimeBrandLogoContract });
+
+  const generatedAt = new Date().toISOString();
   const output = await writeOutput({
     run,
     brief,
     settings,
-    fileName: `${slugify(run.campaign_id)}-${assetVersion}-ai-single.jpg`,
-    buffer: processedBuffer,
-    sourceUrl: reference.source_url,
+    fileName: `${slugify(run.campaign_id)}-ai-branded-product.jpg`,
+    buffer: visual.buffer,
+    sourceUrl: referenceUrl,
+    storedAsset: {
+      file_path: visual.file_path || null,
+      url: visual.url,
+      storage_provider: visual.storage_provider,
+      storage_key: visual.storage_key,
+      checksum_sha256: visual.checksum_sha256,
+    },
+    dependencies,
   });
   const ctaText = brief.is_affiliate ? "View partner pick" : "Explore product";
-  const referenceChecksum = crypto.createHash("sha256").update(reference.buffer).digest("hex");
+  const referenceChecksum = visual.reference_image_checksum_sha256;
+  const finalPrompt = visual.prompt || backgroundPrompt;
+  const brandLogoEvidence = visual.brand_logo_evidence || visual.brand_logo_validation;
+  const provenance = {
+    generation_gateway: "social_reference_backed_branded_image_v1",
+    visual_mode: "AI_VISUAL_WITH_EXACT_OVERLAY",
+    background_generation_method: "openai_images_edit_reference",
+    authentic_product_compositor: visual.authentic_product_composition?.renderer || null,
+    product_pixels_generated_by_ai: visual.authentic_product_composition?.product_pixels_generated_by_ai,
+    product_packaging_editing_performed: visual.authentic_product_composition?.packaging_editing_performed,
+    post_generation_logo_overlay_applied: false,
+    logo_fallback_applied: false,
+  };
 
   return {
     content_type: "single_image",
     cta_text: ctaText,
     primary_asset_url: output.public_url,
     asset_urls: [output.public_url],
-    source_image_url: reference.source_url,
+    source_image_url: referenceUrl,
     source_image_checksum_sha256: referenceChecksum,
-    source_image_mime_type: reference.mime_type,
-    source_image_dimensions: { width: reference.width, height: reference.height },
-    provider: settings.campaign_ai_provider,
-    model: settings.campaign_ai_model,
+    source_image_mime_type: visual.reference_image_mime_type,
+    source_image_dimensions: {
+      width: visual.authentic_product_reference?.width || null,
+      height: visual.authentic_product_reference?.height || null,
+    },
+    provider: imageResult.provider || visual.provider || "openai",
+    model: imageResult.model || visual.model || settings.campaign_ai_model,
     quality: settings.campaign_ai_image_quality || "medium",
-    final_prompt: prompt,
+    final_prompt: finalPrompt,
     checksum_sha256: output.checksum_sha256,
     generated_at: generatedAt,
     prompt_type: promptType,
     image_copy: imageCopy,
     output_dimensions: { width: INSTAGRAM_CANVAS_WIDTH, height: INSTAGRAM_CANVAS_HEIGHT },
+    brand_logo_contract: serializedBrandLogoContract,
+    brand_logo_evidence: brandLogoEvidence,
+    brand_logo_reference: visual.brand_logo_reference || null,
+    provenance,
+    provider_response_id: visual.response_id || null,
+    paid_image_call_count: Number(imageResult.paid_image_call_count || visual.paid_image_call_count || 0),
+    image_usage: imageResult.image_usage || visual.image_usage || null,
+    validation_usage: imageResult.validation_usage || visual.validation_usage || null,
+    usage: imageResult.usage || visual.usage || null,
+    estimated_cost: Number(imageResult.estimated_cost || visual.estimated_cost || 0),
+    cost_currency: imageResult.cost_currency || "USD",
     creative_json: {
-      layout: "required_reference_single_image",
+      layout: "mandatory_ai_baked_logo_authentic_product_single_image",
       generation_mode: "ai_generated",
-      composition_mode: "reference_image_edit",
-      provider: settings.campaign_ai_provider,
-      model: settings.campaign_ai_model,
+      composition_mode: "ai_branded_background_plus_authentic_product_composite",
+      provider: imageResult.provider || visual.provider || "openai",
+      model: imageResult.model || visual.model || settings.campaign_ai_model,
       quality: settings.campaign_ai_image_quality || "medium",
-      source_image_url: reference.source_url,
+      source_image_url: referenceUrl,
       source_image_checksum_sha256: referenceChecksum,
-      final_prompt: prompt,
+      final_prompt: finalPrompt,
       prompt_type: promptType,
       image_copy: imageCopy,
       checksum_sha256: output.checksum_sha256,
       generated_at: generatedAt,
-      slides: [{ type: "single_image", url: output.public_url, prompt }],
+      brand_logo_contract: serializedBrandLogoContract,
+      brand_logo_evidence: brandLogoEvidence,
+      brand_logo_reference: visual.brand_logo_reference || null,
+      provenance,
+      provider_response_id: visual.response_id || null,
+      paid_image_call_count: Number(imageResult.paid_image_call_count || visual.paid_image_call_count || 0),
+      image_usage: imageResult.image_usage || visual.image_usage || null,
+      validation_usage: imageResult.validation_usage || visual.validation_usage || null,
+      usage: imageResult.usage || visual.usage || null,
+      estimated_cost: Number(imageResult.estimated_cost || visual.estimated_cost || 0),
+      cost_currency: imageResult.cost_currency || "USD",
+      authentic_product_reference: visual.authentic_product_reference || null,
+      authentic_product_composition: visual.authentic_product_composition || null,
+      ai_background: visual.ai_background || null,
+      slides: [{
+        type: "single_image",
+        url: output.public_url,
+        prompt: finalPrompt,
+        brand_logo_evidence: brandLogoEvidence,
+        post_generation_logo_overlay_applied: false,
+      }],
     },
   };
 }
@@ -312,7 +506,9 @@ module.exports = {
   generateAiInstagramCreative,
   _private: {
     buildCreativePrompt,
+    buildBrandedBackgroundPrompt,
     buildImageCopy,
+    buildLegacyProductRecommendation,
     buildProductFacts,
     generationSizeForProvider,
     processOutputForInstagram,
@@ -320,5 +516,6 @@ module.exports = {
     replacePromptPlaceholders,
     resolveCreativePrompt,
     resolveReferenceUrl,
+    socialImageSettings,
   },
 };
