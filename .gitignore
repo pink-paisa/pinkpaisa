@@ -37,6 +37,14 @@ pnpm-debug.log*
 frontend-next/lint-report.json
 pinkpaisa-lightsail-deploy.zip
 *.zip
+/output/
+/artifacts/pinkpaisa-logo-concepts/
+/artifacts/pinkpaisa-official-logo/
+/backend-package-upgrade-list.pdf
+
+# Local agent scratch data
+/.agents/
+/.codex-tmp/
 
 # Editor / OS
 .DS_Store
