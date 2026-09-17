@@ -13,7 +13,6 @@ node_modules/
 !*.env.*.example
 
 # Frontend build outputs
-frontend/dist/
 frontend-next/.next/
 frontend-next/out/
 frontend-next/tsconfig.tsbuildinfo
@@ -53,7 +52,3 @@ Thumbs.db
 .vscode/
 .claude/
 *.local.json
-
-# Legacy lockfiles we do not want in the canonical Next frontend
-frontend/bun.lock
-frontend/bun.lockb
